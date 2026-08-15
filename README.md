@@ -98,6 +98,14 @@ sudo bash scripts/install.sh
 
 记忆管理（分区/域/标签中文）· 实体图谱 · 归档管理 · 维护（备份/重建/整合/衰减）· 配置中心 · 中英双语切换
 
+## 设计依据
+
+核心概念的理论来源（推荐阅读顺序）：
+
+- **[Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442)**（Stanford，2023）——记忆流（memory stream）与 **recency × importance × relevance 三因子检索**、反思提炼（reflection）的源头；本系统的加权召回与记忆整合直接源自此
+- **[Memory in the Age of AI Agents: A Survey](https://arxiv.org/abs/2512.13564)**（2025）——AI Agent 记忆领域最新综述，覆盖记忆架构、机制与评测基准
+- **[HiMem: Hierarchical Long-Term Memory for LLM Long-Horizon Agents](https://huggingface.co/papers/2601.06377)**（2026）——分层长期记忆（条目 → 图谱 → 原子）的最新工作，与本系统的记忆层级设计相互印证
+
 ## 致谢与许可
 
 **设计致谢**：本项目的记忆模型分层（原始消息 → 记忆条目 → 图谱 → 记忆原子）、混合检索融合（RRF + 三因子加权）、访问强化、每日衰减、记忆整合、备份迁移等概念体系，来自 **AstrBot 插件 [livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory)（作者 [lxfight](https://github.com/lxfight-s)）**。特此致谢原作者的开源工作与设计沉淀。
