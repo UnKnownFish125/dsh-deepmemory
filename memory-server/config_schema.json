@@ -1,0 +1,392 @@
+{
+  "basic": {
+    "description": "基础连接",
+    "type": "object",
+    "items": {
+      "server_url": {
+        "description": "记忆后端地址",
+        "hint": "memory-server 的 HTTP 地址，可指向远程部署",
+        "type": "string",
+        "default": "http://127.0.0.1:6230"
+      },
+      "workspace": {
+        "description": "工作区标识",
+        "hint": "绑定工作区级记忆的标识；换项目时修改，新记忆写入新工作区",
+        "type": "string",
+        "default": "deepseek-hardness"
+      }
+    }
+  },
+  "scope": {
+    "description": "作用域与隔离",
+    "type": "object",
+    "items": {
+      "default_scope": {
+        "description": "默认记忆作用域",
+        "hint": "新记忆未指定作用域时的归属：会话级 / 工作区级 / 全局共享",
+        "type": "string",
+        "options": [
+          "session",
+          "workspace",
+          "global"
+        ],
+        "default": "workspace"
+      },
+      "use_session_filtering": {
+        "description": "按会话隔离",
+        "hint": "召回时只返回当前会话或共享作用域的记忆",
+        "type": "bool",
+        "default": true
+      },
+      "use_workspace_filtering": {
+        "description": "按工作区隔离",
+        "hint": "召回时工作区记忆必须匹配当前工作区",
+        "type": "bool",
+        "default": true
+      },
+      "use_persona_filtering": {
+        "description": "按人格隔离",
+        "hint": "启用后记忆可按 persona_id 过滤（人格接口预留）",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "injection": {
+    "description": "记忆注入",
+    "type": "object",
+    "items": {
+      "inject_enabled": {
+        "description": "记忆注入总开关",
+        "hint": "关闭后每轮不再向 systemPrompt 注入记忆与状态卡",
+        "type": "bool",
+        "default": true
+      },
+      "inject_card": {
+        "description": "状态卡注入",
+        "hint": "注入工作区状态卡（目标/当前方案/下一步）",
+        "type": "bool",
+        "default": true
+      },
+      "inject_order": {
+        "description": "注入排序",
+        "hint": "systemPrompt 中的位置：0=人格之后，100=工具说明之前",
+        "type": "int",
+        "default": 50
+      }
+    }
+  },
+  "recall_engine": {
+    "description": "记忆召回",
+    "type": "object",
+    "items": {
+      "top_k": {
+        "description": "每轮注入条数",
+        "hint": "每轮对话注入的长期记忆条数；越大信息越全但更占模型注意力",
+        "type": "int",
+        "default": 5
+      },
+      "max_k": {
+        "description": "主动检索最大条数",
+        "hint": "memory_recall 工具单次返回的最大条数",
+        "type": "int",
+        "default": 10
+      },
+      "min_similarity_for_retrieval": {
+        "description": "召回最低相似度",
+        "hint": "低于该余弦相似度的记忆不参与召回（0 表示不过滤）",
+        "type": "float",
+        "default": 0.0
+      },
+      "min_importance_for_retrieval": {
+        "description": "召回最低重要性",
+        "hint": "低于该重要性的记忆不参与召回",
+        "type": "float",
+        "default": 0.0
+      },
+      "recent_memory_count": {
+        "description": "近期记忆保留数",
+        "hint": "为最近写入的记忆保留的召回槽位，避免只按相似度排名",
+        "type": "int",
+        "default": 2
+      },
+      "recent_memory_max_age_hours": {
+        "description": "近期记忆时间窗（小时）",
+        "hint": "多少小时内的记忆视为近期",
+        "type": "int",
+        "default": 72
+      }
+    }
+  },
+  "fusion_strategy": {
+    "description": "检索融合与加权",
+    "type": "object",
+    "items": {
+      "rrf_k": {
+        "description": "RRF 融合参数",
+        "hint": "双路检索（BM25+向量）融合排序的 RRF 常数 k",
+        "type": "int",
+        "default": 60
+      },
+      "alpha": {
+        "description": "相关性权重",
+        "hint": "排序公式中检索相关性的权重（α）",
+        "type": "float",
+        "default": 0.5
+      },
+      "beta": {
+        "description": "重要性权重",
+        "hint": "排序公式中记忆重要性的权重（β）",
+        "type": "float",
+        "default": 0.25
+      },
+      "gamma": {
+        "description": "时间新鲜度权重",
+        "hint": "排序公式中时间新鲜度的权重（γ）",
+        "type": "float",
+        "default": 0.25
+      },
+      "merge_similarity_threshold": {
+        "description": "近重复合并阈值",
+        "hint": "新记忆与已有记忆余弦相似度超过该值时合并而非新增",
+        "type": "float",
+        "default": 0.85
+      },
+      "atom_dedup_threshold": {
+        "description": "原子查重阈值（Jaccard）",
+        "hint": "新原子与同记忆已有原子的分词集合 Jaccard 相似度达到该值即视为重复，强化原原子而非新增",
+        "type": "number",
+        "default": 0.6
+      }
+    }
+  },
+  "reflection_engine": {
+    "description": "记忆生成（自动抽取）",
+    "type": "object",
+    "items": {
+      "extract_enabled": {
+        "description": "自动抽取开关",
+        "hint": "对话累积到阈值后自动用廉价 LLM 抽取长期记忆",
+        "type": "bool",
+        "default": true
+      },
+      "summary_trigger_messages": {
+        "description": "抽取触发消息数",
+        "hint": "累积多少条对话消息触发一次抽取（deepmemory 按消息计数，非轮次）",
+        "type": "int",
+        "default": 4
+      },
+      "extract_model": {
+        "description": "抽取模型名称",
+        "hint": "留空则自动选择最便宜的 chat 模型",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "importance_decay": {
+    "description": "重要性衰减",
+    "type": "object",
+    "items": {
+      "decay_rate": {
+        "description": "每日衰减率",
+        "hint": "记忆重要性每日衰减系数；被召回的记忆衰减更慢（访问强化）",
+        "type": "float",
+        "default": 0.01
+      },
+      "protected_importance_threshold": {
+        "description": "重要记忆保护阈值",
+        "hint": "重要性达到该值的记忆不参与衰减",
+        "type": "float",
+        "default": 0.85
+      }
+    }
+  },
+  "archiving": {
+    "description": "归档与遗忘",
+    "type": "object",
+    "items": {
+      "auto_archive_enabled": {
+        "description": "自动归档开关",
+        "hint": "低重要性且过旧的记忆自动移入归档（不参与召回、可恢复）",
+        "type": "bool",
+        "default": true
+      },
+      "archive_importance_threshold": {
+        "description": "归档重要性阈值",
+        "hint": "衰减后重要性低于该值的记忆可被归档",
+        "type": "float",
+        "default": 0.1
+      },
+      "archive_days_threshold": {
+        "description": "归档天数阈值",
+        "hint": "创建超过该天数的记忆才允许自动归档",
+        "type": "float",
+        "default": 30.0
+      }
+    }
+  },
+  "agent_tools": {
+    "description": "Agent 记忆工具",
+    "type": "object",
+    "items": {
+      "tools_enabled": {
+        "description": "工具总开关",
+        "hint": "关闭后三个记忆工具全部不可用",
+        "type": "bool",
+        "default": true
+      },
+      "enable_recall_tool": {
+        "description": "主动回忆工具",
+        "hint": "提供 memory_recall（按关键词语义召回记忆）",
+        "type": "bool",
+        "default": true
+      },
+      "enable_save_tool": {
+        "description": "主动写入工具",
+        "hint": "提供 memory_save（把偏好/事实/决定写入记忆库）",
+        "type": "bool",
+        "default": true
+      },
+      "enable_briefing_tool": {
+        "description": "子代理简报工具",
+        "hint": "提供 memory_briefing（为子任务生成记忆简报）",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "search_cache": {
+    "description": "检索缓存",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用检索缓存",
+        "hint": "相同查询在 TTL 内直接复用结果，命中不更新访问计数",
+        "type": "boolean",
+        "default": true
+      },
+      "ttl_seconds": {
+        "description": "缓存有效期（秒）",
+        "type": "number",
+        "default": 45
+      },
+      "max_entries": {
+        "description": "缓存条目上限",
+        "type": "number",
+        "default": 256
+      }
+    }
+  },
+  "access_reinforcement": {
+    "description": "访问强化参数组",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用访问强化衰减",
+        "hint": "关闭后衰减不再参考最近访问时间",
+        "type": "boolean",
+        "default": true
+      },
+      "reference_weight": {
+        "description": "访问时间参考权重",
+        "hint": "1.0=完全以最近访问时间为基准（访问越新衰减越慢），0=只看创建时间",
+        "type": "number",
+        "default": 1.0
+      },
+      "protect_importance": {
+        "description": "高重要度保护阈值",
+        "hint": "重要度≥该值的记忆免于衰减",
+        "type": "number",
+        "default": 0.85
+      },
+      "cleanup_importance": {
+        "description": "归档清理重要度阈值",
+        "type": "number",
+        "default": 0.1
+      },
+      "cleanup_days": {
+        "description": "归档清理最小天数",
+        "type": "number",
+        "default": 30
+      },
+      "reinforce_atoms": {
+        "description": "召回时强化原子",
+        "hint": "被召回的活跃原子刷新强化计数并延长 TTL",
+        "type": "boolean",
+        "default": true
+      },
+      "atom_ttl_extension_days": {
+        "description": "原子 TTL 延长天数",
+        "type": "number",
+        "default": 1.0
+      }
+    }
+  },
+  "memory_consolidation": {
+    "description": "记忆库定期整合",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用定期整合",
+        "hint": "整合把高度相似的旧记忆合并为一条规范记忆，碎片化的旧条归档",
+        "type": "boolean",
+        "default": false
+      },
+      "trigger": {
+        "description": "触发方式",
+        "type": "string",
+        "options": [
+          "daily",
+          "manual"
+        ],
+        "default": "daily"
+      },
+      "min_memories_per_group": {
+        "description": "每组最少记忆数",
+        "type": "number",
+        "default": 2
+      },
+      "min_age_days": {
+        "description": "最小记忆年龄（天）",
+        "hint": "只整合创建超过该天数的记忆",
+        "type": "number",
+        "default": 1.0
+      },
+      "max_importance": {
+        "description": "最大重要性",
+        "hint": "只整合重要度不高于该值的记忆，保护重要记忆",
+        "type": "number",
+        "default": 0.5
+      },
+      "max_groups_per_run": {
+        "description": "每次最多整合组数",
+        "type": "number",
+        "default": 5
+      },
+      "semantic_similarity_threshold": {
+        "description": "语义聚类相似度阈值",
+        "type": "number",
+        "default": 0.92
+      },
+      "llm_summarize": {
+        "description": "整合时用 LLM 生成合并摘要",
+        "hint": "开启后插件侧调用模型对每组生成 canonical_summary 再应用；关闭则直接拼接原文",
+        "type": "boolean",
+        "default": false
+      },
+      "llm_provider": {
+        "description": "整合模型 Provider",
+        "hint": "LLM 整合摘要调用的模型提供商",
+        "type": "string",
+        "default": "deepseek-official"
+      },
+      "llm_model": {
+        "description": "整合模型名称",
+        "hint": "留空则自动选择最便宜的 chat 模型",
+        "type": "string",
+        "default": ""
+      }
+    }
+  }
+}

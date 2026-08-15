@@ -1,0 +1,2 @@
+name: 记忆增强模式
+description: 标准编码 Agent + 长期记忆系统（pre-step 语义召回注入、自动抽取、工作区状态卡、/memory 开关，依赖本机 dsh-memory-server）。

@@ -1,0 +1,4 @@
+memory-server/data/
+memory-server/models/
+memory-server/*.pyc
+dist/
