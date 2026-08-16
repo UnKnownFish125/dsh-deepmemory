@@ -46,7 +46,7 @@ done
 | 组件 | 路径 |
 |---|---|
 | memory-server | `/www/deepseek hardness workspace/memory-server/server.py`（systemd: dsh-memory-server, :6230） |
-| web 插件 | `/www/dsh/home/profiles/web/node_modules/dsh-memory-ui/` |
+| web 插件 | `/www/dsh/home/profiles/web/node_modules/dsh-deepmemory/` |
 | agent preset | `/www/dsh/home/.agent-presets/harness-memory.bak-0203/`（注意目录名） |
 | 会话日志 | `/www/dsh/home/sessions/`（每行一个独立 zstd 帧，勿用普通 zstd 重压整文件） |
 | 安全重启 | `/www/scripts/dsh-safe-restart.sh` |

@@ -64,7 +64,7 @@ rm -rf "$TMP"
 step "client.js 转换+渲染验证"
 CTMP=$(mktemp -d "$VERIFY_TMP_ROOT/client-XXXXXX")
 cp "$ROOT/web-plugin/client.js" "$CTMP/client.js"
-"$VENV_PY" "$ROOT/scripts/fix-client-bundle.py" "$CTMP/client.js" dsh-memory-ui >/dev/null 2>&1 || { bad; rm -rf "$CTMP"; }
+"$VENV_PY" "$ROOT/scripts/fix-client-bundle.py" "$CTMP/client.js" dsh-deepmemory >/dev/null 2>&1 || { bad; rm -rf "$CTMP"; }
 CLIENT_JS="$CTMP/client.js" "$NODE" "$HERE/verify/render-check.mjs" >/dev/null 2>&1 && ok || bad
 rm -rf "$CTMP"
 
@@ -104,11 +104,11 @@ else
   for e in "$REAL_HOME"/profiles/web/node_modules/* "$REAL_HOME"/profiles/web/node_modules/.[!.]*; do
     [ -e "$e" ] && ln -s "$e" "$VHOME/profiles/web/node_modules/$(basename "$e")" 2>/dev/null || true
   done
-  # 用待验证的 repo 版 dsh-memory-ui 覆盖（真实目录替换软链，不影响生产）
-  rm -f "$VHOME/profiles/web/node_modules/dsh-memory-ui"
-  mkdir -p "$VHOME/profiles/web/node_modules/dsh-memory-ui"
-  cp "$ROOT/web-plugin/"* "$VHOME/profiles/web/node_modules/dsh-memory-ui/" 2>/dev/null
-  "$VENV_PY" "$ROOT/scripts/fix-client-bundle.py" "$VHOME/profiles/web/node_modules/dsh-memory-ui/client.js" dsh-memory-ui >/dev/null 2>&1 || { bad; rm -rf "$VHOME"; }
+  # 用待验证的 repo 版 dsh-deepmemory 覆盖（真实目录替换软链，不影响生产）
+  rm -f "$VHOME/profiles/web/node_modules/dsh-deepmemory"
+  mkdir -p "$VHOME/profiles/web/node_modules/dsh-deepmemory"
+  cp "$ROOT/web-plugin/"* "$VHOME/profiles/web/node_modules/dsh-deepmemory/" 2>/dev/null
+  "$VENV_PY" "$ROOT/scripts/fix-client-bundle.py" "$VHOME/profiles/web/node_modules/dsh-deepmemory/client.js" dsh-deepmemory >/dev/null 2>&1 || { bad; rm -rf "$VHOME"; }
   # 工作区注册表（供 New Session 使用），sessions 保持为空（新建空会话，不碰生产对话数据）
   mkdir -p "$VHOME/storages"
   [ -f "$REAL_HOME/storages/workspace.json" ] && cp "$REAL_HOME/storages/workspace.json" "$VHOME/storages/"

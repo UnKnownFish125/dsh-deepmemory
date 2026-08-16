@@ -43,7 +43,7 @@
 | 目录 | 说明 |
 |---|---|
 | `memory-server/` | Python 记忆后端（SQLite+FAISS+BM25，HTTP API），systemd 服务 `dsh-memory-server` |
-| `web-plugin/` | DSH web 层插件 `dsh-memory-ui`：同源代理路由 `/mem-api/*` + 对话页「记忆」视图面板 |
+| `web-plugin/` | DSH web 层插件 `dsh-deepmemory`：同源代理路由 `/mem-api/*` + 对话页「记忆」视图面板 |
 | `agent-preset/` | Agent preset「记忆增强模式」：pre-step 注入 + 自动抽取 + 工具 + `/memory` 命令 |
 
 ## 安装 / 升级（一键，幂等）
@@ -56,7 +56,7 @@ sudo bash scripts/install.sh
 或下载 [最新 Release](https://github.com/UnKnownFish125/DeepMemory/releases) 的 `deepmemory-vX.Y.Z.tar.gz` 解压安装。install.sh 重复执行安全（幂等）：
 
 1. **memory-server**：同步源码（排除运行时数据，绝不覆盖已部署的 `data/`）→ 写 systemd unit → 重启 → 健康检查
-2. **web 插件**：复制 `dsh-memory-ui` → `profiles/web/package.json` 的 bundles 幂等注册 → **client.js 自动转换为 `__ModuleLoader__` 格式**（无需手工）
+2. **web 插件**：复制 `dsh-deepmemory` → `profiles/web/package.json` 的 bundles 幂等注册 → **client.js 自动转换为 `__ModuleLoader__` 格式**（无需手工）
 3. **agent preset**：复制 `harness-memory` 到 `${DSH_HOME}/.agent-presets/`——用该 preset 的会话重启后**自动加载记忆插件**，无需 define+run 动态插件
 
 脚本最后打印 dsh web 重启清单（不自动重启 web，安全交给管理员）。环境变量可覆盖：`DSH_HOME` / `APP_DIR` / `VENV_PY`。
@@ -67,8 +67,8 @@ sudo bash scripts/install.sh
    - 依赖：fastembed(bge-small-zh-v1.5, 512维)、faiss-cpu、jieba
    - 模型下载走镜像：`HF_ENDPOINT=https://hf-mirror.com`
    - systemd unit：`dsh-memory-server.service`
-2. **web 插件**：放入 `profiles/web/node_modules/dsh-memory-ui/`，
-   `profiles/web/package.json` 的 `dsh.profile.bundles` 加入 `"dsh-memory-ui"`
+2. **web 插件**：放入 `profiles/web/node_modules/dsh-deepmemory/`，
+   `profiles/web/package.json` 的 `dsh.profile.bundles` 加入 `"dsh-deepmemory"`
 3. **agent preset**：目录放至 `${DSH_HOME}/.agent-presets/harness-memory/`
 
 ## 记忆模型（对齐 AstrBot livingmemory 策略）
@@ -94,7 +94,7 @@ sudo bash scripts/install.sh
 | `POST /v1/backups/create` `GET /v1/backups/list` `POST /v1/backups/restore` `DELETE /v1/backups/<name>` | 备份管理 |
 | `GET/POST /v1/config-schema` `/v1/config` | 配置中心（10 组 38 项） |
 
-## WebUI（dsh-memory-ui「记忆」视图）
+## WebUI（dsh-deepmemory「记忆」视图）
 
 记忆管理（分区/域/标签中文）· 实体图谱 · 归档管理 · 维护（备份/重建/整合/衰减）· 配置中心 · 中英双语切换
 

@@ -4,7 +4,7 @@
 # 用法: sudo bash install.sh
 # 完成三件事：
 #   1. memory-server     -> 同步源码 + 安装 systemd unit + 重启 + 健康检查
-#   2. web 插件 UI       -> 复制 dsh-memory-ui + bundles 注册 + client.js 自动转换
+#   2. web 插件 UI       -> 复制 dsh-deepmemory + bundles 注册 + client.js 自动转换
 #   3. agent preset      -> 复制 harness-memory（新会话免动态插件，重启后自动加载）
 # 最后输出 dsh web 重启清单（本脚本不自动重启 dsh web，安全起见由管理员执行）。
 set -euo pipefail
@@ -28,7 +28,7 @@ DSH_HOME="${DSH_HOME:-${HOME}/.dsh}"
 APP_DIR="${APP_DIR:-/www/deepseek hardness workspace}"
 VENV_PY="${VENV_PY:-/opt/AstrBot/venv/bin/python3}"
 WEB_PROFILE="${DSH_HOME}/profiles/web"
-PLUGIN_DIR="${WEB_PROFILE}/node_modules/dsh-memory-ui"
+PLUGIN_DIR="${WEB_PROFILE}/node_modules/dsh-deepmemory"
 PRESET_DIR="${DSH_HOME}/.agent-presets/harness-memory"
 SERVER_DIR="${APP_DIR}/memory-server"
 UNIT_FILE="/etc/systemd/system/dsh-memory-server.service"
@@ -105,12 +105,12 @@ p = sys.argv[1]
 data = json.load(open(p, encoding='utf-8'))
 prof = data.setdefault('dsh', {}).setdefault('profile', {})
 bundles = prof.setdefault('bundles', [])
-if 'dsh-memory-ui' not in bundles:
-    bundles.append('dsh-memory-ui')
+if 'dsh-deepmemory' not in bundles:
+    bundles.append('dsh-deepmemory')
     json.dump(data, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
-    print('   bundles 已加入 dsh-memory-ui')
+    print('   bundles 已加入 dsh-deepmemory')
 else:
-    print('   bundles 已含 dsh-memory-ui（跳过）')
+    print('   bundles 已含 dsh-deepmemory（跳过）')
 PY
 else
   warn "   未找到 ${PKG_JSON}，跳过 bundles 注册"

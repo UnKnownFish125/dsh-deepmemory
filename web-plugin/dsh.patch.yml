@@ -1,6 +1,6 @@
-# The dsh-memory-ui bundle patch: registers the memory UI surface plugin
+# The dsh-deepmemory bundle patch: registers the memory UI surface plugin
 # (host half: /mem-api proxy to the local memory-server; client half: the
 # "记忆" view tab in the conversation view ring).
 - insert:
     - id: memory-ui
-      name: 'dsh-memory-ui'
+      name: 'dsh-deepmemory'

@@ -29,7 +29,7 @@ curl -X POST http://127.0.0.1:6230/v1/settings/set -H 'Content-Type: application
 | 组件 | 路径 | 生效时机 |
 |---|---|---|
 | 记忆后端 | `memory-server/server.py`（systemd: dsh-memory-server） | 即时（systemctl restart dsh-memory-server，不影响 Web） |
-| Web 面板 | `profiles/web/node_modules/dsh-memory-ui/`，`profiles/web/package.json` 的 `dsh.profile.bundles` 加 `"dsh-memory-ui"` | **重启 dsh web** |
+| Web 面板 | `profiles/web/node_modules/dsh-deepmemory/`，`profiles/web/package.json` 的 `dsh.profile.bundles` 加 `"dsh-deepmemory"` | **重启 dsh web** |
 | Agent 记忆 | `${DSH_HOME}/.agent-presets/harness-memory/`（含 memory-plugin/） | **新建会话时选该 preset** |
 
 ## 三、新环境部署清单
@@ -37,7 +37,7 @@ curl -X POST http://127.0.0.1:6230/v1/settings/set -H 'Content-Type: application
 1. 拷贝 `memory-server/`，安装依赖（fastembed/faiss-cpu/jieba/zstandard），
    设置 `HF_ENDPOINT=https://hf-mirror.com` 下载 embedding 模型（bge-small-zh-v1.5）
 2. 注册 systemd 服务 `dsh-memory-server.service`（见 memory-server/README.md）
-3. 拷贝 `web-plugin/` 到 `profiles/web/node_modules/dsh-memory-ui/`，bundles 加行
+3. 拷贝 `web-plugin/` 到 `profiles/web/node_modules/dsh-deepmemory/`，bundles 加行
 4. 拷贝 `agent-preset/` 到 `${DSH_HOME}/.agent-presets/harness-memory/`
 5. 按第一节改配置（workspace/server_url 等）
 6. 重启 dsh web（**必须走安全脚本**，见 docs/operational-notes.md）
@@ -45,7 +45,7 @@ curl -X POST http://127.0.0.1:6230/v1/settings/set -H 'Content-Type: application
 
 ## 四、环境适配注意
 
-- **插件内部命名**：统一为 `deepmemory`；包名/目录名保持 `dsh-memory-ui`（挂载标识，勿改）
+- **插件内部命名**：统一为 `deepmemory`；包名/目录名保持 `dsh-deepmemory`（挂载标识，勿改）
 - **会话开关**：per-session 开关存 `session_enabled:<sessionId>`（settings 表）
 - **嵌入模型**：bge-small-zh-v1.5（512 维）；更换模型需重建 FAISS 索引
 - **端口**：memory-server 默认 6230，`MEMORY_SERVER_PORT` 环境变量可改
@@ -56,7 +56,7 @@ curl -X POST http://127.0.0.1:6230/v1/settings/set -H 'Content-Type: application
 ```bash
 curl -s http://127.0.0.1:6230/v1/health            # 后端健康
 curl -s http://127.0.0.1:3081/mem-api/v1/health    # 同源代理
-curl -s http://127.0.0.1:3081/ | grep -c dsh-memory-ui  # web 插件在 boot 中
+curl -s http://127.0.0.1:3081/ | grep -c dsh-deepmemory  # web 插件在 boot 中
 ```
 
 - Web：对话页「记忆」tab 出现（第二位），面板可增删改查
