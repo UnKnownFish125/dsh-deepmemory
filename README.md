@@ -49,11 +49,11 @@
 ## 安装 / 升级（一键，幂等）
 
 ```bash
-git clone https://github.com/UnKnownFish125/DeepMemory.git && cd DeepMemory
+git clone https://github.com/UnKnownFish125/dsh-deepmemory.git && cd dsh-deepmemory
 sudo bash scripts/install.sh
 ```
 
-或下载 [最新 Release](https://github.com/UnKnownFish125/DeepMemory/releases) 的 `deepmemory-vX.Y.Z.tar.gz` 解压安装。install.sh 重复执行安全（幂等）：
+或下载 [最新 Release](https://github.com/UnKnownFish125/dsh-deepmemory/releases) 的 `deepmemory-vX.Y.Z.tar.gz` 解压安装。install.sh 重复执行安全（幂等）：
 
 1. **memory-server**：同步源码（排除运行时数据，绝不覆盖已部署的 `data/`）→ 写 systemd unit → 重启 → 健康检查
 2. **web 插件**：复制 `dsh-deepmemory` → `profiles/web/package.json` 的 bundles 幂等注册 → **client.js 自动转换为 `__ModuleLoader__` 格式**（无需手工）

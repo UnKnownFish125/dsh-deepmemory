@@ -5,9 +5,9 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/UnKnownFish125/DeepMemory.git"
+    "url": "git+https://github.com/UnKnownFish125/dsh-deepmemory.git"
   },
-  "homepage": "https://github.com/UnKnownFish125/DeepMemory",
+  "homepage": "https://github.com/UnKnownFish125/dsh-deepmemory",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
