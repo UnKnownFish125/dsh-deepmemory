@@ -1,13 +1,26 @@
 {
   "name": "dsh-memory-ui",
   "version": "0.1.0",
-  "private": true,
+  "description": "DeepSeek Harness 长期记忆系统 Web 插件：记忆面板、实体图谱、归档维护、配置中心（设计对齐 AstrBot livingmemory）",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UnKnownFish125/DeepMemory.git"
+  },
+  "homepage": "https://github.com/UnKnownFish125/DeepMemory",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./dsh.patch.yml": "./dsh.patch.yml",
     "./package.json": "./package.json"
   },
+  "files": [
+    "index.js",
+    "client.js",
+    "dsh.patch.yml",
+    "package.json"
+  ],
+  "license": "AGPL-3.0",
   "dsh": {
     "client": {
       "inject": [
