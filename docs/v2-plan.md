@@ -17,19 +17,39 @@ deepmemory v2 不以“保存更多聊天”为目标，而是让记忆承担远
 5. 状态卡和任务看板能跨会话恢复，并与 DeepSeek Harness 子 agent 编排对齐。
 6. 重要阈值和评分权重尽量配置化；安全边界不可被普通配置绕过。
 
-## 2. 模式边界
+## 2. Preset 与模式边界
 
-v2 当前只实现两种模式。
+v2 使用不同的 DeepSeek Harness agent preset 承载不同运行边界，不在同一个 preset 内依赖运行时自动猜测模式。
 
-### 2.1 任务模式
+当前规划三种 preset：
+
+| Preset | 用途 | 默认能力 |
+|---|---|---|
+| `task` | 工作模式 | 完整工具、plan、子 agent、workflow、任务看板、任务过程记忆 |
+| `daily` | 日常模式 | 轻量问答、复习、求教、日常状态卡和短期记忆 |
+| `blank` | 第三方子插件模板 | 最小 Harness agent 骨架、插件挂载点、可配置预算；不预装 deepmemory 业务逻辑 |
+
+三个 preset 可以共享同一个 memory-server 和持久化后端，但每个 preset 独立声明工具、状态卡投影、记忆注入范围和上下文预算。preset 只保存固定行为契约和能力组成，不保存某个会话的任务状态。
+
+### 2.1 任务模式（`task` preset）
 
 用于开发、部署、项目推进、持续规划和需要执行验证的工作。任务模式拥有对话状态卡、任务看板、过程记忆和子任务编排。
 
-### 2.2 日常模式
+### 2.2 日常模式（`daily` preset）
 
 作为普通问答、求教、临时查询和泛用对话的默认模式。日常模式拥有更容易变化的轻量状态卡，用于维持短期话题和临时事项，但不自动建立生活画像。
 
-### 2.3 延后范围
+### 2.3 第三方子插件模板（`blank` preset）
+
+仓库提供可复制、可修改的空白模板：`agent-preset/blank-template/`。
+
+模板只包含：persona 和 agent instructions 的最小入口、可选工具的挂载位置、一个相对路径插件挂载点、preset 级上下文预算配置入口，以及关于 host plane、realm、工具 schema 和部署方式的注释。
+
+模板不包含 deepmemory 的记忆注入、自动抽取、状态卡、任务看板、子 agent、workflow、Ralph 或外部编程 provider。
+
+第三方开发者复制模板后，只需替换 preset 名称、persona、插件入口和工具组；自己的插件可以通过 Harness 运行时 API 接入服务，也可以把静态工具直接写进 preset。模板的预算配置只提供默认入口，不限制子插件自行定义更细的预算策略。
+
+### 2.4 延后范围
 
 生活模式与生活画像卡方案保留，包括当前状态、最近发生、当前牵挂、稳定偏好与边界、近期事项；本轮 v2 不实现，后续单独规划。
 
@@ -51,6 +71,8 @@ v2 当前只实现两种模式。
 ```
 
 自动注入与主动召回分离：自动注入只选择当前有效、高可信、非敏感且能帮助当前回答的内容；`memory_recall` 负责在细节不足时逐层深挖。
+
+最近原始消息直接使用 Harness session surface，不由 deepmemory 复制一份。其余远距离信息由状态卡、任务看板摘要和记忆按预算补全。
 
 ## 4. 信息载体及职责
 
@@ -333,7 +355,7 @@ v2 当前只实现两种模式。
 
 ## 14. 配置原则
 
-可调参数尽量通过配置 schema 暴露，至少包括：
+可调参数尽量通过配置 schema 暴露，至少包括。预算属于 preset 级配置，`task`、`daily` 和 `blank` 可以分别覆盖默认值：
 
 ```yaml
 topic:
@@ -355,6 +377,14 @@ recall:
   cold_on_insufficient: true
   archive_on_insufficient: true
   # 候选数量、结果数量和上下文占比待后续讨论
+
+presets:
+  task:
+    budget_profile: task-default
+  daily:
+    budget_profile: daily-default
+  blank:
+    budget_profile: blank-default
 
 sensitive:
   approval_required: true
@@ -388,11 +418,12 @@ P1 先打通 server 与 preset 插件主链，不做完整 UI 重构。
 - [ ] 实现记忆准入、生命周期迁移、冷记忆恢复和类型强化上限。
 - [ ] 实现敏感写入拦截、三次/30 分钟授权和展开审计。
 - [ ] 实现分层检索骨架：查询理解、硬过滤、多路候选、精排和逐级扩展。
+- [ ] 提供 `task`、`daily` 两套正式 preset 的差异化入口，以及 `blank-template` 第三方开发模板。
 - [ ] 暴露任务、状态卡、记忆状态、生命周期、争议确认和 recall 所需 API。
 
 ### 15.2 Preset 插件
 
-- [ ] 识别任务模式与日常模式，维护对应状态卡。
+- [ ] 根据所选 preset 维护对应状态卡，不在运行时自动猜测 task/daily。
 - [ ] 每轮回复结束生成一组过程概要并关联完整 Harness 轨迹；按准入规则决定是否持久化。
 - [ ] 捕获主 agent 与子 agent 编排关系，子任务结果经主 agent 校验后回写。
 - [ ] 按上下文预算组装状态卡、看板和活跃记忆；具体比例待后续确认。

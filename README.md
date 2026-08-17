@@ -15,7 +15,7 @@
 - **生命周期管理**：每日重要性衰减（访问强化、保护阈值）、原子 TTL、归档软删除、快照备份、索引重建、记忆整合（可选 LLM 摘要）
 - **原文追溯**：记忆条目保留抽取原文切片 + 来源会话 id
 - **WebUI**：记忆管理面板（分区/域手动调整、中英双语）、实体图谱、归档管理、维护（备份/重建/整合/衰减）、配置中心（12 组参数）
-- **三种预设形态**：agent preset（重启自动加载）、动态插件（临时挂载）、web bundle（HMR 热更新）
+- **三种运行 preset**：`task` 工作模式、`daily` 日常模式、`blank-template` 第三方子插件开发模板；另有动态插件和 web bundle 形态
 
 ## 架构
 
@@ -44,7 +44,7 @@
 |---|---|
 | `memory-server/` | Python 记忆后端（SQLite+FAISS+BM25，HTTP API），systemd 服务 `dsh-memory-server` |
 | `web-plugin/` | DSH web 层插件 `dsh-deepmemory`：同源代理路由 `/mem-api/*` + 对话页「记忆」视图面板 |
-| `agent-preset/` | Agent preset「记忆增强模式」：pre-step 注入 + 自动抽取 + 工具 + `/memory` 命令 |
+| `agent-preset/` | Agent preset：工作/日常模式方案，以及 `blank-template/` 第三方子插件空白模板 |
 
 ## 安装 / 升级（一键，幂等）
 

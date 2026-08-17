@@ -1,0 +1,2 @@
+name: DeepSeek Harness 子插件空白模板
+description: 可复制修改的最小 Agent preset；不包含 deepmemory 业务逻辑，供第三方开发子插件使用。

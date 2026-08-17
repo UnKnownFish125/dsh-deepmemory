@@ -1,0 +1,73 @@
+# Blank DeepSeek Harness agent preset.
+# Copy this directory before adding product-specific tools or plugins.
+#
+# Keep session/task state out of this file. The preset is a capability template;
+# session state belongs to the runtime and persistent services.
+
+# -- identity ---------------------------------------------------------------
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are a configurable DeepSeek Harness agent powered by the {{model}} model.
+      Your working directory is {{cwd}}.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# -- optional tools ---------------------------------------------------------
+# Uncomment or add only the tools your plugin needs. Host-plane registries such
+# as tools, jobs, and subagents must not be reimplemented inside this preset.
+
+# - id: tool-bash
+#   name: '@deepseek-ai/dsh-tool-bash'
+
+# - id: tool-fs
+#   name: '@deepseek-ai/dsh-tool-fs'
+
+# - id: tool-fs-search
+#   name: '@deepseek-ai/dsh-tool-fs-search'
+
+# - id: tool-ask-user
+#   name: '@deepseek-ai/dsh-tool-ask-user'
+
+# -- preset-local extension point ------------------------------------------
+# Replace this relative path with the entry point of your own plugin.
+# Keep service providers in an isolated realm when their lifetime is preset-local.
+
+- id: plugin-entry
+  name: './plugin/plugin.js'
+
+# -- optional runtime group -------------------------------------------------
+# Add a group only when the plugin actually needs a preset-local service.
+
+# - id: plugin-runtime
+#   name: cordis:group
+#   group: true
+#   isolate:
+#     pluginRuntime: true
+#   config:
+#     - id: plugin-service
+#       name: './plugin/service.js'
+
+# -- configurable context budget -------------------------------------------
+# These are plugin-owned policy defaults, not the model context window.
+# Resolve model capacity through ctx.llm.resolveModelInfo().context and current
+# request pressure through ctx.tokenMeter.
+
+# deepmemory:
+#   context:
+#     recent_turns: 6
+#     target_ratio: 0.50
+#     hard_ratio: 0.80
+#     allocation:
+#       recent_messages: 0.60
+#       plugin_state: 0.15
+#       active_memory: 0.10
+#       recall_reserve: 0.15
+
+# -- subagents and workflows -----------------------------------------------
+# Deliberately absent. Enable only with a bounded delegation contract and a
+# clear primary-agent validation rule for child results.
