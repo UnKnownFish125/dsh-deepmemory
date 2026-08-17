@@ -74,6 +74,10 @@ PLUGIN="$ROOT/agent-preset/memory-plugin/plugin-v3.js"
 "$NODE" --input-type=module --check < "$PLUGIN" 2>/dev/null || bad
 PLUGIN_PATH="$PLUGIN" "$NODE" "$HERE/verify/plugin-check.mjs" >/dev/null 2>&1 && ok || bad
 
+# ---------------- 3.1 preset contracts (task/daily/blank) ----------------
+step "preset 契约验证 (task/daily/blank)"
+"$VENV_PY" "$HERE/verify/preset-check.py" >/dev/null 2>&1 && ok || bad
+
 # ---------------- 4. 浏览器模拟（临时 DSH_HOME + 随机端口 + 无头 Chromium） ----------------
 step "浏览器模拟 (临时实例+无头Chromium)"
 WEBPY="${WEBPY:-/opt/AstrBot/venv/bin/python3}"
