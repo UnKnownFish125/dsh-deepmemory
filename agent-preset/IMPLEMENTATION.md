@@ -16,7 +16,7 @@ Created three preset directories under `agent-preset/`:
    - Soft target: 70%, hard limit: 85%
    - Process memory active: 15 days
 
-2. **`agent-preset/daily/`** - Daily Q&A mode  
+2. **`agent-preset/daily/`** - Daily Q&A mode
    - Lightweight tools: bash, filesystem, web, ask-user
    - No delegation: excludes subagents, workflows, todos, Ralph
    - Daily state management: daily state cards, short-term memory, topic suspension
@@ -56,17 +56,23 @@ Key principles:
 
 ### ✅ Static Verification
 
-Created `scripts/verify/preset-check.mjs` to verify:
+Created `scripts/verify/preset-check.py` to verify:
 
 1. **File existence**: preset.yml and agent.cordis.yml for all three presets
-2. **YAML validity**: Basic structure and required fields (name, description)
+2. **YAML validity**: Actual YAML parsing with PyYAML to catch malformed files
 3. **Capability boundaries**:
    - Task: requires subagent, workflow, plan-mode, todo, delegation
-   - Daily: requires memory, forbids subagent/workflow/todo/delegation  
+   - Daily: requires memory, forbids subagent/workflow/todo/delegation
    - Blank: forbids harness-memory
 4. **Memory plugin presence**: Task and daily must have it, blank must not
-5. **Budget configuration**: Task and daily must have complete budget profiles
-6. **Required budget fields**: Preset-specific fields verified (task_state_card, task_board, daily_state_card, etc.)
+5. **Budget configuration**: Task and daily must have complete budget profiles with structured validation
+6. **Budget field validation**:
+   - soft_target_ratio and hard_limit_ratio must be between 0 and 1
+   - soft_target_ratio must be <= hard_limit_ratio
+   - priority must be positive integer and unique across components
+   - ratio must be between 0 and 1
+   - min_tokens must be non-negative integer
+7. **Required budget fields**: Preset-specific fields verified (task_state_card, task_board, daily_state_card, etc.)
 
 Updated `scripts/verify.sh` to run preset contract checks as step 3.1.
 
@@ -83,11 +89,11 @@ Updated `scripts/verify.sh` to run preset contract checks as step 3.1.
 [verify] 全部通过 — 可以进入生产
 ```
 
-All four verification layers passed:
+All verification layers passed:
 1. ✅ Memory server: syntax, isolated instance, API smoke tests
 2. ✅ Web client: ESM transformation, rendering
 3. ✅ Preset plugin: syntax, apply, defineTool format
-4. ✅ Preset contracts: all three presets validated
+4. ✅ Preset contracts: all three presets validated with actual YAML parsing and structured budget validation
 5. ✅ Browser simulation: full integration test
 
 ## File Structure
@@ -116,7 +122,7 @@ scripts/verify/
 ├── plugin-check.mjs               # (existing)
 ├── render-check.mjs               # (existing)
 ├── web-check.py                   # (existing)
-└── preset-check.mjs               # NEW: preset contract verification
+└── preset-check.py                # NEW: preset contract verification with actual YAML parsing
 ```
 
 ## Compatibility
