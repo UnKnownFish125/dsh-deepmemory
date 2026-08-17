@@ -1,0 +1,143 @@
+# Daily preset: lightweight Q&A mode with short-term memory and topic management.
+#
+# This preset is for casual conversation, learning, temporary queries, and
+# general dialogue. It maintains lightweight state cards for short-term topics
+# but does not include task boards, process memory, or heavy orchestration.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are a conversational assistant powered by the {{model}} model.
+      Your working directory is {{cwd}}. You help with daily questions,
+      learning, and casual exploration.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000
+
+# ── long-term memory ────────────────────────────────────────────────────────
+
+# Daily preset uses deepmemory with lightweight topic management and short-term
+# memory. No task board, no subtask orchestration.
+# Budget profile: daily-default (see budget configuration below).
+- id: harness-memory
+  name: '../memory-plugin/plugin-v3.js'
+  config:
+    preset_mode: daily
+    budget_profile: daily-default
+
+# ── budget configuration ────────────────────────────────────────────────────
+
+# Daily preset budget profile: optimized for conversational flow with topic continuity.
+# These are soft targets for memory allocation within the total context window.
+# Hard limits prevent any single component from consuming the entire context.
+#
+# Priority order (highest first):
+#   1. recent_messages (0.60) - maximize immediate conversation flow
+#   2. daily_state_card (0.10) - current topic and suspended topics
+#   3. active_memory (0.20) - semantic recall for continuity
+#   4. recall_reserve (0.10) - buffer for memory_recall tool expansion
+#
+# Token constraints:
+#   - Soft target ratio: 0.60 (allow memory to use up to 60% of context)
+#   - Hard limit ratio: 0.75 (never exceed 75%, lighter than task mode)
+#
+# Note: Daily mode has NO task_board allocation. Ratios don't need to sum to 1.0.
+# Unused budget returns to the pool and is redistributed by priority.
+
+deepmemory:
+  preset_mode: daily
+  budget_profile: daily-default
+  context:
+    soft_target_ratio: 0.60
+    hard_limit_ratio: 0.75
+    priority_allocation:
+      recent_messages:
+        ratio: 0.60
+        priority: 1
+        min_tokens: 2048
+      daily_state_card:
+        ratio: 0.10
+        priority: 2
+        min_tokens: 256
+      active_memory:
+        ratio: 0.20
+        priority: 3
+        min_tokens: 512
+      recall_reserve:
+        ratio: 0.10
+        priority: 4
+        min_tokens: 256
+  lifecycle:
+    daily_active_days: 7
+    task_process_active_days: 15
+    cold_retention_days: 365
+  topic:
+    max_suspended: 3
+    suspended_ttl_hours: 24
+    relation_threshold: 0.60

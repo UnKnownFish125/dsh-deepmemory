@@ -57,16 +57,30 @@
 # Resolve model capacity through ctx.llm.resolveModelInfo().context and current
 # request pressure through ctx.tokenMeter.
 
-# deepmemory:
+# Blank preset budget profile: minimal allocation for third-party plugins.
+# This template does NOT mount deepmemory by default. If your plugin needs
+# memory or state management, define your own budget profile here.
+#
+# Example budget structure (adjust for your plugin's needs):
+#
+# your_plugin:
+#   budget_profile: blank-default
 #   context:
-#     recent_turns: 6
-#     target_ratio: 0.50
-#     hard_ratio: 0.80
-#     allocation:
-#       recent_messages: 0.60
-#       plugin_state: 0.15
-#       active_memory: 0.10
-#       recall_reserve: 0.15
+#     soft_target_ratio: 0.40
+#     hard_limit_ratio: 0.60
+#     priority_allocation:
+#       recent_messages:
+#         ratio: 0.70
+#         priority: 1
+#         min_tokens: 2048
+#       plugin_state:
+#         ratio: 0.15
+#         priority: 2
+#         min_tokens: 256
+#       plugin_reserve:
+#         ratio: 0.15
+#         priority: 3
+#         min_tokens: 512
 
 # -- subagents and workflows -----------------------------------------------
 # Deliberately absent. Enable only with a bounded delegation contract and a
