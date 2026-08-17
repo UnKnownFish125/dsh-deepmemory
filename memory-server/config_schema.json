@@ -323,6 +323,27 @@
       }
     }
   },
+  "sensitive": {
+    "description": "敏感内容保护与临时授权",
+    "type": "object",
+    "items": {
+      "approval_required": {
+        "description": "展开敏感原文前要求当前用户确认",
+        "type": "bool",
+        "default": true
+      },
+      "approval_max_uses": {
+        "description": "单个授权令牌最多展开次数",
+        "type": "int",
+        "default": 3
+      },
+      "approval_ttl_minutes": {
+        "description": "授权令牌有效期（分钟）",
+        "type": "int",
+        "default": 30
+      }
+    }
+  },
   "memory_consolidation": {
     "description": "记忆库定期整合",
     "type": "object",
