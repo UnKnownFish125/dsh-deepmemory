@@ -31,6 +31,7 @@ const I18N = {
     memOn: '记忆已开启', memOff: '记忆已关闭', stateV: '状态卡 v',
     source: '原文', noSource: '（无原文切片）来源会话: ',
     graphDragHint: '拖拽节点布局 · 滚轮缩放 · 空白处拖拽平移 · 悬停高亮关联', graphReset: '重置视图',
+    cardEdit: '编辑', cardSave: '保存', cardCancel: '取消',
   },
   en: {
     panelTitle: 'deepmemory Memory', config: 'Config', graph: 'Graph', archive: 'Archive', maintain: 'Maintain',
@@ -52,6 +53,7 @@ const I18N = {
     memOn: 'Memory enabled', memOff: 'Memory disabled', stateV: 'card v',
     source: 'Source', noSource: '(no source slice) origin session: ',
     graphDragHint: 'Drag nodes · wheel zoom · drag canvas to pan · hover highlights links', graphReset: 'Reset view',
+    cardEdit: 'Edit', cardSave: 'Save', cardCancel: 'Cancel',
   },
 }
 
@@ -624,6 +626,8 @@ export function apply(ctx) {
     const [busy, setBusy] = React.useState(false)
     const [msg, setMsg] = React.useState('')
     const [src, setSrc] = React.useState(null)
+    const [cardEdit, setCardEdit] = React.useState(false)
+    const [cardDraft, setCardDraft] = React.useState(null)
 
     const sid = props && props.sessionId ? String(props.sessionId) : ''
     const dict = I18N[lang] || I18N.zh
@@ -699,6 +703,101 @@ export function apply(ctx) {
     if (card && card.next_steps && card.next_steps.length) cardLines.push({ k: '下一步', v: card.next_steps.join('；') })
     if (card && card.in_progress && card.in_progress.length) cardLines.push({ k: '进行中', v: card.in_progress.join('；') })
 
+    function ListEditor(props) {
+      const items = props.items
+      const setItems = props.setItems
+      const addLabel = props.addLabel
+      return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+        items.map(function (item, i) {
+          return React.createElement('div', { key: String(i), style: { display: 'flex', gap: 6, alignItems: 'center' } },
+            React.createElement('input', {
+              className: 'dsh-mem-input',
+              value: item,
+              onChange: function (e) {
+                setItems(items.map(function (x, j) { return j === i ? e.target.value : x }))
+              },
+            }),
+            React.createElement('button', {
+              className: 'dsh-mem-del', title: t('delete'),
+              onClick: function () { setItems(items.filter(function (_, j) { return j !== i })) },
+            }, '✕'),
+          )
+        }),
+        React.createElement('button', {
+          className: 'dsh-mem-btn', style: { alignSelf: 'flex-start' },
+          onClick: function () { setItems(items.concat([''])) },
+        }, '+ ' + addLabel),
+      )
+    }
+
+    function renderCardEditor() {
+      const d = cardDraft
+      return React.createElement('div', { className: 'dsh-mem-box', style: { borderColor: 'var(--dsw-alias-brand-primary, #4c8dff)' } },
+        React.createElement('div', { className: 'dsh-mem-actions' },
+          React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('stateCard') + ' · ' + t('cardEdit')),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: saveCard, disabled: busy }, t('cardSave')),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setCardEdit(false) } }, t('cardCancel')),
+        ),
+        React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+          React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
+            React.createElement('span', { className: 'dsh-mem-cfg-label' }, '目标'),
+            React.createElement('input', {
+              className: 'dsh-mem-input', value: d.goal,
+              onChange: function (e) { setCardDraft(Object.assign({}, d, { goal: e.target.value })) },
+            }),
+          ),
+          React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
+            React.createElement('span', { className: 'dsh-mem-cfg-label' }, '当前方案'),
+            React.createElement('input', {
+              className: 'dsh-mem-input', value: d.current_plan,
+              onChange: function (e) { setCardDraft(Object.assign({}, d, { current_plan: e.target.value })) },
+            }),
+          ),
+          React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
+            React.createElement('span', { className: 'dsh-mem-cfg-label' }, '关键决定'),
+            React.createElement(ListEditor, { items: d.key_decisions, addLabel: '决定', setItems: function (v) { setCardDraft(Object.assign({}, d, { key_decisions: v })) } }),
+          ),
+          React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
+            React.createElement('span', { className: 'dsh-mem-cfg-label' }, '进行中'),
+            React.createElement(ListEditor, { items: d.in_progress, addLabel: '事项', setItems: function (v) { setCardDraft(Object.assign({}, d, { in_progress: v })) } }),
+          ),
+          React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
+            React.createElement('span', { className: 'dsh-mem-cfg-label' }, '下一步'),
+            React.createElement(ListEditor, { items: d.next_steps, addLabel: '步骤', setItems: function (v) { setCardDraft(Object.assign({}, d, { next_steps: v })) } }),
+          ),
+        ),
+      )
+    }
+
+    function startCardEdit() {
+      setCardDraft({
+        goal: (card && card.goal) || '',
+        current_plan: (card && card.current_plan) || '',
+        key_decisions: (card && card.key_decisions) || [],
+        in_progress: (card && card.in_progress) || [],
+        next_steps: (card && card.next_steps) || [],
+      })
+      setCardEdit(true)
+    }
+
+    async function saveCard() {
+      setBusy(true)
+      const d = cardDraft
+      const res = await api('POST', '/v1/cards/upsert', {
+        workspace_id: WORKSPACE_DEFAULT,
+        goal: d.goal,
+        current_plan: d.current_plan,
+        key_decisions: d.key_decisions.filter(function (x) { return String(x).trim() }),
+        in_progress: d.in_progress.filter(function (x) { return String(x).trim() }),
+        next_steps: d.next_steps.filter(function (x) { return String(x).trim() }),
+      })
+      setBusy(false)
+      if (res && res.error) { setMsg(t('cfgFail') + res.error); return }
+      setCardEdit(false)
+      setMsg(t('saved'))
+      refresh()
+    }
+
     const globalMems = memories.filter(function (m) { return m && m.scope === 'global' })
     const localMems = memories.filter(function (m) { return m && m.scope !== 'global' })
 
@@ -731,15 +830,20 @@ export function apply(ctx) {
         stats ? React.createElement('span', null, t('archived') + ' ' + stats.archived) : null,
         card ? React.createElement('span', null, t('stateV') + card.version) : null,
       ),
-      React.createElement('div', { className: 'dsh-mem-box' },
-        React.createElement('div', { className: 'dsh-mem-title' }, t('stateCard')),
-        cardLines.length ? cardLines.map(function (l) {
-          return React.createElement('div', { key: l.k, className: 'dsh-mem-row' },
-            React.createElement('span', { style: { opacity: .7, whiteSpace: 'nowrap' } }, l.k + ': '),
-            React.createElement('span', { className: 'dsh-mem-content' }, l.v),
-          )
-        }) : React.createElement('div', { style: { opacity: .6 } }, t('noCard')),
-      ),
+      cardEdit
+        ? renderCardEditor()
+        : React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-actions' },
+            React.createElement('div', { className: 'dsh-mem-title', style: { flex: 1 } }, t('stateCard')),
+            React.createElement('button', { className: 'dsh-mem-btn', onClick: startCardEdit }, t('cardEdit')),
+          ),
+          cardLines.length ? cardLines.map(function (l) {
+            return React.createElement('div', { key: l.k, className: 'dsh-mem-row' },
+              React.createElement('span', { style: { opacity: .7, whiteSpace: 'nowrap' } }, l.k + ': '),
+              React.createElement('span', { className: 'dsh-mem-content' }, l.v),
+            )
+          }) : React.createElement('div', { style: { opacity: .6 } }, t('noCard')),
+        ),
       React.createElement('div', { className: 'dsh-mem-box' },
         React.createElement('div', { className: 'dsh-mem-title' }, t('manual')),
         React.createElement('div', { className: 'dsh-mem-form' },
