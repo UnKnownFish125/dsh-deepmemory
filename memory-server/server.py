@@ -38,9 +38,13 @@ import threading
 import time
 import uuid
 from datetime import datetime
+import hashlib
+import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
+
+from sensitive import redact_text, sensitivity_types
 
 import faiss
 import numpy as np
@@ -129,7 +133,9 @@ CREATE TABLE IF NOT EXISTS documents (
   last_access_at REAL,
   access_count INTEGER DEFAULT 0,
   status TEXT DEFAULT 'active',
-  keywords TEXT DEFAULT ''
+  keywords TEXT DEFAULT '',
+  has_sensitive INTEGER DEFAULT 0,
+  sensitive_types TEXT DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS atoms (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,7 +152,9 @@ CREATE TABLE IF NOT EXISTS atoms (
   last_accessed_at REAL,
   last_reinforced_at REAL,
   reinforcement_count INTEGER DEFAULT 0,
-  expires_at REAL DEFAULT 0
+  expires_at REAL DEFAULT 0,
+  has_sensitive INTEGER DEFAULT 0,
+  sensitive_types TEXT DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS graph_nodes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,7 +189,45 @@ CREATE TABLE IF NOT EXISTS sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   memory_id INTEGER NOT NULL,
   content TEXT NOT NULL,
-  created_at REAL
+  created_at REAL,
+  protected_source_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS protected_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id INTEGER,
+  resource_type TEXT NOT NULL DEFAULT 'memory',
+  resource_id TEXT,
+  field_name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  redacted_content TEXT NOT NULL,
+  sensitivity_types TEXT NOT NULL DEFAULT '[]',
+  owner_user_id TEXT DEFAULT '',
+  owner_session_id TEXT DEFAULT '',
+  created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sensitive_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event TEXT NOT NULL,
+  protected_source_id INTEGER,
+  memory_id INTEGER,
+  resource_type TEXT DEFAULT '',
+  resource_id TEXT DEFAULT '',
+  user_id TEXT DEFAULT '',
+  session_id TEXT DEFAULT '',
+  sensitivity_types TEXT DEFAULT '[]',
+  details TEXT DEFAULT '{}',
+  created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sensitive_approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT UNIQUE NOT NULL,
+  user_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  granted_at REAL NOT NULL,
+  expires_at REAL NOT NULL,
+  max_uses INTEGER NOT NULL,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  revoked_at REAL
 );
 CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER PRIMARY KEY,
@@ -197,6 +243,15 @@ def run_migrations():
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_memory ON graph_edges(memory_id)",
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(source_id)",
             "CREATE INDEX IF NOT EXISTS idx_atoms_memory ON atoms(memory_id)",
+        ],
+        3: [
+            "ALTER TABLE documents ADD COLUMN has_sensitive INTEGER DEFAULT 0",
+            "ALTER TABLE documents ADD COLUMN sensitive_types TEXT DEFAULT '[]'",
+            "ALTER TABLE atoms ADD COLUMN has_sensitive INTEGER DEFAULT 0",
+            "ALTER TABLE atoms ADD COLUMN sensitive_types TEXT DEFAULT '[]'",
+            "ALTER TABLE sources ADD COLUMN protected_source_id INTEGER",
+            "CREATE INDEX IF NOT EXISTS idx_protected_sources_resource ON protected_sources(resource_type, resource_id)",
+            "CREATE INDEX IF NOT EXISTS idx_sensitive_audit_source ON sensitive_audit(protected_source_id)",
         ],
     }
     conn = get_conn()
@@ -217,7 +272,13 @@ def run_migrations():
     for version in sorted(migrations):
         if current < version:
             for stmt in migrations[version]:
-                conn.execute(stmt)
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    # v3 columns are present in fresh databases via SCHEMA;
+                    # tolerate the duplicate ALTER when upgrading those DBs.
+                    if not (stmt.startswith("ALTER TABLE") and "duplicate column" in str(exc).lower()):
+                        raise
             conn.execute(
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?,?)",
                 (version, time.time()),
@@ -531,7 +592,15 @@ def search_memories(
             continue
         if persona_id and r["persona_id"] and r["persona_id"] != persona_id:
             continue
-        out.append(r)
+        item = dict(r)
+        if item.get("has_sensitive"):
+            item["sensitive_notice"] = "相关受保护来源存在；默认不展开原文"
+            conn = get_conn()
+            item["protected_source_count"] = conn.execute(
+                "SELECT COUNT(*) c FROM protected_sources WHERE memory_id=?", (item["id"],)
+            ).fetchone()["c"]
+            conn.close()
+        out.append(item)
         if len(out) >= k:
             break
     # update access stats
@@ -565,15 +634,21 @@ def search_memories(
 
 
 def add_memory(payload):
-    content = (payload.get("content") or "").strip()
+    payload = dict(payload or {})
+    clean, records = _sanitize_text_fields(
+        payload,
+        ("content", "key_facts", "persona_summary", "canonical_summary", "keywords"),
+    )
+    content = (clean.get("content") or "").strip()
     if not content:
         raise ValueError("content is required")
     now = time.time()
-    uuid_s = payload.get("uuid") or str(uuid.uuid4())
-    importance = float(payload.get("importance", 0.5) or 0.5)
-    key_facts = payload.get("key_facts") or ""
-    persona_summary = payload.get("persona_summary") or ""
-    canonical_summary = payload.get("canonical_summary") or ""
+    uuid_s = clean.get("uuid") or str(uuid.uuid4())
+    importance = float(clean.get("importance", 0.5) or 0.5)
+    key_facts = clean.get("key_facts") or ""
+    persona_summary = clean.get("persona_summary") or ""
+    canonical_summary = clean.get("canonical_summary") or ""
+    clean = _mark_sensitive(clean, records)
     # 检索文本 = 摘要 + 关键事实，提升检索信息密度（对齐 livingmemory）
     search_text = content + (" " + key_facts if key_facts else "")
     vecs = embed_texts([search_text])
@@ -588,72 +663,97 @@ def add_memory(payload):
             conn.execute(
                 "UPDATE documents SET content=?, key_facts=?, persona_summary=?,"
                 " canonical_summary=?, importance=MAX(importance, ?),"
-                " last_access_at=?, access_count=access_count+1 WHERE id=?",
-                (content, key_facts, persona_summary, canonical_summary, importance, now, top_id),
+                " last_access_at=?, access_count=access_count+1, has_sensitive=?,"
+                " sensitive_types=? WHERE id=?",
+                (content, key_facts, persona_summary, canonical_summary, importance, now,
+                 int(clean.get("has_sensitive") or 0), json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False), top_id),
             )
             conn.commit()
             conn.close()
-            _save_source(top_id, payload.get("source") or "")
+            for field, original, redacted, matches in records:
+                _record_protected(top_id, "memory", top_id, field, original, redacted, matches, payload)
+            _save_source(top_id, payload.get("source") or "", payload)
             bm = get_bm25()
             bm.remove(top_id)
-            bm.add(top_id, search_text + " " + (payload.get("keywords") or ""))
-            return {"id": top_id, "uuid": uuid_s, "merged": True}
+            bm.add(top_id, search_text + " " + (clean.get("keywords") or ""))
+            return {"id": top_id, "uuid": uuid_s, "merged": True,
+                    "sensitive": bool(records), "protected_source_ids": _protected_ids(top_id)}
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO documents (uuid, content, key_facts, persona_summary,"
         " canonical_summary, type, domain, scope, workspace_id, session_id,"
         " persona_id, importance, created_at, last_access_at, access_count,"
-        " status, keywords) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " status, keywords, has_sensitive, sensitive_types) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             uuid_s,
             content,
             key_facts,
             persona_summary,
             canonical_summary,
-            payload.get("type") or "fact",
-            payload.get("domain") or "work",
-            payload.get("scope") or "session",
-            payload.get("workspace_id") or "",
-            payload.get("session_id") or "",
-            payload.get("persona_id") or "",
+            clean.get("type") or "fact",
+            clean.get("domain") or "work",
+            clean.get("scope") or "session",
+            clean.get("workspace_id") or "",
+            clean.get("session_id") or "",
+            clean.get("persona_id") or "",
             importance,
             now,
             now,
             0,
             "active",
-            payload.get("keywords") or "",
+            clean.get("keywords") or "",
+            int(clean.get("has_sensitive") or 0),
+            json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False),
         ),
     )
     doc_id = cur.lastrowid
     conn.commit()
     conn.close()
-    _save_source(doc_id, payload.get("source") or "")
+    protected_ids = []
+    for field, original, redacted, matches in records:
+        protected_ids.append(_record_protected(doc_id, "memory", doc_id, field, original, redacted, matches, payload))
+    protected_ids.extend(_save_source(doc_id, payload.get("source") or "", payload) or [])
     idx = get_index()
     with _index_lock:
         idx.add_with_ids(vec.reshape(1, -1), np.asarray([doc_id], dtype=np.int64))
     save_index()
-    get_bm25().add(doc_id, search_text + " " + (payload.get("keywords") or ""))
-    return {"id": doc_id, "uuid": uuid_s, "merged": False}
+    get_bm25().add(doc_id, search_text + " " + (clean.get("keywords") or ""))
+    return {"id": doc_id, "uuid": uuid_s, "merged": False,
+            "sensitive": bool(records), "protected_source_ids": protected_ids}
 
 
-def _save_source(memory_id, source_text):
+def _protected_ids(memory_id):
+    conn = get_conn()
+    rows = conn.execute("SELECT id FROM protected_sources WHERE memory_id=? ORDER BY id", (int(memory_id),)).fetchall()
+    conn.close()
+    return [row["id"] for row in rows]
+
+
+def _save_source(memory_id, source_text, payload=None):
     """原文保留：高价值记忆的来源消息全文存入 sources 表（审计/回溯用）。"""
     source_text = (source_text or "").strip()
     if not source_text:
-        return
+        return []
+    redacted, matches = redact_text(source_text)
+    protected_id = None
+    if matches:
+        protected_id = _record_protected(memory_id, "memory", memory_id, "source", source_text, redacted, matches, payload)
     conn = get_conn()
     conn.execute(
-        "INSERT INTO sources (memory_id, content, created_at) VALUES (?,?,?)",
-        (int(memory_id), source_text[:8000], time.time()),
+        "INSERT INTO sources (memory_id, content, created_at, protected_source_id) VALUES (?,?,?,?)",
+        (int(memory_id), redacted[:8000], time.time(), protected_id),
     )
     conn.commit()
     conn.close()
+    return [protected_id] if protected_id else []
 
 
 def add_atom(memory_id, payload):
+    payload = dict(payload or {})
+    clean, records = _sanitize_text_fields(payload, ("content", "entities"), resource_type="atom", resource_id=memory_id, memory_id=memory_id)
     now = time.time()
-    ttl = float(payload.get("ttl_days", 30) or 30)
-    content = (payload.get("content") or "").strip()
+    ttl = float(clean.get("ttl_days", 30) or 30)
+    content = (clean.get("content") or "").strip()
     # 原子级查重（livingmemory 对齐）：与同记忆的活跃原子 Jaccard 相似，
     # 超过阈值视为重复 → 强化已有原子（计数+刷新+延长 TTL），不再新增。
     if content:
@@ -681,35 +781,43 @@ def add_atom(memory_id, payload):
                     conn.close()
                     return row["id"]
         conn.close()
+    clean = _mark_sensitive(clean, records)
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO atoms (memory_id, atom_type, content, entities, importance,"
         " confidence, ttl_days, decay_type, status, created_at, last_accessed_at,"
-        " reinforcement_count, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " reinforcement_count, expires_at, has_sensitive, sensitive_types) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             int(memory_id),
-            payload.get("atom_type") or "unknown",
+            clean.get("atom_type") or "unknown",
             content,
-            json.dumps(payload.get("entities") or [], ensure_ascii=False),
-            float(payload.get("importance", 0.5) or 0.5),
-            float(payload.get("confidence", 0.7) or 0.7),
+            json.dumps(clean.get("entities") or [], ensure_ascii=False),
+            float(clean.get("importance", 0.5) or 0.5),
+            float(clean.get("confidence", 0.7) or 0.7),
             ttl,
-            payload.get("decay_type") or "exponential",
+            clean.get("decay_type") or "exponential",
             "active",
             now,
             now,
             0,
             now + ttl * 86400,
+            int(clean.get("has_sensitive") or 0),
+            json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False),
         ),
     )
     aid = cur.lastrowid
     conn.commit()
     conn.close()
+    for field, original, redacted, matches in records:
+        _record_protected(memory_id, "atom", aid, field, original, redacted, matches, payload)
     return aid
 
 
 def add_entity(memory_id, payload):
-    name = (payload.get("name") or "").strip() if isinstance(payload, dict) else ""
+    payload = dict(payload or {}) if isinstance(payload, dict) else {}
+    original_name = (payload.get("name") or "").strip()
+    name, matches = redact_text(original_name)
+    name = name.strip()
     if not name:
         return None
     now = time.time()
@@ -725,6 +833,8 @@ def add_entity(memory_id, payload):
         nid = node["id"]
     conn.commit()
     conn.close()
+    if matches:
+        _record_protected(memory_id, "entity", nid, "name", original_name, name, matches, payload)
     return nid
 
 
@@ -732,7 +842,8 @@ def add_relation(memory_id, payload):
     """新增实体关系边：source/relation/target；节点不存在时自动创建。"""
     src = (payload.get("source") or "").strip() if isinstance(payload, dict) else ""
     dst = (payload.get("target") or "").strip() if isinstance(payload, dict) else ""
-    rel = (payload.get("relation") or "").strip() if isinstance(payload, dict) else ""
+    rel_original = (payload.get("relation") or "").strip() if isinstance(payload, dict) else ""
+    rel, rel_matches = redact_text(rel_original)
     if not src or not dst:
         return None
     sid = add_entity(memory_id, {"name": src})
@@ -753,17 +864,24 @@ def add_relation(memory_id, payload):
     )
     conn.commit()
     conn.close()
+    if rel_matches:
+        _record_protected(memory_id, "relation", cur.lastrowid, "relation", rel_original, rel, rel_matches, payload)
     return cur.lastrowid
 
 
 def get_sources(memory_id):
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, content, created_at FROM sources WHERE memory_id=? ORDER BY id DESC",
+        "SELECT id, content, created_at, protected_source_id FROM sources WHERE memory_id=? ORDER BY id DESC",
         (int(memory_id),),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["protected"] = bool(item.get("protected_source_id"))
+        out.append(item)
+    return out
 
 
 def delete_memory(doc_id):
@@ -787,7 +905,9 @@ def delete_memory(doc_id):
 
 def update_memory(doc_id, payload):
     allowed = ("content", "type", "domain", "scope", "importance", "keywords", "persona_id")
-    fields = {k: payload[k] for k in allowed if k in payload}
+    payload = dict(payload or {})
+    clean, records = _sanitize_text_fields(payload, ("content", "keywords"), resource_id=doc_id, memory_id=doc_id)
+    fields = {k: clean[k] for k in allowed if k in clean}
     if not fields:
         return False
     conn = get_conn()
@@ -795,11 +915,19 @@ def update_memory(doc_id, payload):
     if row is None:
         conn.close()
         return False
+    if records:
+        fields["has_sensitive"] = 1
+        fields["sensitive_types"] = json.dumps(sensitivity_types([m for _, _, _, ms in records for m in ms]), ensure_ascii=False)
+    elif any(key in fields for key in ("content", "keywords")):
+        fields["has_sensitive"] = 0
+        fields["sensitive_types"] = "[]"
     sets = ", ".join(f"{k}=?" for k in fields)
     vals = list(fields.values()) + [doc_id]
     conn.execute(f"UPDATE documents SET {sets} WHERE id=?", vals)
     conn.commit()
     conn.close()
+    for field, original, redacted, matches in records:
+        _record_protected(doc_id, "memory", doc_id, field, original, redacted, matches, payload)
     if "content" in fields:
         content = str(fields["content"])
         vecs = embed_texts([content])
@@ -844,7 +972,8 @@ def add_batch(items):
             _process_attachments(r.get("id"), item)
             results.append(r)
         except Exception as e:
-            results.append({"error": str(e), "content": str(item.get("content", ""))[:80]})
+            redacted_error, _ = redact_text(str(item.get("content", ""))[:80])
+            results.append({"error": redact_text(str(e))[0], "content": redacted_error})
     return {"added": results}
 
 
@@ -862,6 +991,14 @@ def get_card(workspace_id):
             d[key] = json.loads(d.get(key) or "[]")
         except Exception:
             d[key] = []
+    conn = get_conn()
+    protected = conn.execute(
+        "SELECT id FROM protected_sources WHERE resource_type='card' AND resource_id=? ORDER BY id",
+        (str(workspace_id),),
+    ).fetchall()
+    conn.close()
+    d["sensitive"] = bool(protected)
+    d["protected_source_ids"] = [row["id"] for row in protected]
     return d
 
 
@@ -887,6 +1024,208 @@ def set_setting(key, value):
     conn.commit()
     conn.close()
     return {"key": key, "value": value}
+
+
+# ---------------------------------------------------------------- sensitive content
+
+def sensitive_config(key, default):
+    """Read sensitive.* settings while keeping secure defaults on bad values."""
+    value = get_setting("deepmemory.sensitive." + key)
+    if value is None:
+        return default
+    try:
+        if isinstance(default, bool):
+            return bool(value)
+        if isinstance(default, int):
+            return int(value)
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _audit(event, source=None, user_id="", session_id="", details=None):
+    source = source or {}
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO sensitive_audit (event, protected_source_id, memory_id,"
+        " resource_type, resource_id, user_id, session_id, sensitivity_types,"
+        " details, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            event,
+            source.get("id"),
+            source.get("memory_id"),
+            source.get("resource_type") or "",
+            str(source.get("resource_id") or ""),
+            user_id or "",
+            session_id or "",
+            source.get("sensitivity_types") or "[]",
+            json.dumps(details or {}, ensure_ascii=False),
+            time.time(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _record_protected(memory_id, resource_type, resource_id, field_name,
+                      original, redacted, matches, payload=None):
+    """Store an original only in the protected vault and audit its redaction."""
+    if not matches:
+        return None
+    payload = payload or {}
+    types = json.dumps(sensitivity_types(matches), ensure_ascii=False)
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO protected_sources (memory_id, resource_type, resource_id,"
+        " field_name, content, redacted_content, sensitivity_types, owner_user_id,"
+        " owner_session_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            memory_id,
+            resource_type,
+            str(resource_id) if resource_id is not None else "",
+            field_name,
+            str(original),
+            str(redacted),
+            types,
+            str(payload.get("user_id") or ""),
+            str(payload.get("session_id") or ""),
+            time.time(),
+        ),
+    )
+    source_id = cur.lastrowid
+    conn.commit()
+    source = {
+        "id": source_id,
+        "memory_id": memory_id,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "sensitivity_types": types,
+    }
+    _audit(
+        "write_redacted",
+        source,
+        payload.get("user_id"),
+        payload.get("session_id"),
+        {"field": field_name, "match_count": len(matches)},
+    )
+    return source_id
+
+
+def _sanitize_text_fields(payload, fields, resource_type="memory", resource_id=None,
+                          memory_id=None):
+    """Redact text fields and return protected-vault records to create later."""
+    clean = dict(payload)
+    records = []
+    for field in fields:
+        if field not in clean or clean[field] is None:
+            continue
+        original = clean[field]
+        if isinstance(original, str):
+            redacted, matches = redact_text(original)
+            clean[field] = redacted
+        else:
+            original_json = json.dumps(original, ensure_ascii=False)
+            redacted_json, matches = redact_text(original_json)
+            try:
+                clean[field] = json.loads(redacted_json)
+            except (TypeError, ValueError):
+                clean[field] = redacted_json
+        if matches:
+            records.append((field, original, clean[field], matches))
+    return clean, records
+
+
+def _mark_sensitive(obj, records):
+    obj["has_sensitive"] = bool(records)
+    obj["sensitive_types"] = sensitivity_types([m for _, _, _, matches in records for m in matches])
+    return obj
+
+
+def _approval_hash(token):
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def grant_sensitive_approval(user_id, session_id, confirmed):
+    if not confirmed:
+        raise ValueError("explicit user confirmation is required")
+    if not user_id or not session_id:
+        raise ValueError("user_id and session_id are required")
+    now = time.time()
+    ttl_minutes = max(1.0, min(30.0, float(sensitive_config("approval_ttl_minutes", 30))))
+    ttl = ttl_minutes * 60.0
+    max_uses = max(1, min(3, int(sensitive_config("approval_max_uses", 3))))
+    token = secrets.token_urlsafe(32)
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO sensitive_approvals (token_hash, user_id, session_id, granted_at,"
+        " expires_at, max_uses, use_count) VALUES (?,?,?,?,?,?,0)",
+        (_approval_hash(token), str(user_id), str(session_id), now, now + ttl, max_uses),
+    )
+    conn.commit()
+    conn.close()
+    _audit("approval_granted", user_id=user_id, session_id=session_id,
+           details={"max_uses": max_uses, "ttl_minutes": ttl / 60.0})
+    return {"approval_token": token, "expires_at": now + ttl, "max_uses": max_uses}
+
+
+def end_sensitive_session(session_id):
+    if not session_id:
+        return 0
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE sensitive_approvals SET revoked_at=? WHERE session_id=? AND revoked_at IS NULL",
+        (time.time(), str(session_id)),
+    )
+    conn.commit()
+    conn.close()
+    _audit("session_ended", session_id=session_id, details={"revoked": cur.rowcount})
+    return cur.rowcount
+
+
+def _load_protected(source_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM protected_sources WHERE id=?", (int(source_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def expand_sensitive_source(source_id, token, user_id, session_id):
+    source = _load_protected(source_id)
+    if source is None:
+        raise LookupError("protected source not found")
+    if source.get("owner_user_id") and source["owner_user_id"] != str(user_id or ""):
+        _audit("expand_denied", source, user_id, session_id, {"reason": "source_owner_mismatch"})
+        raise PermissionError("protected source belongs to another user")
+    now = time.time()
+    conn = get_conn()
+    approval = conn.execute(
+        "SELECT * FROM sensitive_approvals WHERE token_hash=? AND user_id=? AND session_id=?",
+        (_approval_hash(token), str(user_id or ""), str(session_id or "")),
+    ).fetchone()
+    allowed = bool(approval and not approval["revoked_at"] and approval["expires_at"] > now and approval["use_count"] < approval["max_uses"])
+    if allowed:
+        cur = conn.execute(
+            "UPDATE sensitive_approvals SET use_count=use_count+1 WHERE id=? AND use_count < max_uses"
+            " AND revoked_at IS NULL AND expires_at>?",
+            (approval["id"], now),
+        )
+        allowed = cur.rowcount == 1
+    conn.commit()
+    conn.close()
+    if not allowed:
+        _audit("expand_denied", source, user_id, session_id, {"reason": "invalid_or_expired_approval"})
+        raise PermissionError("valid approval is required")
+    _audit("source_expanded", source, user_id, session_id, {"use": int(approval["use_count"]) + 1})
+    return {"id": source["id"], "memory_id": source["memory_id"], "resource_type": source["resource_type"],
+            "resource_id": source["resource_id"], "field_name": source["field_name"],
+            "content": source["content"], "sensitivity_types": json.loads(source["sensitivity_types"] or "[]")}
+
+
+def list_sensitive_audit(limit=100):
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM sensitive_audit ORDER BY id DESC LIMIT ?", (min(int(limit), 1000),)).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------- config center
@@ -1238,10 +1577,12 @@ def apply_consolidation(groups):
     """
     conn = get_conn()
     done = 0
+    protected_records = []
     for g in groups or []:
         pid = int(g.get("primary_id"))
         archived = [int(x) for x in (g.get("archived_ids") or [])]
-        summary = str(g.get("canonical_summary") or "").strip()
+        original_summary = str(g.get("canonical_summary") or "").strip()
+        summary, summary_matches = redact_text(original_summary)
         row = conn.execute(
             "SELECT canonical_summary FROM documents WHERE id=? AND status='active'", (pid,)
         ).fetchone()
@@ -1255,15 +1596,21 @@ def apply_consolidation(groups):
             summary = "\n".join(str(r["content"])[:300] for r in rows)
         existing = str(row["canonical_summary"] or "")
         conn.execute(
-            "UPDATE documents SET canonical_summary=? WHERE id=?",
-            ((existing + ("\n" if existing else "") + summary)[:4000], pid),
+            "UPDATE documents SET canonical_summary=?, has_sensitive=CASE WHEN ? THEN 1 ELSE has_sensitive END,"
+            " sensitive_types=CASE WHEN ? THEN ? ELSE sensitive_types END WHERE id=?",
+            ((existing + ("\n" if existing else "") + summary)[:4000], bool(summary_matches),
+             bool(summary_matches), json.dumps(sensitivity_types(summary_matches), ensure_ascii=False), pid),
         )
+        if summary_matches:
+            protected_records.append((pid, original_summary, summary, summary_matches, g))
         for mid in archived:
             conn.execute("UPDATE documents SET status='archived' WHERE id=?", (mid,))
             get_bm25().remove(mid)
         done += len(archived)
     conn.commit()
     conn.close()
+    for pid, original, redacted, matches, payload in protected_records:
+        _record_protected(pid, "memory", pid, "canonical_summary", original, redacted, matches, payload)
     return {"merged": done, "groups": len(groups or [])}
 
 
@@ -1301,6 +1648,11 @@ def get_overview(workspace_id=None, session_id=None):
 
 
 def put_card(workspace_id, payload):
+    payload = dict(payload or {})
+    clean, records = _sanitize_text_fields(
+        payload, ("goal", "current_plan", "key_decisions", "in_progress", "next_steps"),
+        resource_type="card", resource_id=workspace_id,
+    )
     now = time.time()
     conn = get_conn()
     old = conn.execute(
@@ -1316,18 +1668,22 @@ def put_card(workspace_id, payload):
         " version=excluded.version, updated_at=excluded.updated_at",
         (
             workspace_id,
-            payload.get("goal") or "",
-            payload.get("current_plan") or "",
-            json.dumps(payload.get("key_decisions") or [], ensure_ascii=False),
-            json.dumps(payload.get("in_progress") or [], ensure_ascii=False),
-            json.dumps(payload.get("next_steps") or [], ensure_ascii=False),
+            clean.get("goal") or "",
+            clean.get("current_plan") or "",
+            json.dumps(clean.get("key_decisions") or [], ensure_ascii=False),
+            json.dumps(clean.get("in_progress") or [], ensure_ascii=False),
+            json.dumps(clean.get("next_steps") or [], ensure_ascii=False),
             version,
             now,
         ),
     )
     conn.commit()
     conn.close()
-    return {"workspace_id": workspace_id, "version": version}
+    protected_ids = []
+    for field, original, redacted, matches in records:
+        protected_ids.append(_record_protected(None, "card", workspace_id, field, original, redacted, matches, payload))
+    return {"workspace_id": workspace_id, "version": version, "sensitive": bool(records),
+            "protected_source_ids": protected_ids}
 
 
 # ---------------------------------------------------------------- http
@@ -1490,6 +1846,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"schema": get_config_schema()})
             if path == "/v1/config":
                 return self._send(200, {"config": get_config_values()})
+            if path == "/v1/sensitive/audit":
+                return self._send(200, {"audit": list_sensitive_audit(int(qs.get("limit", ["100"])[0]))})
+            if path.startswith("/v1/sensitive/sources/"):
+                source = _load_protected(path.rsplit("/", 1)[-1])
+                if source is None:
+                    return self._send(404, {"error": "protected source not found"})
+                return self._send(200, {"source": {"id": source["id"], "memory_id": source["memory_id"],
+                    "resource_type": source["resource_type"], "resource_id": source["resource_id"],
+                    "field_name": source["field_name"], "redacted_content": source["redacted_content"],
+                    "sensitivity_types": json.loads(source["sensitivity_types"] or "[]")}})
             if path.startswith("/v1/settings/"):
                 key = path.rsplit("/", 1)[-1]
                 return self._send(200, {"key": key, "value": get_setting(key)})
@@ -1589,7 +1955,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"backups": list_backups()})
             return self._send(404, {"error": "not found"})
         except Exception as e:
-            return self._send(500, {"error": str(e)})
+            return self._send(500, {"error": redact_text(str(e))[0]})
 
     def do_POST(self):
         try:
@@ -1684,6 +2050,29 @@ class Handler(BaseHTTPRequestHandler):
                             reason=body.get("reason", ""),
                         )})
                 return self._send(404, {"error": "not found"})
+            if path in ("/v1/sensitive/approvals", "/v1/sensitive/approve", "/v1/sensitive/authorize"):
+                body = self._read_body()
+                try:
+                    return self._send(200, grant_sensitive_approval(
+                        body.get("user_id"), body.get("session_id"), body.get("confirmed") is True
+                    ))
+                except ValueError as exc:
+                    return self._send(400, {"error": str(exc)})
+            if path in ("/v1/sensitive/sessions/end", "/v1/sensitive/session/end"):
+                body = self._read_body()
+                return self._send(200, {"revoked": end_sensitive_session(body.get("session_id"))})
+            if path == "/v1/sensitive/expand" or path.startswith("/v1/sensitive/sources/") and path.endswith("/expand"):
+                body = self._read_body()
+                source_id = body.get("source_id")
+                if source_id is None:
+                    source_id = path.split("/")[-2]
+                try:
+                    result = expand_sensitive_source(source_id, body.get("approval_token"), body.get("user_id"), body.get("session_id"))
+                    return self._send(200, {"source": result})
+                except LookupError as exc:
+                    return self._send(404, {"error": str(exc)})
+                except PermissionError as exc:
+                    return self._send(403, {"error": str(exc)})
             if path == "/v1/backups/create":
                 return self._send(200, create_backup())
             if path == "/v1/backups/restore":
@@ -1779,36 +2168,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"query": body.get("query"), "count": len(results), "results": results})
             if path == "/v1/atoms/add":
                 body = self._read_body()
-                now = time.time()
-                conn = get_conn()
-                cur = conn.execute(
-                    "INSERT INTO atoms (memory_id, atom_type, content, entities,"
-                    " importance, confidence, ttl_days, decay_type, status,"
-                    " created_at, last_accessed_at, reinforcement_count, expires_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        int(body.get("memory_id") or 0),
-                        body.get("atom_type") or "unknown",
-                        body.get("content") or "",
-                        json.dumps(body.get("entities") or [], ensure_ascii=False),
-                        float(body.get("importance", 0.5) or 0.5),
-                        float(body.get("confidence", 0.7) or 0.7),
-                        float(body.get("ttl_days", 30) or 30),
-                        body.get("decay_type") or "exponential",
-                        "active",
-                        now,
-                        now,
-                        0,
-                        now + float(body.get("ttl_days", 30) or 30) * 86400,
-                    ),
-                )
-                aid = cur.lastrowid
-                conn.commit()
-                conn.close()
+                aid = add_atom(int(body.get("memory_id") or 0), body)
                 return self._send(200, {"id": aid})
             return self._send(404, {"error": "not found"})
         except Exception as e:
-            return self._send(500, {"error": str(e)})
+            return self._send(500, {"error": redact_text(str(e))[0]})
 
     def do_PUT(self):
         try:
@@ -1833,7 +2197,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200 if ok else 404, {"updated": ok, "id": doc_id})
             return self._send(404, {"error": "not found"})
         except Exception as e:
-            return self._send(500, {"error": str(e)})
+            return self._send(500, {"error": redact_text(str(e))[0]})
 
     def do_DELETE(self):
         try:
@@ -1851,7 +2215,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200 if ok else 404, {"deleted": ok, "id": doc_id})
             return self._send(404, {"error": "not found"})
         except Exception as e:
-            return self._send(500, {"error": str(e)})
+            return self._send(500, {"error": redact_text(str(e))[0]})
 
 
 def main():
