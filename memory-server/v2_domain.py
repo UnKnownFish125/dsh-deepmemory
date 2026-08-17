@@ -500,10 +500,38 @@ class V2Store:
 
     def task_history(self, task_id):
         with self._connect() as conn:
+            exists = conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if exists is None:
+                raise NotFoundError(f"task not found: {task_id}")
             rows = conn.execute(
                 "SELECT * FROM task_events WHERE task_id=? ORDER BY created_at,id", (task_id,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_tasks(self, status=None, parent_task_id=None, limit=100):
+        """Return a bounded task-board view without exposing raw sqlite rows."""
+        clauses, args = [], []
+        if status:
+            if status not in TASK_STATUSES:
+                raise DomainError(f"unknown task status: {status}")
+            clauses.append("status=?")
+            args.append(status)
+        if parent_task_id is not None:
+            clauses.append("parent_task_id=?")
+            args.append(parent_task_id)
+        limit = max(1, min(int(limit), 500))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM tasks{where} ORDER BY created_at DESC LIMIT ?",
+                args + [limit],
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["missing_conditions"] = json.loads(item["missing_conditions"] or "[]")
+            result.append(item)
+        return result
 
     def put_state_card(
         self,
@@ -536,6 +564,8 @@ class V2Store:
                         f"card version conflict: expected {expected_version}, current {row['version']}"
                     )
                 card_id = row["id"]
+                if kind == "task" and task_id is None:
+                    task_id = row["task_id"]
                 version = row["version"] + 1
                 parent_revision_id = row["current_revision_id"]
             else:
@@ -596,6 +626,27 @@ class V2Store:
         result["payload"] = json.loads(result["payload"])
         return result
 
+    def state_card_revisions(self, card_key, kind, limit=100):
+        with self._connect() as conn:
+            card = conn.execute(
+                "SELECT 1 FROM state_cards WHERE card_key=? AND kind=?", (card_key, kind)
+            ).fetchone()
+            if card is None:
+                raise NotFoundError(f"state card not found: {kind}/{card_key}")
+            rows = conn.execute(
+                "SELECT r.* FROM state_card_revisions r "
+                "JOIN state_cards c ON c.id=r.card_id "
+                "WHERE c.card_key=? AND c.kind=? ORDER BY r.version DESC LIMIT ?",
+                (card_key, kind, max(1, min(int(limit), 500))),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for key in ("patch", "before_payload", "after_payload"):
+                item[key] = json.loads(item[key] or "{}")
+            result.append(item)
+        return result
+
     def restore_state_card(self, card_key, kind, revision_id, expected_version, **audit):
         with self._connect() as conn:
             revision = conn.execute(
@@ -631,6 +682,17 @@ class V2Store:
         explicit_execution=False,
     ):
         allowed = {
+            "content",
+            "key_facts",
+            "persona_summary",
+            "canonical_summary",
+            "type",
+            "domain",
+            "scope",
+            "workspace_id",
+            "session_id",
+            "persona_id",
+            "importance",
             "memory_class",
             "storage_tier",
             "decision_status",
@@ -677,7 +739,10 @@ class V2Store:
                 raise ConflictError(
                     f"memory version conflict: expected {expected_version}, current {row['revision_version']}"
                 )
-            before = {key: row[key] for key in allowed}
+            # Test fixtures and pre-v2 installations may have a minimal legacy
+            # documents table; only include columns that actually exist in the
+            # row while preserving the full revision payload on new schemas.
+            before = {key: row[key] for key in allowed if key in row.keys()}
             after = dict(before)
             after.update(changes)
             version = row["revision_version"] + 1
@@ -713,3 +778,105 @@ class V2Store:
                 ),
             )
         return version
+
+    def get_memory(self, memory_id):
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM documents WHERE id=?", (int(memory_id),)).fetchone()
+        if row is None:
+            raise NotFoundError(f"memory not found: {memory_id}")
+        return dict(row)
+
+    def migrate_memory(self, memory_id, target_tier, expected_version, actor="main_agent", reason=""):
+        """Perform one explicit lifecycle hop; callers cannot skip a tier."""
+        row = self.get_memory(memory_id)
+        current = row["storage_tier"]
+        if target_tier not in STORAGE_TIERS:
+            raise DomainError(f"unknown storage tier: {target_tier}")
+        valid = {"active": {"cold"}, "cold": {"archive", "active"}, "archive": set()}
+        if target_tier not in valid[current]:
+            raise InvalidTransition(f"cannot move {current} to {target_tier}")
+        changes = {"storage_tier": target_tier}
+        now = time.time()
+        if current == "active" and target_tier == "cold":
+            if row["memory_class"] not in ("short_term", "process"):
+                raise InvalidTransition("only short_term/process memories may enter cold storage")
+            changes["cold_at"] = now
+        elif current == "cold" and target_tier == "archive":
+            changes["compressed_at"] = now
+            changes["memory_class"] = "compressed_archive"
+        elif current == "cold" and target_tier == "active":
+            changes["memory_class"] = "short_term"
+            changes["cold_at"] = None
+        version = self.update_memory_lifecycle(
+            memory_id, changes, expected_version, actor=actor, reason=reason or f"migrate {current} to {target_tier}",
+        )
+        if target_tier == "archive":
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO memory_archives "
+                    "(id,memory_id,archive_kind,summary,source_refs,period_start,period_end,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), memory_id, "compressed", row["content"],
+                     _json([row["source_ref"]] if row["source_ref"] else []),
+                     row["event_time_start"], row["event_time_end"], now),
+                )
+        return self.get_memory(memory_id) | {"revision_version": version}
+
+    def restore_memory(self, memory_id, expected_version, actor="main_agent", reason=""):
+        return self.migrate_memory(memory_id, "active", expected_version, actor=actor, reason=reason or "restore cold memory")
+
+    def resolve_dispute(self, memory_id, action, expected_version, actor="user", changes=None, replacement_id=None, reason=""):
+        if actor != "user":
+            raise PermissionDenied("only the user may resolve a disputed memory")
+        if action not in ("update", "supersede", "restore"):
+            raise DomainError("action must be update, supersede, or restore")
+        changes = dict(changes or {})
+        changes["disputed"] = 0
+        changes["confirmation_status"] = "confirmed"
+        if action == "supersede":
+            if replacement_id is None:
+                raise DomainError("replacement_id is required to supersede a memory")
+            changes["decision_status"] = "superseded"
+            changes["supersedes_id"] = int(replacement_id)
+        elif action == "restore":
+            changes.setdefault("decision_status", "none")
+        return self.update_memory_lifecycle(
+            memory_id, changes, expected_version, actor=actor,
+            reason=reason or f"user {action} disputed memory",
+        )
+
+    def mark_disputed(self, memory_id, expected_version, actor="main_agent", reason=""):
+        if actor not in MEMORY_ACTORS:
+            raise PermissionDenied(f"unknown memory actor: {actor}")
+        return self.update_memory_lifecycle(
+            memory_id, {"disputed": 1, "decision_status": "pending"}, expected_version,
+            actor=actor, reason=reason or "memory marked disputed",
+        )
+
+    def recall(self, query, expand_to="active", limit=10, include_disputed=True):
+        if not query or not query.strip():
+            raise DomainError("query is required")
+        if expand_to not in STORAGE_TIERS:
+            raise DomainError(f"unknown recall tier: {expand_to}")
+        tiers = STORAGE_TIERS[:STORAGE_TIERS.index(expand_to) + 1]
+        limit = max(1, min(int(limit), 100))
+        pattern = f"%{query.strip()[:200]}%"
+        result = []
+        with self._connect() as conn:
+            for tier in tiers:
+                rows = conn.execute(
+                    "SELECT * FROM documents WHERE storage_tier=? AND "
+                    "(content LIKE ? OR key_facts LIKE ? OR keywords LIKE ?) "
+                    "ORDER BY importance DESC, updated_at DESC, id DESC LIMIT ?",
+                    (tier, pattern, pattern, pattern, limit),
+                ).fetchall()
+                items = []
+                for row in rows:
+                    item = dict(row)
+                    if not include_disputed and item.get("disputed"):
+                        continue
+                    item["dispute_warning"] = bool(item.get("disputed"))
+                    items.append(item)
+                result.append({"tier": tier, "results": items})
+        return {"query": query, "expanded_to": expand_to, "tiers": result,
+                "results": [item for group in result for item in group["results"]]}
