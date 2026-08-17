@@ -37,11 +37,24 @@ import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+from zoneinfo import ZoneInfo
 
 import faiss
 import numpy as np
+
+from v2_domain import (
+    ConflictError,
+    DomainError,
+    InvalidTransition,
+    NotFoundError,
+    PermissionDenied,
+    V2Store,
+    V2_SCHEMA_VERSION,
+    install_v2_schema,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -178,7 +191,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 
 def run_migrations():
-    """Schema 版本迁移框架：当前版本记录于 schema_version 表。"""
+    """Apply backward-compatible, repeatable schema migrations."""
     migrations = {
         2: [
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_memory ON graph_edges(memory_id)",
@@ -200,6 +213,7 @@ def run_migrations():
         )
         conn.commit()
         print("migration: schema v1 基线已应用", flush=True)
+        current = 1
     for version in sorted(migrations):
         if current < version:
             for stmt in migrations[version]:
@@ -210,6 +224,18 @@ def run_migrations():
             )
             conn.commit()
             print(f"migration: schema v{version} 已应用", flush=True)
+            current = version
+    # The v2 domain installer is intentionally run on every startup. Its DDL is
+    # idempotent, so it can also repair a database copied during a partial
+    # migration without renaming or dropping any legacy object.
+    install_v2_schema(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?,?)",
+        (V2_SCHEMA_VERSION, time.time()),
+    )
+    conn.commit()
+    if current < V2_SCHEMA_VERSION:
+        print(f"migration: schema v{V2_SCHEMA_VERSION} 已应用", flush=True)
     conn.close()
 
 
@@ -1323,6 +1349,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        return True
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -1339,11 +1366,96 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length))
 
+    @staticmethod
+    def _v2_times(value):
+        """Expose v2 timestamps consistently as Beijing (+08:00) ISO strings."""
+        if isinstance(value, dict):
+            return {key: Handler._v2_times(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [Handler._v2_times(item) for item in value]
+        return value
+
+    @staticmethod
+    def _v2_obj(value):
+        time_keys = {
+            "created_at", "updated_at", "cold_at", "compressed_at", "lifecycle_expires_at",
+            "event_time_start", "event_time_end", "period_start", "period_end",
+        }
+        if isinstance(value, dict):
+            out = {}
+            for key, item in value.items():
+                if key in time_keys and isinstance(item, (int, float)) and item:
+                    item = datetime.fromtimestamp(item, ZoneInfo("Asia/Shanghai")).isoformat()
+                out[key] = Handler._v2_obj(item)
+            return out
+        if isinstance(value, list):
+            return [Handler._v2_obj(item) for item in value]
+        return value
+
+    def _v2_call(self, operation):
+        try:
+            return self._send(200, self._v2_obj(operation()))
+        except NotFoundError as exc:
+            return self._send(404, {"error": str(exc)})
+        except ConflictError as exc:
+            return self._send(409, {"error": str(exc)})
+        except PermissionDenied as exc:
+            return self._send(403, {"error": str(exc)})
+        except (DomainError, InvalidTransition, ValueError, KeyError, TypeError) as exc:
+            return self._send(400, {"error": str(exc)})
+
+    def _v2_store(self):
+        store = V2Store(DB_PATH)
+        store.migrate()
+        return store
+
+    @staticmethod
+    def _v2_changes(changes):
+        changes = dict(changes or {})
+        time_keys = {"event_time_start", "event_time_end", "lifecycle_expires_at", "cold_at", "compressed_at"}
+        for key in time_keys:
+            value = changes.get(key)
+            if isinstance(value, str) and value.strip():
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+                changes[key] = parsed.timestamp()
+        return changes
+
+    def _v2_get(self, path, qs):
+        parts = [unquote(part) for part in path.strip("/").split("/")]
+        if path == "/v1/v2/tasks":
+            return self._v2_call(lambda: {"tasks": self._v2_store().list_tasks(
+                status=qs.get("status", [None])[0],
+                parent_task_id=qs.get("parent_task_id", [None])[0],
+                limit=qs.get("limit", [100])[0],
+            )})
+        if len(parts) >= 4 and parts[2] == "tasks":
+            task_id = parts[3]
+            store = self._v2_store()
+            if len(parts) == 5 and parts[4] == "history":
+                return self._v2_call(lambda: {"task_id": task_id, "events": store.task_history(task_id)})
+            return self._v2_call(lambda: {"task": store.get_task(task_id)})
+        if len(parts) >= 5 and parts[2] == "cards":
+            kind, card_key = parts[3], parts[4]
+            store = self._v2_store()
+            if len(parts) == 6 and parts[5] == "revisions":
+                return self._v2_call(lambda: {"revisions": store.state_card_revisions(card_key, kind)})
+            return self._v2_call(lambda: {"card": store.get_state_card(card_key, kind)})
+        if len(parts) == 4 and parts[2] == "memories":
+            return self._v2_call(lambda: {"memory": self._v2_store().get_memory(int(parts[3]))})
+        if path == "/v1/v2/recall":
+            return self._send(405, {"error": "recall requires POST"})
+        return None
+
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
             qs = parse_qs(parsed.query)
+            if path.startswith("/v1/v2/"):
+                result = self._v2_get(path, qs)
+                return result if result is not None else self._send(404, {"error": "not found"})
             if path == "/v1/health":
                 return self._send(
                     200,
@@ -1482,6 +1594,96 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             path = urlparse(self.path).path
+            if path.startswith("/v1/v2/"):
+                body = self._read_body()
+                parts = [unquote(part) for part in path.strip("/").split("/")]
+                store = self._v2_store()
+                if path == "/v1/v2/memories":
+                    if not body.get("content"):
+                        return self._send(400, {"error": "content is required"})
+                    created = add_memory(body)
+                    memory_id = int(created["id"])
+                    initial = {
+                        key: body[key] for key in (
+                            "memory_class", "storage_tier", "decision_status", "sensitivity_level",
+                            "time_raw", "time_precision", "time_confidence", "time_inferred",
+                            "event_time_start", "event_time_end", "source_ref", "source_message_id", "trace_id",
+                        ) if key in body
+                    }
+                    if initial:
+                        store.update_memory_lifecycle(memory_id, self._v2_changes(initial), 0,
+                                                      actor=body.get("actor", "main_agent"),
+                                                      reason=body.get("reason", "v2 memory created"))
+                    return self._v2_call(lambda: {"memory": store.get_memory(memory_id)})
+                if path == "/v1/v2/tasks":
+                    if not body.get("title"):
+                        return self._send(400, {"error": "title is required"})
+                    return self._v2_call(lambda: {"task": store.create_task(
+                        body["title"], status=body.get("status", "planned"),
+                        parent_task_id=body.get("parent_task_id"), **{
+                            key: body[key] for key in (
+                                "description", "blocked", "block_reason", "missing_conditions",
+                                "completion_criteria", "source_message_id", "trace_id",
+                            ) if key in body
+                        })})
+                if len(parts) >= 5 and parts[2] == "tasks":
+                    task_id = parts[3]
+                    if parts[4] == "transition":
+                        return self._v2_call(lambda: {"task": store.transition_task(
+                            task_id, body["to_status"], int(body["expected_version"]),
+                            reason=body.get("reason", ""), evidence=body.get("evidence", ""),
+                            actor=body.get("actor", "main_agent"),
+                            source_message_id=body.get("source_message_id", ""), trace_id=body.get("trace_id", ""),
+                        )})
+                    if parts[4] == "blocked":
+                        return self._v2_call(lambda: {"task": store.set_task_blocked(
+                            task_id, bool(body.get("blocked")), int(body["expected_version"]),
+                            reason=body.get("reason", ""), missing_conditions=body.get("missing_conditions", []),
+                            actor=body.get("actor", "main_agent"),
+                        )})
+                if len(parts) >= 5 and parts[2] == "cards" and parts[5:] == ["restore"]:
+                    return self._v2_call(lambda: {"card": store.restore_state_card(
+                        parts[4], parts[3], body["revision_id"], int(body["expected_version"]),
+                        actor=body.get("actor", "main_agent"), reason=body.get("reason", ""),
+                        source_message_id=body.get("source_message_id", ""),
+                        tool_trace_id=body.get("tool_trace_id", ""), subagent_trace_id=body.get("subagent_trace_id", ""),
+                    )})
+                if path == "/v1/v2/recall":
+                    return self._v2_call(lambda: store.recall(
+                        body.get("query", ""), expand_to=body.get("expand_to", "active"),
+                        limit=body.get("limit", 10), include_disputed=body.get("include_disputed", True),
+                    ))
+                if len(parts) >= 5 and parts[2] == "memories":
+                    memory_id = int(parts[3])
+                    if parts[4] == "lifecycle":
+                        return self._v2_call(lambda: {"memory": store.update_memory_lifecycle(
+                            memory_id, self._v2_changes(body.get("changes", {})), int(body["expected_version"]),
+                            actor=body.get("actor", "model"), reason=body.get("reason", ""),
+                            source_message_id=body.get("source_message_id", ""), trace_id=body.get("trace_id", ""),
+                            explicit_execution=bool(body.get("explicit_execution")),
+                        )})
+                    if parts[4] == "migrate":
+                        return self._v2_call(lambda: {"memory": store.migrate_memory(
+                            memory_id, body["target_tier"], int(body["expected_version"]),
+                            actor=body.get("actor", "main_agent"), reason=body.get("reason", ""),
+                        )})
+                    if parts[4] == "restore":
+                        return self._v2_call(lambda: {"memory": store.restore_memory(
+                            memory_id, int(body["expected_version"]), actor=body.get("actor", "main_agent"),
+                            reason=body.get("reason", ""),
+                        )})
+                    if parts[4] == "dispute":
+                        if "action" not in body:
+                            return self._v2_call(lambda: {"revision_version": store.mark_disputed(
+                                memory_id, int(body["expected_version"]), actor=body.get("actor", "main_agent"),
+                                reason=body.get("reason", ""),
+                            )})
+                        return self._v2_call(lambda: {"revision_version": store.resolve_dispute(
+                            memory_id, body["action"], int(body["expected_version"]), actor=body.get("actor", "user"),
+                            changes=body.get("changes"), replacement_id=body.get("replacement_id"),
+                            reason=body.get("reason", ""),
+                        )})
+                return self._send(404, {"error": "not found"})
             if path == "/v1/backups/create":
                 return self._send(200, create_backup())
             if path == "/v1/backups/restore":
@@ -1611,6 +1813,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         try:
             path = urlparse(self.path).path
+            if path.startswith("/v1/v2/"):
+                body = self._read_body()
+                parts = [unquote(part) for part in path.strip("/").split("/")]
+                if len(parts) == 5 and parts[2] == "cards":
+                    return self._v2_call(lambda: {"card": self._v2_store().put_state_card(
+                        parts[4], parts[3], body.get("payload", {}),
+                        expected_version=(int(body["expected_version"]) if body.get("expected_version") is not None else None),
+                        task_id=body.get("task_id"),
+                        actor=body.get("actor", "main_agent"), reason=body.get("reason", ""),
+                        source_message_id=body.get("source_message_id", ""), tool_trace_id=body.get("tool_trace_id", ""),
+                        subagent_trace_id=body.get("subagent_trace_id", ""),
+                    )})
+                return self._send(404, {"error": "not found"})
             if path.startswith("/v1/memories/"):
                 doc_id = int(path.rsplit("/", 1)[-1])
                 body = self._read_body()
