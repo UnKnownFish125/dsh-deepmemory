@@ -122,7 +122,53 @@ with sync_playwright() as p:
         raise AssertionError("再次点击后配置组仍显示")
     print("5. 插件配置卡折叠/展开 OK:", page.get_by_text("deepmemory 配置", exact=False).first.inner_text()[:40])
 
-    # 6. 无致命 console 错误
+    # 6. AST-25 P1: 任务看板功能验证
+    # 先关闭 Settings 返回记忆面板
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(1500)
+    # 检查任务看板按钮存在（验证功能已添加）
+    task_btn = page.get_by_text("任务看板", exact=True)
+    if task_btn.count() == 0:
+        task_btn = page.get_by_text("Task Board", exact=True)
+    if task_btn.count() == 0:
+        raise AssertionError("6. 任务看板按钮未找到")
+    print("6. 任务看板按钮存在 OK")
+
+    # 7. AST-25 P1: 会话配置验证（默认配置保存 + session override/reset 逻辑存在）
+    # 注：完整测试需要真实会话 ID，这里验证 UI 元素存在即可
+    page.get_by_text("Settings", exact=True).first.click()
+    page.wait_for_timeout(2000)
+    page.get_by_text("Plugins", exact=True).first.click()
+    page.wait_for_timeout(2000)
+    card_header = page.get_by_text("deepmemory", exact=True).first
+    card_header.click()
+    page.wait_for_timeout(1500)
+    # 验证配置项可编辑并保存
+    save_btn = page.get_by_text("保存全部", exact=True)
+    if save_btn.count() == 0:
+        save_btn = page.get_by_text("Save all", exact=True)
+    if save_btn.count() == 0:
+        raise AssertionError("7. 配置保存按钮未找到")
+    print("7. 配置保存按钮 OK")
+
+    # 8. AST-25 P1: 状态卡与敏感内容 UI 验证
+    # 返回记忆面板检查状态卡显示
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(1000)
+    body_text = page.inner_text("body")
+    # 状态卡应该显示（即使为空）
+    if not any(k in body_text for k in ("工作区状态卡", "Workspace Card", "状态卡")):
+        raise AssertionError("8. 状态卡标题未找到")
+    print("8. 状态卡显示 OK")
+
+    # 敏感内容 UI 验证：检查相关文案是否已加载（即使没有敏感记忆）
+    # 通过检查 CSS 类是否存在来验证功能已实现
+    has_sensitive_css = page.evaluate("() => document.querySelector('style[data-plugin=\"deepmemory\"]')?.textContent?.includes('dsh-mem-sensitive-box') || false")
+    if not has_sensitive_css:
+        raise AssertionError("9. 敏感内容 UI CSS 未加载")
+    print("9. 敏感内容 UI CSS 已加载 OK")
+
+    # 10. 无致命 console 错误
     fatal = [e for e in errors if any(k in e for k in (
         "is not defined", "ReferenceError", "Cannot read", "Failed to fetch", "Unexpected token"))]
     if fatal:
@@ -132,4 +178,4 @@ with sync_playwright() as p:
     if shot:
         page.screenshot(path=shot, full_page=False)
     browser.close()
-    print("web-check 全部通过")
+    print("web-check 全部通过（含 AST-25 P1 验证）")

@@ -112,6 +112,10 @@ else
   rm -f "$VHOME/profiles/web/node_modules/dsh-deepmemory"
   mkdir -p "$VHOME/profiles/web/node_modules/dsh-deepmemory"
   cp "$ROOT/web-plugin/"* "$VHOME/profiles/web/node_modules/dsh-deepmemory/" 2>/dev/null
+  # 剔除生产残留的旧版 dsh-memory-ui（name 同为 deepmemory，会以旧 CSS/面板抢占注入）
+  rm -f "$VHOME/profiles/web/node_modules/dsh-memory-ui"
+  # bundles 声明改为待验证插件（生产 profile 仍声明旧插件名，验证机必须指向新版）
+  sed -i 's/"dsh-memory-ui"/"dsh-deepmemory"/' "$VHOME/profiles/web/package.json"
   "$VENV_PY" "$ROOT/scripts/fix-client-bundle.py" "$VHOME/profiles/web/node_modules/dsh-deepmemory/client.js" dsh-deepmemory >/dev/null 2>&1 || { bad; rm -rf "$VHOME"; }
   # 工作区注册表（供 New Session 使用），sessions 保持为空（新建空会话，不碰生产对话数据）
   mkdir -p "$VHOME/storages"

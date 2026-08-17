@@ -32,6 +32,13 @@ const I18N = {
     source: '原文', noSource: '（无原文切片）来源会话: ',
     graphDragHint: '拖拽节点布局 · 滚轮缩放 · 空白处拖拽平移 · 悬停高亮关联', graphReset: '重置视图',
     cardEdit: '编辑', cardSave: '保存', cardCancel: '取消',
+    sessionConfig: '会话配置', defaultConfig: '默认配置', override: '覆盖', reset: '重置', overridden: '已覆盖',
+    sensitiveWarning: '此内容含敏感信息，默认脱敏', requestApproval: '请求授权', approving: '授权中…',
+    expand: '展开原文', approvalGranted: '已授权（剩余N次）', approvalExpired: '授权已过期',
+    tasks: '任务看板', taskTitle: '任务标题', taskDesc: '任务描述', taskStatus: '状态',
+    taskCreate: '创建任务', taskEdit: '编辑', taskBlocked: '阻塞', taskUnblock: '解除阻塞',
+    planned: '计划', todo: '待办', inProgress: '进行中', completed: '完成', failed: '失败',
+    blockReason: '阻塞原因', noTasks: '（无任务）', taskTransition: '流转', cardRevisions: '修订历史',
   },
   en: {
     panelTitle: 'deepmemory Memory', config: 'Config', graph: 'Graph', archive: 'Archive', maintain: 'Maintain',
@@ -54,6 +61,13 @@ const I18N = {
     source: 'Source', noSource: '(no source slice) origin session: ',
     graphDragHint: 'Drag nodes · wheel zoom · drag canvas to pan · hover highlights links', graphReset: 'Reset view',
     cardEdit: 'Edit', cardSave: 'Save', cardCancel: 'Cancel',
+    sessionConfig: 'Session Config', defaultConfig: 'Default Config', override: 'Override', reset: 'Reset', overridden: 'Overridden',
+    sensitiveWarning: 'This content contains sensitive info, redacted by default', requestApproval: 'Request Authorization', approving: 'Authorizing…',
+    expand: 'Expand Source', approvalGranted: 'Authorized (N remaining)', approvalExpired: 'Authorization expired',
+    tasks: 'Task Board', taskTitle: 'Task Title', taskDesc: 'Description', taskStatus: 'Status',
+    taskCreate: 'Create Task', taskEdit: 'Edit', taskBlocked: 'Blocked', taskUnblock: 'Unblock',
+    planned: 'Planned', todo: 'To Do', inProgress: 'In Progress', completed: 'Completed', failed: 'Failed',
+    blockReason: 'Block Reason', noTasks: '(no tasks)', taskTransition: 'Transition', cardRevisions: 'Revisions',
   },
 }
 
@@ -108,6 +122,11 @@ const PANEL_CSS = `
 .dsh-mem-pcard-save { appearance:none; font:inherit; cursor:pointer; border:1px solid #0000; border-radius:8px; padding:5px 14px; font-size:13px; line-height:1.5; background:var(--dsw-alias-label-primary); color:var(--dsw-alias-bg-layer-3); }
 .dsh-mem-pcard-save:disabled { opacity:.4; cursor:default; }
 .dsh-mem-pcard-save:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }
+.dsh-mem-cfg-override { display:inline-flex; align-items:center; gap:4px; font-size:11px; opacity:.7; margin-left:8px; }
+.dsh-mem-sensitive-box { background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.08)); border:1px solid rgba(255,140,0,.4); border-radius:6px; padding:8px; margin:6px 0; }
+.dsh-mem-task-row { display:flex; gap:8px; padding:8px; border:1px solid var(--dsw-alias-border-l1); border-radius:6px; margin:6px 0; align-items:center; }
+.dsh-mem-task-row-blocked { border-color:#e05858; background:rgba(224,88,88,.08); }
+
 `
 
 async function api(method, path, body) {
@@ -130,7 +149,6 @@ export function apply(ctx) {
   styleEl.dataset.plugin = 'deepmemory'
   styleEl.textContent = PANEL_CSS
   document.head.appendChild(styleEl)
-  ctx.effect(() => () => styleEl.remove())
 
   function GraphView(props) {
     const t = props.t
@@ -411,15 +429,18 @@ export function apply(ctx) {
   function ConfigView(props) {
     // 插件配置卡片：注册在 设置 → 插件 → 插件配置（web-ui.plugin.item）
     const t = props.t
+    const sessionId = props.sessionId || ''
     const [schema, setSchema] = React.useState(null)
     const [values, setValues] = React.useState({})
     const [loaded, setLoaded] = React.useState(false)
+    const [overrides, setOverrides] = React.useState([])
     const [busy, setBusy] = React.useState(false)
     const [msg, setMsg] = React.useState('')
 
     async function load() {
       const sres = await api('GET', '/v1/config-schema')
-      const vres = await api('GET', '/v1/config')
+      const vres = sessionId ? await api('GET', '/v1/config/session?session_id=' + encodeURIComponent(sessionId)) : await api('GET', '/v1/config')
+      setOverrides(sessionId && vres.overrides ? vres.overrides : [])
       if (sres && sres.schema) setSchema(sres.schema)
       if (vres && vres.config) setValues(vres.config)
       setLoaded(true)
@@ -429,7 +450,9 @@ export function apply(ctx) {
 
     async function save() {
       setBusy(true)
-      const res = await api('POST', '/v1/config', values)
+      const res = sessionId
+        ? await Promise.all(Object.keys(values).map(function (key) { return api('POST', '/v1/config/session/set', { session_id: sessionId, key: key, value: values[key] }) })).then(function (items) { const failed = items.find(function (item) { return item && item.error }); return failed ? { error: failed.error } : { saved: items.length } })
+        : await api('POST', '/v1/config', values)
       setBusy(false)
       if (res && res.error) { setMsg(t('cfgFail') + res.error); return }
       setMsg(t('cfgSaved').replace('N', String(res ? res.saved : 0)))
@@ -437,6 +460,14 @@ export function apply(ctx) {
 
     function setValue(key, v) {
       setValues(function (prev) { const next = Object.assign({}, prev); next[key] = v; return next })
+    }
+
+    async function resetValue(key) {
+      const res = await api('POST', '/v1/config/session/reset', { session_id: sessionId, key: key })
+      if (res && res.error) { setMsg(t('cfgFail') + res.error); return }
+      const fresh = await api('GET', '/v1/config/session?session_id=' + encodeURIComponent(sessionId))
+      if (fresh && fresh.config) setValues(fresh.config)
+      setOverrides(fresh && fresh.overrides ? fresh.overrides : [])
     }
 
     function fieldDefault(spec) {
@@ -524,7 +555,8 @@ export function apply(ctx) {
                   React.createElement('div', { className: 'dsh-mem-pcard-grouptitle' }, g.title),
                   g.fields.map(function (f) {
                     return React.createElement('div', { key: f.key, className: 'dsh-mem-cfg-item' },
-                      React.createElement('span', { className: 'dsh-mem-cfg-label' }, f.spec.description || f.key),
+                      React.createElement('span', { className: 'dsh-mem-cfg-label' }, f.spec.description || f.key,
+                        sessionId && overrides.indexOf(f.key) >= 0 ? React.createElement('button', { className: 'dsh-mem-mini', onClick: function () { resetValue(f.key) } }, t('reset')) : null),
                       f.spec.hint ? React.createElement('span', { className: 'dsh-mem-cfg-hint' }, f.spec.hint) : null,
                       renderField(f.key, f.spec),
                     )
@@ -573,6 +605,7 @@ export function apply(ctx) {
     const onDelete = props.onDelete
     const onUpdate = props.onUpdate
     const onSource = props.onSource
+    const onRequestApproval = props.onRequestApproval
     const src = props.src
     const srcOpen = src && String(src.id) === String(m.id)
     const typeLabels = props.lang === 'en' ? TYPE_EN : TYPE_ZH
@@ -599,7 +632,17 @@ export function apply(ctx) {
           m.importance !== undefined ? React.createElement('span', { className: 'dsh-mem-imp' }, t('importance') + ' ' + Number(m.importance).toFixed(2)) : null,
           React.createElement('button', { className: 'dsh-mem-btn', style: { padding: '0 8px', fontSize: 11 }, onClick: function () { onSource(m.id) } }, t('source')),
         ),
-        srcOpen
+          m.has_sensitive && srcOpen && src.needsAuth
+            ? React.createElement('div', { className: 'dsh-mem-sensitive-box' },
+              React.createElement('div', { style: { marginBottom: 6, opacity: .9 } }, t('sensitiveWarning')),
+              React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: onRequestApproval, disabled: src.requesting }, src.requesting ? t('approving') : t('requestApproval')),
+            )
+            : srcOpen && src.token && !src.loading
+            ? React.createElement('div', { style: { marginTop: 6 } },
+              React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { onSource(m.id, true) } }, t('expand')),
+            )
+            : null,
+          srcOpen
           ? src.loading
             ? React.createElement('div', { style: { opacity: .6 } }, t('loading'))
             : src.text
@@ -611,11 +654,90 @@ export function apply(ctx) {
     )
   }
 
+  function TaskBoardView(props) {
+    const t = props.t
+    const [tasks, setTasks] = React.useState([])
+    const [creating, setCreating] = React.useState(false)
+    const [newTitle, setNewTitle] = React.useState('')
+    const [newDesc, setNewDesc] = React.useState('')
+    const [msg, setMsg] = React.useState('')
+    async function load() {
+      const res = await api('GET', '/v1/v2/tasks?limit=50')
+      if (res && Array.isArray(res.tasks)) setTasks(res.tasks)
+    }
+    React.useEffect(function () { load() }, [])
+    async function createTask() {
+      if (!newTitle.trim()) return
+      const res = await api('POST', '/v1/v2/tasks', { title: newTitle.trim(), description: newDesc.trim(), status: 'todo' })
+      if (res && res.task) { setNewTitle(''); setNewDesc(''); setCreating(false); load(); setMsg(t('saved')) }
+      else setMsg(t('cfgFail') + (res.error || ''))
+    }
+    async function transition(task, toStatus) {
+      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/transition', {
+        to_status: toStatus, expected_version: task.version, reason: 'UI transition'
+      })
+      if (res && res.task) { load(); setMsg(t('saved')) }
+      else setMsg(t('cfgFail') + (res.error || ''))
+    }
+    async function toggleBlocked(task) {
+      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/blocked', {
+        blocked: !task.blocked, expected_version: task.version, reason: task.blocked ? 'unblock' : 'block', missing_conditions: []
+      })
+      if (res && res.task) { load(); setMsg(t('saved')) }
+      else setMsg(t('cfgFail') + (res.error || ''))
+    }
+    const statusMap = { planned: t('planned'), todo: t('todo'), in_progress: t('inProgress'), completed: t('completed'), failed: t('failed') }
+    return React.createElement('div', { className: 'dsh-mem-panel' },
+      React.createElement('div', { className: 'dsh-mem-actions' },
+        React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('tasks')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setCreating(!creating) } }, creating ? t('cardCancel') : t('taskCreate')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: props.onBack }, t('back')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, t('refresh')),
+      ),
+      msg ? React.createElement('div', { style: { opacity: .7 } }, msg) : null,
+      creating ? React.createElement('div', { className: 'dsh-mem-box' },
+        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
+          React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskTitle')),
+          React.createElement('input', { className: 'dsh-mem-input', value: newTitle, onChange: function (e) { setNewTitle(e.target.value) } }),
+        ),
+        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0 } },
+          React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskDesc')),
+          React.createElement('textarea', { className: 'dsh-mem-input', style: { minHeight: 60 }, value: newDesc, onChange: function (e) { setNewDesc(e.target.value) } }),
+        ),
+        React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: createTask }, t('save')),
+      ) : null,
+      React.createElement('div', { className: 'dsh-mem-box' },
+        tasks.length ? tasks.map(function (task) {
+          const canTransition = { planned: ['todo'], todo: ['in_progress'], in_progress: ['completed', 'failed'], completed: [], failed: ['todo', 'in_progress'] }
+          const nextStates = canTransition[task.status] || []
+          return React.createElement('div', { key: task.id, className: 'dsh-mem-task-row' + (task.blocked ? ' dsh-mem-task-row-blocked' : '') },
+            React.createElement('div', { style: { flex: 1 } },
+              React.createElement('div', { style: { fontWeight: 500 } }, task.title),
+              React.createElement('div', { style: { fontSize: 11, opacity: .7, marginTop: 2 } },
+                React.createElement('span', { className: 'dsh-mem-badge' }, statusMap[task.status] || task.status),
+                task.blocked ? React.createElement('span', { style: { marginLeft: 6, color: '#e05858' } }, '🚫 ' + t('taskBlocked')) : null,
+              ),
+            ),
+            React.createElement('button', {
+              className: 'dsh-mem-btn' + (task.blocked ? '' : ' dsh-mem-btn-warn'),
+              onClick: function () { toggleBlocked(task) }
+            }, task.blocked ? t('taskUnblock') : t('taskBlocked')),
+            nextStates.map(function (st) {
+              return React.createElement('button', { key: st, className: 'dsh-mem-btn', onClick: function () { transition(task, st) } }, '→ ' + (statusMap[st] || st))
+            }),
+          )
+        }) : React.createElement('div', { style: { opacity: .6 } }, t('noTasks')),
+      ),
+    )
+  }
+
+
   function MemoryPanel(props) {
     const [view, setView] = React.useState('main')
     const [lang, setLang] = React.useState('zh')
     const [memories, setMemories] = React.useState([])
     const [card, setCard] = React.useState(null)
+    const [revisions, setRevisions] = React.useState([])
     const [stats, setStats] = React.useState(null)
     const [enabled, setEnabled] = React.useState(true)
     const [query, setQuery] = React.useState('')
@@ -633,17 +755,39 @@ export function apply(ctx) {
     const dict = I18N[lang] || I18N.zh
     function t(key) { return dict[key] !== undefined ? dict[key] : key }
 
-    async function openSource(id) {
-      if (src && String(src.id) === String(id)) { setSrc(null); return }
+    async function openSource(id, expand) {
+      if (src && String(src.id) === String(id) && !expand) { setSrc(null); return }
+      if (expand && src && src.token) {
+        const expanded = await api('POST', '/v1/sensitive/expand', { source_id: src.sourceId, approval_token: src.token, user_id: 'dsh-user', session_id: sid })
+        setSrc(Object.assign({}, src, { loading: false, text: expanded.source?.content || null, needsAuth: false }))
+        return
+      }
       setSrc({ id: id, loading: true })
       const res = await api('GET', '/v1/memories/' + encodeURIComponent(String(id)) + '/source')
       const list = res && Array.isArray(res.sources) ? res.sources : []
-      setSrc({ id: id, loading: false, text: list.length ? list[0].content : null })
+      const first = list[0]
+      setSrc({ id: id, loading: false, sourceId: first?.protected_source_id || first?.id, text: first?.content || null, needsAuth: !!first?.needs_auth })
+    }
+
+    async function requestApproval() {
+      if (!src || !sid) return
+      setSrc(Object.assign({}, src, { requesting: true }))
+      const res = await api('POST', '/v1/sensitive/approve', { user_id: 'dsh-user', session_id: sid, confirmed: true })
+      if (res && res.approval_token) setSrc(Object.assign({}, src, { token: res.approval_token, requesting: false, needsAuth: false }))
+      else setSrc(Object.assign({}, src, { requesting: false, error: res?.error || 'approval failed' }))
     }
 
     async function refresh() {
       setBusy(true)
       const res = await api('GET', '/v1/overview?workspace_id=' + encodeURIComponent(WORKSPACE_DEFAULT) + '&session_id=' + encodeURIComponent(sid))
+      // Fetch session state card from v2 API
+      if (sid) {
+        const kind = props && props.cardKind === 'task' ? 'task' : 'daily'
+        const cardRes = await api('GET', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sid))
+        if (cardRes && cardRes.card) setCard(cardRes.card.payload)
+        const revRes = await api('GET', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sid) + '/revisions')
+        if (revRes && Array.isArray(revRes.revisions)) setRevisions(revRes.revisions)
+      }
       if (res && Array.isArray(res.memories)) setMemories(res.memories)
       else if (res && res.error) setMsg(t('loadFail') + res.error)
       if (res && res.card) setCard(res.card)
@@ -666,7 +810,7 @@ export function apply(ctx) {
     async function doAdd() {
       if (!newContent.trim()) return
       const res = await api('POST', '/v1/memories/add', {
-        content: newContent.trim(), type: newType, scope: newScope, domain: newDomain, workspace_id: WORKSPACE_DEFAULT,
+        content: newContent.trim(), type: newType, scope: newScope, domain: newDomain, workspace_id: WORKSPACE_DEFAULT, session_id: sid,
       })
       if (res && res.error) { setMsg(t('cfgFail') + res.error) } else { setNewContent(''); setMsg(t('saved')); refresh() }
     }
@@ -696,6 +840,8 @@ export function apply(ctx) {
     if (view === 'graph') return React.createElement(GraphView, subProps())
     if (view === 'archive') return React.createElement(ArchiveView, subProps())
     if (view === 'maintain') return React.createElement(MaintenanceView, subProps())
+    if (view === 'tasks') return React.createElement(TaskBoardView, subProps())
+    if (view === 'config') return React.createElement(ConfigView, { t: t, lang: lang, sessionId: sid, onBack: function () { setView('main') } })
 
     const cardLines = []
     if (card && card.goal) cardLines.push({ k: '目标', v: card.goal })
@@ -808,7 +954,7 @@ export function apply(ctx) {
           React.createElement('span', { className: 'dsh-mem-imp' }, items.length + ' ' + t('count')),
         ),
         items.length
-          ? items.map(function (m) { return React.createElement(MemoryRow, { key: String(m.id), m: m, t: t, lang: lang, onDelete: doDelete, onUpdate: doUpdate, onSource: openSource, src: src }) })
+          ? items.map(function (m) { return React.createElement(MemoryRow, { key: String(m.id), m: m, t: t, lang: lang, onDelete: doDelete, onUpdate: doUpdate, onSource: openSource, onRequestApproval: requestApproval, src: src }) })
           : React.createElement('div', { style: { opacity: .6 } }, t('empty')),
       )
     }
@@ -819,6 +965,8 @@ export function apply(ctx) {
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('graph') } }, t('graph')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('archive') } }, t('archive')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('maintain') } }, t('maintain')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('tasks') } }, t('tasks')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('config') } }, t('sessionConfig')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: toggleEnabled }, enabled ? t('enabled') : t('disabled')),
         React.createElement('button', { className: 'dsh-mem-btn', title: 'Switch language', onClick: function () { setLang(lang === 'zh' ? 'en' : 'zh') } }, t('lang')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: refresh, disabled: busy }, busy ? t('loading') : t('refresh')),
@@ -843,6 +991,7 @@ export function apply(ctx) {
               React.createElement('span', { className: 'dsh-mem-content' }, l.v),
             )
           }) : React.createElement('div', { style: { opacity: .6 } }, t('noCard')),
+          revisions.length ? React.createElement('div', { className: 'dsh-mem-meta' }, t('cardRevisions') + ': ' + revisions.length) : null,
         ),
       React.createElement('div', { className: 'dsh-mem-box' },
         React.createElement('div', { className: 'dsh-mem-title' }, t('manual')),
@@ -893,7 +1042,7 @@ export function apply(ctx) {
       function () {
         const dict = I18N.zh
         const t = function (key) { return dict[key] !== undefined ? dict[key] : key }
-        return React.createElement(ConfigView, { t: t, lang: 'zh', embedded: true })
+        return React.createElement(ConfigView, { t: t, lang: 'zh', embedded: true, sessionId: null })
       },
     )
   })

@@ -880,6 +880,10 @@ def get_sources(memory_id):
     for row in rows:
         item = dict(row)
         item["protected"] = bool(item.get("protected_source_id"))
+        if item["protected"]:
+            protected = _load_protected(item["protected_source_id"])
+            item["content"] = protected["redacted_content"] if protected else "[sensitive content redacted]"
+            item["needs_auth"] = True
         out.append(item)
     return out
 
@@ -1267,6 +1271,66 @@ def set_config_values(payload):
     return {"saved": count}
 
 
+def get_session_config(session_id):
+    """Get effective config for a session: session overrides merged over defaults."""
+    defaults = get_config_values()
+    if not session_id:
+        return defaults
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT key, value FROM settings WHERE key LIKE ?",
+        (f"deepmemory.session.{session_id}.%",)
+    ).fetchall()
+    conn.close()
+    overrides = {}
+    prefix = f"deepmemory.session.{session_id}."
+    for r in rows:
+        key = r["key"][len(prefix):]
+        try:
+            overrides[key] = json.loads(r["value"])
+        except Exception:
+            overrides[key] = r["value"]
+    result = dict(defaults)
+    result.update(overrides)
+    return result
+
+
+def set_session_config(session_id, key, value):
+    """Set a single session config override."""
+    if not session_id or not key:
+        raise ValueError("session_id and key required")
+    set_setting(f"deepmemory.session.{session_id}.{key}", value)
+    return {"key": key, "value": value}
+
+
+def reset_session_config_key(session_id, key):
+    """Remove a session override, reverting to default."""
+    if not session_id or not key:
+        raise ValueError("session_id and key required")
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM settings WHERE key=?",
+        (f"deepmemory.session.{session_id}.{key}",)
+    )
+    conn.commit()
+    conn.close()
+    return {"key": key, "reset": True}
+
+
+def list_session_overrides(session_id):
+    """List keys that have session-specific overrides."""
+    if not session_id:
+        return []
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT key FROM settings WHERE key LIKE ?",
+        (f"deepmemory.session.{session_id}.%",)
+    ).fetchall()
+    conn.close()
+    prefix = f"deepmemory.session.{session_id}."
+    return [r["key"][len(prefix):] for r in rows]
+
+
 # ---------------------------------------------------------------- lifecycle
 
 DECAY_PROTECTED = 0.85      # importance above this is exempt from decay
@@ -1619,7 +1683,7 @@ def get_overview(workspace_id=None, session_id=None):
     mems = [
         dict(r)
         for r in conn.execute(
-            "SELECT id, content, type, domain, scope, importance, created_at,"
+        "SELECT id, content, type, domain, scope, importance, created_at, has_sensitive,"
             " last_access_at, access_count, status, keywords FROM documents"
             " WHERE status='active' ORDER BY id DESC LIMIT 300"
         ).fetchall()
@@ -1632,6 +1696,9 @@ def get_overview(workspace_id=None, session_id=None):
     ).fetchone()["c"]
     atoms_n = conn.execute("SELECT COUNT(*) c FROM atoms").fetchone()["c"]
     conn.close()
+    for item in mems:
+        if item.get("has_sensitive"):
+            item["content"] = redact_text(str(item.get("content") or ""))[0]
     card = get_card(workspace_id) if workspace_id else None
     enabled = True
     if session_id:
@@ -1846,6 +1913,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"schema": get_config_schema()})
             if path == "/v1/config":
                 return self._send(200, {"config": get_config_values()})
+            if path == "/v1/config/session":
+                session_id = qs.get("session_id", [None])[0]
+                if not session_id:
+                    return self._send(400, {"error": "session_id required"})
+                return self._send(200, {"config": get_session_config(session_id), "overrides": list_session_overrides(session_id)})
             if path == "/v1/sensitive/audit":
                 return self._send(200, {"audit": list_sensitive_audit(int(qs.get("limit", ["100"])[0]))})
             if path.startswith("/v1/sensitive/sources/"):
@@ -2142,6 +2214,20 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/config":
                 body = self._read_body()
                 return self._send(200, set_config_values(body))
+            if path == "/v1/config/session/set":
+                body = self._read_body()
+                session_id = body.get("session_id")
+                key = body.get("key")
+                if not session_id or not key:
+                    return self._send(400, {"error": "session_id and key required"})
+                return self._send(200, set_session_config(session_id, key, body.get("value")))
+            if path == "/v1/config/session/reset":
+                body = self._read_body()
+                session_id = body.get("session_id")
+                key = body.get("key")
+                if not session_id or not key:
+                    return self._send(400, {"error": "session_id and key required"})
+                return self._send(200, reset_session_config_key(session_id, key))
             if path == "/v1/settings/set":
                 body = self._read_body()
                 key = body.get("key") or ""
