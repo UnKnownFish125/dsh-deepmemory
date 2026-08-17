@@ -101,6 +101,56 @@ class SensitiveMemoryTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             server.expand_sensitive_source(result["protected_source_ids"][0], fresh["approval_token"], "user-1", "session-2")
 
+    def test_pii_and_natural_language_passwords_are_redacted(self):
+        # 银行卡号（Luhn 通过）、身份证号（校验位通过）、手机号、中文自然语言密码
+        cases = [
+            ("我的招商银行卡号是6225888812345670，记得转钱", "bank_card"),
+            ("我身份证号110101199003078881，你记一下", "id_card"),
+            ("手机号13800138000，随时联系", "phone"),
+            ("我的网银密码是Abc123456", "natural_password"),
+            ("网银密码Abc123456", "natural_password"),
+        ]
+        for text, expected in cases:
+            redacted, matches = server.redact_text(text)
+            self.assertTrue(matches, text)
+            self.assertEqual(expected, matches[0].kind, text)
+            self.assertIn("[REDACTED:%s]" % expected, redacted, text)
+
+    def test_pii_checksum_guards_and_prose_do_not_redact(self):
+        # 校验位不通过的长数字串不脱敏；普通句子不脱敏
+        for text in [
+            "这个项目有12345678901234个订单",
+            "我买了6225888812345678（手滑的错号）",
+            "密码是正确的话就登录成功",
+            "PIN 码要记住",
+            "今天的天气不错，出去走走",
+        ]:
+            redacted, matches = server.redact_text(text)
+            self.assertEqual([], matches, text)
+            self.assertEqual(text, redacted, text)
+
+    def test_pii_flow_through_write_expand_audit(self):
+        content = "银行卡6225888812345670，密码Abc123456，电话13800138000"
+        result = server.add_memory({"content": content, "source": content, "scope": "global", "session_id": "sess-pii", "user_id": "user-pii"})
+        self.assertTrue(result["sensitive"], result)
+        for marker in ("6225888812345670", "Abc123456", "13800138000"):
+            self.assertNotIn(marker, json.dumps(result, ensure_ascii=False))
+        source_id = result["protected_source_ids"][0]
+        sources = server.get_sources(result["id"])
+        self.assertTrue(sources, sources)
+        source = sources[0]
+        self.assertTrue(source["needs_auth"], source)
+        self.assertNotIn("6225888812345670", source["content"])
+        with self.assertRaises(PermissionError):
+            server.expand_sensitive_source(source_id, None, "user-pii", "sess-pii")
+        approval = server.grant_sensitive_approval("user-pii", "sess-pii", True)
+        expanded = server.expand_sensitive_source(source_id, approval["approval_token"], "user-pii", "sess-pii")
+        for marker in ("6225888812345670", "Abc123456", "13800138000"):
+            self.assertIn(marker, expanded["content"])
+        audit = json.dumps(server.list_sensitive_audit(), ensure_ascii=False)
+        self.assertNotIn("6225888812345670", audit)
+
+
 
 if __name__ == "__main__":
     unittest.main()
