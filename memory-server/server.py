@@ -43,6 +43,8 @@ from urllib.parse import parse_qs, urlparse
 import faiss
 import numpy as np
 
+from v2_domain import V2_SCHEMA_VERSION, install_v2_schema
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
@@ -178,7 +180,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 
 def run_migrations():
-    """Schema 版本迁移框架：当前版本记录于 schema_version 表。"""
+    """Apply backward-compatible, repeatable schema migrations."""
     migrations = {
         2: [
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_memory ON graph_edges(memory_id)",
@@ -200,6 +202,7 @@ def run_migrations():
         )
         conn.commit()
         print("migration: schema v1 基线已应用", flush=True)
+        current = 1
     for version in sorted(migrations):
         if current < version:
             for stmt in migrations[version]:
@@ -210,6 +213,18 @@ def run_migrations():
             )
             conn.commit()
             print(f"migration: schema v{version} 已应用", flush=True)
+            current = version
+    # The v2 domain installer is intentionally run on every startup. Its DDL is
+    # idempotent, so it can also repair a database copied during a partial
+    # migration without renaming or dropping any legacy object.
+    install_v2_schema(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?,?)",
+        (V2_SCHEMA_VERSION, time.time()),
+    )
+    conn.commit()
+    if current < V2_SCHEMA_VERSION:
+        print(f"migration: schema v{V2_SCHEMA_VERSION} 已应用", flush=True)
     conn.close()
 
 
