@@ -140,6 +140,8 @@ const PANEL_CSS = `
 .dsh-mem-task-color-label select { max-width:90px; }
 .dsh-mem-task-blocked { display:inline-flex; color:#d16a63; border:1px solid rgba(209,106,99,.35); border-radius:4px; padding:2px 6px; margin-bottom:7px; font-size:11px; }
 .dsh-mem-task-empty { color:var(--dsw-alias-label-tertiary, #696d74); font-size:12px; padding:9px 7px; }
+.dsh-mem-memory-editor { width:100%; min-height:72px; resize:vertical; }
+.dsh-mem-memory-edit-actions { display:flex; gap:6px; justify-content:flex-end; }
 @media (max-width:760px) { .dsh-mem-task-board { grid-template-columns:repeat(5, minmax(82vw, 82vw)); } .dsh-mem-task-column { min-width:82vw; } }
 
 `
@@ -624,9 +626,25 @@ export function apply(ctx) {
     const src = props.src
     const srcOpen = src && String(src.id) === String(m.id)
     const typeLabels = props.lang === 'en' ? TYPE_EN : TYPE_ZH
+    const [editing, setEditing] = React.useState(false)
+    const [draft, setDraft] = React.useState(m.content || '')
+    async function saveContent() {
+      const content = draft.trim()
+      if (!content) return
+      const ok = await onUpdate(m.id, { content: content })
+      if (ok) setEditing(false)
+    }
     return React.createElement('div', { className: 'dsh-mem-row' },
       React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 3, flex: 1 } },
-        React.createElement('span', { className: 'dsh-mem-content' }, m.content),
+        editing
+          ? React.createElement(React.Fragment, null,
+            React.createElement('textarea', { className: 'dsh-mem-input dsh-mem-memory-editor', value: draft, onChange: function (e) { setDraft(e.target.value) } }),
+            React.createElement('div', { className: 'dsh-mem-memory-edit-actions' },
+              React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setDraft(m.content || ''); setEditing(false) } }, t('cardCancel')),
+              React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', disabled: !draft.trim(), onClick: saveContent }, t('cardSave')),
+            ),
+          )
+          : React.createElement('span', { className: 'dsh-mem-content' }, m.content),
         React.createElement('span', { className: 'dsh-mem-meta' },
           React.createElement('span', { className: 'dsh-mem-badge' }, typeLabels[m.type] || m.type),
           React.createElement('select', {
@@ -645,6 +663,7 @@ export function apply(ctx) {
             React.createElement('option', { value: 'life' }, t('life')),
           ),
           m.importance !== undefined ? React.createElement('span', { className: 'dsh-mem-imp' }, t('importance') + ' ' + Number(m.importance).toFixed(2)) : null,
+          React.createElement('button', { className: 'dsh-mem-btn dsh-mem-memory-edit', style: { padding: '0 8px', fontSize: 11 }, onClick: function () { setDraft(m.content || ''); setEditing(true) } }, t('cardEdit')),
           React.createElement('button', { className: 'dsh-mem-btn', style: { padding: '0 8px', fontSize: 11 }, onClick: function () { onSource(m.id) } }, t('source')),
         ),
           m.has_sensitive && srcOpen && src.needsAuth
@@ -836,11 +855,12 @@ export function apply(ctx) {
 
     async function doUpdate(id, patch) {
       const res = await api('PUT', '/v1/memories/' + encodeURIComponent(String(id)), patch)
-      if (res && res.error) { setMsg(t('updateFail') + res.error); return }
+      if (res && res.error) { setMsg(t('updateFail') + res.error); return false }
       setMemories(function (prev) {
         return prev.map(function (m) { return String(m.id) === String(id) ? Object.assign({}, m, patch) : m })
       })
       setMsg(t('adjustDone'))
+      return true
     }
 
     async function toggleEnabled() {

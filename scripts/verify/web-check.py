@@ -76,6 +76,32 @@ with sync_playwright() as p:
         raise AssertionError("面板内容过短: " + repr(text[:80]))
     print("3. 记忆面板渲染 OK,", len(text), "字符; 首行:", text.splitlines()[0][:60])
 
+    # 普通记忆必须保留内容编辑入口，并走通真实 PUT 保存链路。
+    fixture = "web-check-memory-edit-fixture"
+    edited_fixture = fixture + "-updated"
+    added = page.evaluate("""async ({fixture}) => {
+      const r = await fetch('/mem-api/v1/memories/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:fixture, type:'fact', scope:'workspace', domain:'work', workspace_id:'deepseek-hardness'})});
+      return await r.json();
+    }""", {"fixture": fixture})
+    fixture_id = added.get("id")
+    try:
+        panel.locator("button:visible").filter(has_text="刷新").first.click()
+        fixture_text = panel.get_by_text(fixture, exact=True)
+        fixture_text.wait_for(state="visible", timeout=10000)
+        memory_row = fixture_text.locator("xpath=../..")
+        edit_button = memory_row.locator(".dsh-mem-memory-edit")
+        if edit_button.count() != 1:
+            raise AssertionError("3. 普通记忆编辑按钮缺失")
+        edit_button.click()
+        editor = memory_row.locator(".dsh-mem-memory-editor")
+        editor.fill(edited_fixture)
+        panel.locator(".dsh-mem-memory-edit-actions button").filter(has_text="保存").click()
+        panel.get_by_text(edited_fixture, exact=True).wait_for(state="visible", timeout=10000)
+        print("3. 普通记忆编辑保存链路 OK")
+    finally:
+        if fixture_id:
+            page.evaluate("async ({id}) => { await fetch('/mem-api/v1/memories/' + id, {method:'DELETE'}); }", {"id": fixture_id})
+
     # 4. 图谱视图：Obsidian 交互（节点拖拽 + hover 高亮 + 重置）
     page.get_by_text("图谱", exact=True).first.click()
     svg = page.locator(".dsh-mem-graph-svg").first
