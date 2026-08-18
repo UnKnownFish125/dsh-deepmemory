@@ -166,7 +166,7 @@
 # Task preset uses deepmemory with full task board, task state cards, and
 # process memory. Budget profile: task-default (see budget configuration below).
 - id: harness-memory
-  name: '../memory-plugin/plugin-v3.js'
+  name: '../_memory-plugin/plugin-v3.js'
   config:
     preset_mode: task
     budget_profile: task-default
@@ -190,35 +190,3 @@
 #
 # Note: Ratios don't need to sum to 1.0. Unused budget returns to the pool
 # and is redistributed by priority when other components need expansion.
-
-deepmemory:
-  preset_mode: task
-  budget_profile: task-default
-  context:
-    soft_target_ratio: 0.70
-    hard_limit_ratio: 0.85
-    priority_allocation:
-      recent_messages:
-        ratio: 0.50
-        priority: 1
-        min_tokens: 2048
-      task_state_card:
-        ratio: 0.15
-        priority: 2
-        min_tokens: 512
-      task_board:
-        ratio: 0.10
-        priority: 3
-        min_tokens: 256
-      active_memory:
-        ratio: 0.15
-        priority: 4
-        min_tokens: 1024
-      recall_reserve:
-        ratio: 0.10
-        priority: 5
-        min_tokens: 512
-  lifecycle:
-    task_process_active_days: 15
-    daily_active_days: 7
-    cold_retention_days: 365
