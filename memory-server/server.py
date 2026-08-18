@@ -43,6 +43,7 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
+import urllib.request
 
 from sensitive import redact_text, sensitivity_types
 
@@ -65,6 +66,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 DB_PATH = os.path.join(DATA_DIR, "memory.db")
 INDEX_PATH = os.path.join(DATA_DIR, "memory.faiss")
+DIM_PATH = os.path.join(DATA_DIR, "dim.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 PORT = int(os.environ.get("MEMORY_SERVER_PORT", "6230"))
 DIM = 512
@@ -87,23 +89,99 @@ _embed_lock = threading.Lock()
 _embed_model = None
 
 
+def get_embed_config():
+    """读取 embedding.* 配置，未设置时回落到 config_schema 默认值。"""
+    values = get_config_values()
+    items = get_config_schema().get("embedding", {}).get("items", {})
+    cfg = {k: meta.get("default") for k, meta in items.items()}
+    for k in cfg:
+        v = values.get("embedding." + k)
+        if v is not None:
+            cfg[k] = v
+    return cfg
+
+
+def get_embed_dim():
+    """当前嵌入向量维度：首次由模型输出确定并持久化，默认 512 兼容旧库。"""
+    try:
+        with open(DIM_PATH, encoding="utf-8") as fh:
+            return int(json.load(fh)["dim"])
+    except Exception:
+        return DIM
+
+
+def set_embed_dim(dim):
+    dim = int(dim)
+    try:
+        with open(DIM_PATH, encoding="utf-8") as fh:
+            if json.load(fh).get("dim") == dim:
+                return
+    except Exception:
+        pass
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(DIM_PATH, "w", encoding="utf-8") as fh:
+        json.dump({"dim": dim}, fh)
+
+
 def get_model():
+    """本地 fastembed 模型（provider=local），懒加载单例。"""
     global _embed_model
     with _embed_lock:
         if _embed_model is None:
+            cfg = get_embed_config()
             from fastembed import TextEmbedding
 
             _embed_model = TextEmbedding(
-                model_name="BAAI/bge-small-zh-v1.5", cache_dir=MODEL_DIR
+                model_name=cfg.get("local_model") or "BAAI/bge-small-zh-v1.5",
+                cache_dir=MODEL_DIR,
             )
             list(_embed_model.embed(["warmup"]))
         return _embed_model
 
 
+def _embed_api(texts):
+    """OpenAI 兼容 /v1/embeddings（provider=api）。"""
+    cfg = get_embed_config()
+    base = (cfg.get("api_base_url") or "").rstrip("/")
+    key = cfg.get("api_key") or os.environ.get("EMBED_API_KEY", "")
+    model = cfg.get("api_model") or "text-embedding-3-small"
+    if not base or not key:
+        raise RuntimeError(
+            "embedding provider=api 需要 api_base_url 与 api_key（或环境变量 EMBED_API_KEY）"
+        )
+    body = json.dumps({"model": model, "input": texts}).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/embeddings",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + key,
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    out = []
+    for item in sorted(payload["data"], key=lambda x: x.get("index", 0)):
+        out.append(np.asarray(item["embedding"], dtype=np.float32))
+    if not out:
+        raise RuntimeError("embedding API 返回空结果")
+    return out
+
+
 def embed_texts(texts):
     texts = [str(t or "") for t in texts]
-    model = get_model()
-    return [np.asarray(v, dtype=np.float32) for v in model.embed(texts)]
+    if not texts:
+        return []
+    provider = (get_embed_config().get("provider") or "local").lower()
+    if provider == "api":
+        vecs = _embed_api(texts)
+    else:
+        model = get_model()
+        vecs = [np.asarray(v, dtype=np.float32) for v in model.embed(texts)]
+    if vecs:
+        set_embed_dim(vecs[0].shape[0])
+    return vecs
 
 
 # ---------------------------------------------------------------- sqlite
@@ -310,7 +388,7 @@ def init_db():
 
 # ---------------------------------------------------------------- faiss
 
-_index_lock = threading.Lock()
+_index_lock = threading.RLock()  # RLock：get_index 持锁触发迁移重建时可重入
 _index = None
 # 检索缓存：{(query,k,session,workspace,domain,type,persona): (ts, results)}
 _search_cache = {}
@@ -320,10 +398,22 @@ def get_index():
     global _index
     with _index_lock:
         if _index is None:
+            has_dim_meta = os.path.exists(DIM_PATH)
+            dim = get_embed_dim() if has_dim_meta else None
             if os.path.exists(INDEX_PATH):
-                _index = faiss.read_index(INDEX_PATH)
+                if has_dim_meta:
+                    _index = faiss.read_index(INDEX_PATH)
+                    if _index.d != dim:
+                        # 嵌入维度切换（如 local→api 或模型更换）：按新维度影子重建
+                        _index = None
+                        _rebuild_indexes_internal()
+                        _index = faiss.read_index(INDEX_PATH)
+                else:
+                    # 配置变更后维度未确定：强制按当前配置重建
+                    _rebuild_indexes_internal()
+                    _index = faiss.read_index(INDEX_PATH)
             else:
-                _index = faiss.IndexIDMap(faiss.IndexFlatL2(DIM))
+                _index = faiss.IndexIDMap(faiss.IndexFlatL2(dim if dim is not None else DIM))
         return _index
 
 
@@ -1263,11 +1353,22 @@ def get_config_values():
 
 def set_config_values(payload):
     count = 0
+    changed_embedding = any(str(k).startswith("embedding.") for k in payload)
     for key, value in payload.items():
         if not isinstance(key, str) or not key:
             continue
         set_setting("deepmemory." + key, value)
         count += 1
+    if changed_embedding:
+        # 嵌入配置变更：清空索引缓存并删除维度元数据，
+        # 下次访问按新配置自动确定维度并重建索引
+        global _index
+        with _index_lock:
+            _index = None
+        try:
+            os.remove(DIM_PATH)
+        except FileNotFoundError:
+            pass
     return {"saved": count}
 
 
@@ -1511,8 +1612,14 @@ def restore_backup(name):
     return True
 
 
-def rebuild_indexes():
-    """索引重建：指纹校验 + 影子重建（临时文件生成后原子替换，livingmemory 对齐）。"""
+def _rebuild_indexes_internal():
+    """影子重建核心（不依赖 get_index，可安全用于维度迁移）。"""
+    old_ntotal = 0
+    if os.path.exists(INDEX_PATH):
+        try:
+            old_ntotal = faiss.read_index(INDEX_PATH).ntotal
+        except Exception:
+            old_ntotal = 0
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, content, key_facts FROM documents WHERE status='active'"
@@ -1520,7 +1627,6 @@ def rebuild_indexes():
     conn.close()
     doc_ids = [r["id"] for r in rows]
     fingerprint = {"count": len(doc_ids), "max_id": max(doc_ids) if doc_ids else 0}
-    old_ntotal = get_index().ntotal
     texts = [str(r["content"]) + " " + str(r["key_facts"] or "") for r in rows]
     if texts:
         vecs = embed_texts(texts)
@@ -1529,19 +1635,29 @@ def rebuild_indexes():
         d = mat.shape[1]
         tmp = faiss.IndexIDMap(faiss.IndexFlatL2(d))
         tmp.add_with_ids(mat, ids)
-        shadow_path = INDEX_PATH + ".shadow"
-        faiss.write_index(tmp, shadow_path)
-        os.replace(shadow_path, INDEX_PATH)
-        global _index
-        with _index_lock:
-            _index = None
+    else:
+        # 无文档也要按当前配置确定维度（空库切换 embedding 场景）
+        vecs = embed_texts(["warmup"])
+        d = vecs[0].shape[0] if vecs else DIM
+        tmp = faiss.IndexIDMap(faiss.IndexFlatL2(d))
+    shadow_path = INDEX_PATH + ".shadow"
+    faiss.write_index(tmp, shadow_path)
+    os.replace(shadow_path, INDEX_PATH)
+    global _index
+    with _index_lock:
+        _index = None
     rebuild_bm25()
     return {
         "rebuilt": True,
         "fingerprint": fingerprint,
         "index_before": old_ntotal,
-        "index_after": get_index().ntotal,
+        "index_after": tmp.ntotal,
     }
+
+
+def rebuild_indexes():
+    """索引重建：指纹校验 + 影子重建（临时文件生成后原子替换，livingmemory 对齐）。"""
+    return _rebuild_indexes_internal()
 
 
 def consolidate_memories(similarity=None, limit_groups=None, dry_run=False):

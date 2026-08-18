@@ -54,6 +54,22 @@ sudo bash scripts/install.sh
 
 可用环境变量覆盖：`DSH_HOME`、`APP_DIR`、`VENV_PY`。
 
+## 向量嵌入 — 本地模型或 API，二选一
+
+语义检索的嵌入提供方可插拔，配置在 `embedding` 组（WebUI「配置」tab 自动渲染，也可走会话配置 API）：
+
+| 配置键 | 默认值 | 含义 |
+|---|---|---|
+| `embedding.provider` | `local` | `local`=本机 fastembed 推理；`api`=任意 OpenAI 兼容 `/v1/embeddings` 接口 |
+| `embedding.local_model` | `BAAI/bge-small-zh-v1.5` | 本地模型，首次使用自动从 HF 镜像下载 |
+| `embedding.api_base_url` | — | `provider=api` 时必填，如 `https://api.openai.com/v1` |
+| `embedding.api_key` | — | `provider=api` 时必填；也可用环境变量 `EMBED_API_KEY` 注入，避免明文入库 |
+| `embedding.api_model` | `text-embedding-3-small` | API 提供方的模型名 |
+
+**默认模型：[BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5)** — 512 维、中文效果好、ONNX 约 30MB，首次下载后完全离线运行（走 HF 镜像 `hf-mirror.com`，可用 `HF_ENDPOINT` 覆盖）。
+
+切换提供方（如 `local` → `api`）安全无损：FAISS 索引自动按新维度重建，已有记忆按需重新嵌入，**不丢数据**。
+
 ## 使用方式
 
 1. **选择 preset** — 新建会话并选择「任务工作模式」或「日常问答模式」。记忆插件自动加载，无需动态 define+run。

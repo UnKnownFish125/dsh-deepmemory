@@ -17,6 +17,46 @@
       }
     }
   },
+  "embedding": {
+    "description": "向量嵌入（本地模型或 API，二选一）",
+    "type": "object",
+    "items": {
+      "provider": {
+        "description": "嵌入提供方",
+        "hint": "local=本地 fastembed 推理（默认，推荐）；api=OpenAI 兼容 /v1/embeddings 接口",
+        "type": "string",
+        "options": [
+          "local",
+          "api"
+        ],
+        "default": "local"
+      },
+      "local_model": {
+        "description": "本地嵌入模型",
+        "hint": "推荐 BAAI/bge-small-zh-v1.5（512 维，中文效果好、体积小），首次使用自动从 HF 镜像下载",
+        "type": "string",
+        "default": "BAAI/bge-small-zh-v1.5"
+      },
+      "api_base_url": {
+        "description": "API 嵌入地址",
+        "hint": "provider=api 时必填，OpenAI 兼容 embeddings 接口根地址，如 https://api.openai.com/v1",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API 密钥",
+        "hint": "provider=api 时必填；也可用环境变量 EMBED_API_KEY 注入，避免明文入库",
+        "type": "string",
+        "default": ""
+      },
+      "api_model": {
+        "description": "API 嵌入模型",
+        "hint": "provider=api 时的模型名，如 text-embedding-3-small",
+        "type": "string",
+        "default": "text-embedding-3-small"
+      }
+    }
+  },
   "scope": {
     "description": "作用域与隔离",
     "type": "object",

@@ -54,6 +54,22 @@ Idempotent and safe to re-run. It installs the memory backend (`memory-server`, 
 
 Override environment: `DSH_HOME`, `APP_DIR`, `VENV_PY`.
 
+## Embedding — local model or API (pick one)
+
+Semantic retrieval runs on a **pluggable embedding provider**, configured under the `embedding` group (rendered automatically in the WebUI「配置」tab, or via the session config API):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `embedding.provider` | `local` | `local` = fastembed inference on this machine; `api` = any OpenAI-compatible `/v1/embeddings` endpoint |
+| `embedding.local_model` | `BAAI/bge-small-zh-v1.5` | Local model; downloaded automatically from the HF mirror on first use |
+| `embedding.api_base_url` | — | Required when `provider=api`, e.g. `https://api.openai.com/v1` |
+| `embedding.api_key` | — | Required when `provider=api`; or inject via `EMBED_API_KEY` env var to keep it out of the DB |
+| `embedding.api_model` | `text-embedding-3-small` | Model name for the API provider |
+
+**Default model: [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5)** — 512-dim, tuned for Chinese, ~30 MB ONNX, fully offline after first download (served via the HF mirror `hf-mirror.com`; override with `HF_ENDPOINT`).
+
+Switching providers (e.g. `local` → `api`) is safe: the FAISS index is rebuilt automatically with the new dimension, existing memories are re-embedded on demand, and **no data is lost**.
+
 ## Usage
 
 1. **Choose a preset** — start a new session and select `任务工作模式` (task) or `日常问答模式` (daily). Memory plugin loads automatically; no dynamic `define+run` needed.
