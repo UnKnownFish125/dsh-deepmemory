@@ -171,6 +171,7 @@ with sync_playwright() as p:
         raise AssertionError("6. 任务看板按钮未找到")
     task_btn.first.click()
     page.wait_for_timeout(1000)
+    panel = page.locator(".dsh-mem-panel:visible").first
     board = panel.locator(".dsh-mem-task-board").first
     board.wait_for(state="visible", timeout=10000)
     if board.locator(".dsh-mem-task-column").count() != 5:

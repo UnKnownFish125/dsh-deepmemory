@@ -114,8 +114,27 @@ else
   cp "$ROOT/web-plugin/"* "$VHOME/profiles/web/node_modules/dsh-deepmemory/" 2>/dev/null
   # 剔除生产残留的旧版 dsh-memory-ui（name 同为 deepmemory，会以旧 CSS/面板抢占注入）
   rm -f "$VHOME/profiles/web/node_modules/dsh-memory-ui"
-  # bundles 声明改为待验证插件（生产 profile 仍声明旧插件名，验证机必须指向新版）
-  sed -i 's/"dsh-memory-ui"/"dsh-deepmemory"/' "$VHOME/profiles/web/package.json"
+  # bundles 声明改为待验证插件。真实 profile 可能同时残留新旧包名，必须去重，
+  # 否则两个 bundle 会注册同一个 memory-ui loader id，临时 DSH 无法启动。
+  "$VENV_PY" - "$VHOME/profiles/web/package.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+profile = data.setdefault("dsh", {}).setdefault("profile", {})
+bundles = profile.get("bundles", [])
+normalized = []
+for name in bundles:
+    name = "dsh-deepmemory" if name == "dsh-memory-ui" else name
+    if name not in normalized:
+        normalized.append(name)
+profile["bundles"] = normalized
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+if normalized.count("dsh-deepmemory") != 1:
+    raise SystemExit("dsh-deepmemory bundle normalization failed")
+PY
   "$VENV_PY" "$ROOT/scripts/fix-client-bundle.py" "$VHOME/profiles/web/node_modules/dsh-deepmemory/client.js" dsh-deepmemory >/dev/null 2>&1 || { bad; rm -rf "$VHOME"; }
   # 工作区注册表（供 New Session 使用），sessions 保持为空（新建空会话，不碰生产对话数据）
   mkdir -p "$VHOME/storages"

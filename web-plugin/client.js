@@ -124,6 +124,10 @@ const PANEL_CSS = `
 .dsh-mem-pcard-save:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }
 .dsh-mem-cfg-override { display:inline-flex; align-items:center; gap:4px; font-size:11px; opacity:.7; margin-left:8px; }
 .dsh-mem-sensitive-box { background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.08)); border:1px solid rgba(255,140,0,.4); border-radius:6px; padding:8px; margin:6px 0; }
+.dsh-mem-task-panel { min-width:0; }
+.dsh-mem-task-toolbar { display:flex; align-items:center; gap:8px; padding-bottom:14px; border-bottom:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.14)); margin-bottom:12px; }
+.dsh-mem-task-toolbar .dsh-mem-title { font-size:15px; }
+.dsh-mem-task-toolbar-meta { display:flex; gap:10px; color:var(--dsw-alias-label-tertiary, #777b82); font-size:11px; margin-left:4px; }
 .dsh-mem-task-board { display:grid; grid-template-columns:repeat(5, minmax(210px, 1fr)); gap:8px; overflow-x:auto; align-items:stretch; padding:2px 0 10px; scrollbar-width:thin; }
 .dsh-mem-task-column { min-width:210px; min-height:360px; padding:7px; border:0; border-radius:8px; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.035)); }
 .dsh-mem-task-column-title { min-height:38px; display:flex; justify-content:space-between; align-items:center; padding:4px 7px 10px; color:var(--dsw-alias-label-secondary, #a3a6ac); font-size:12px; font-weight:500; }
@@ -690,6 +694,7 @@ export function apply(ctx) {
 
   function TaskBoardView(props) {
     const t = props.t
+    const lang = props.lang
     const [tasks, setTasks] = React.useState([])
     const [creating, setCreating] = React.useState(false)
     const [newTitle, setNewTitle] = React.useState('')
@@ -724,11 +729,16 @@ export function apply(ctx) {
     }
     const statusMap = { planned: t('planned'), todo: t('todo'), in_progress: t('inProgress'), completed: t('completed'), failed: t('failed') }
     const canTransition = { planned: ['todo'], todo: ['in_progress'], in_progress: ['completed', 'failed'], completed: [], failed: ['todo', 'in_progress'] }
-    return React.createElement('div', { className: 'dsh-mem-panel' },
-      React.createElement('div', { className: 'dsh-mem-actions' },
+    const activeCount = tasks.filter(function (task) { return task.status === 'todo' || task.status === 'in_progress' }).length
+    return React.createElement('div', { className: 'dsh-mem-panel dsh-mem-task-panel' },
+      React.createElement('div', { className: 'dsh-mem-task-toolbar' },
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: props.onBack }, '‹ ' + t('back')),
         React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('tasks')),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setCreating(!creating) } }, creating ? t('cardCancel') : t('taskCreate')),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: props.onBack }, t('back')),
+        React.createElement('div', { className: 'dsh-mem-task-toolbar-meta' },
+          React.createElement('span', null, tasks.length + ' ' + (lang === 'en' ? 'total' : '总计')),
+          React.createElement('span', null, activeCount + ' ' + (lang === 'en' ? 'active' : '进行中')),
+        ),
+        React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: function () { setCreating(!creating) } }, creating ? t('cardCancel') : '+ ' + t('taskCreate')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, t('refresh')),
       ),
       msg ? React.createElement('div', { style: { opacity: .7 } }, msg) : null,
