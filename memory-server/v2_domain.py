@@ -15,6 +15,7 @@ import uuid
 V2_SCHEMA_VERSION = 3
 
 TASK_STATUSES = ("planned", "todo", "in_progress", "completed", "failed")
+TASK_COLORS = ("neutral", "red", "orange", "yellow", "green", "blue")
 CARD_KINDS = ("task", "daily")
 CARD_ACTORS = ("user", "main_agent", "system")
 MEMORY_ACTORS = ("user", "main_agent", "model", "system")
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   parent_task_id TEXT REFERENCES tasks(id),
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
+  task_color TEXT NOT NULL DEFAULT 'neutral',
   status TEXT NOT NULL DEFAULT 'planned'
     CHECK(status IN ('planned','todo','in_progress','completed','failed')),
   blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1)),
@@ -314,6 +316,10 @@ def install_v2_schema(conn):
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }:
         _ensure_columns(conn, "sources", SOURCE_COLUMNS)
+    if "tasks" in {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }:
+        _ensure_columns(conn, "tasks", (("task_color", "TEXT NOT NULL DEFAULT 'neutral'"),))
 
 
 class V2Store:
@@ -338,18 +344,22 @@ class V2Store:
         task_id = fields.pop("task_id", None) or str(uuid.uuid4())
         now = time.time()
         blocked = bool(fields.get("blocked", False))
+        task_color = fields.get("task_color", "neutral") or "neutral"
+        if task_color not in TASK_COLORS:
+            raise InvalidTransition(f"unknown task color: {task_color}")
         if blocked and status != "in_progress":
             raise InvalidTransition("only in_progress tasks may be blocked")
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO tasks (id,parent_task_id,title,description,status,blocked,"
+                "INSERT INTO tasks (id,parent_task_id,title,description,task_color,status,blocked,"
                 "block_reason,missing_conditions,completion_criteria,source_message_id,"
-                "trace_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "trace_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task_id,
                     parent_task_id,
                     title,
                     fields.get("description", ""),
+                    task_color,
                     status,
                     int(blocked),
                     fields.get("block_reason", ""),
@@ -470,6 +480,21 @@ class V2Store:
                 row["status"],
                 row["attempt"],
                 {"reason": reason, "actor": actor},
+            )
+        return self.get_task(task_id)
+
+    def set_task_color(self, task_id, task_color, expected_version):
+        if task_color not in TASK_COLORS:
+            raise InvalidTransition(f"unknown task color: {task_color}")
+        with self._connect() as conn:
+            row = conn.execute("SELECT version FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"task not found: {task_id}")
+            if row["version"] != expected_version:
+                raise ConflictError("task version conflict")
+            conn.execute(
+                "UPDATE tasks SET task_color=?,version=version+1,updated_at=? WHERE id=?",
+                (task_color, time.time(), task_id),
             )
         return self.get_task(task_id)
 

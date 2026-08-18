@@ -2060,7 +2060,7 @@ class Handler(BaseHTTPRequestHandler):
                         body["title"], status=body.get("status", "planned"),
                         parent_task_id=body.get("parent_task_id"), **{
                             key: body[key] for key in (
-                                "description", "blocked", "block_reason", "missing_conditions",
+                                "description", "task_color", "blocked", "block_reason", "missing_conditions",
                                 "completion_criteria", "source_message_id", "trace_id",
                             ) if key in body
                         })})
@@ -2078,6 +2078,10 @@ class Handler(BaseHTTPRequestHandler):
                             task_id, bool(body.get("blocked")), int(body["expected_version"]),
                             reason=body.get("reason", ""), missing_conditions=body.get("missing_conditions", []),
                             actor=body.get("actor", "main_agent"),
+                        )})
+                    if parts[4] == "color":
+                        return self._v2_call(lambda: {"task": store.set_task_color(
+                            task_id, body.get("task_color", "neutral"), int(body["expected_version"]),
                         )})
                 if len(parts) >= 5 and parts[2] == "cards" and parts[5:] == ["restore"]:
                     return self._v2_call(lambda: {"card": store.restore_state_card(

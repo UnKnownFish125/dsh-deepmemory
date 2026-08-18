@@ -79,6 +79,25 @@ class V2HttpTest(unittest.TestCase):
         )
         self.assertEqual(200, code)
 
+    def test_task_color_create_and_update(self):
+        code, created = self.request(
+            "POST", "/v1/v2/tasks", {"title": "color", "status": "planned", "task_color": "orange"}
+        )
+        self.assertEqual(200, code)
+        task = created["task"]
+        self.assertEqual("orange", task["task_color"])
+        code, updated = self.request(
+            "POST", f"/v1/v2/tasks/{task['id']}/color",
+            {"task_color": "green", "expected_version": task["version"]},
+        )
+        self.assertEqual(200, code)
+        self.assertEqual("green", updated["task"]["task_color"])
+        code, _ = self.request(
+            "POST", f"/v1/v2/tasks/{task['id']}/color",
+            {"task_color": "purple", "expected_version": updated["task"]["version"]},
+        )
+        self.assertEqual(400, code)
+
     def test_state_card_revisions_restore_and_conflict(self):
         code, first = self.request("PUT", "/v1/v2/cards/daily/session-1", {"payload": {"goal": "a"}})
         self.assertEqual(200, code)

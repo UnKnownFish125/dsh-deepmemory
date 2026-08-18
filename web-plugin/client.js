@@ -124,7 +124,19 @@ const PANEL_CSS = `
 .dsh-mem-pcard-save:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }
 .dsh-mem-cfg-override { display:inline-flex; align-items:center; gap:4px; font-size:11px; opacity:.7; margin-left:8px; }
 .dsh-mem-sensitive-box { background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.08)); border:1px solid rgba(255,140,0,.4); border-radius:6px; padding:8px; margin:6px 0; }
-.dsh-mem-task-row { display:flex; gap:8px; padding:8px; border:1px solid var(--dsw-alias-border-l1); border-radius:6px; margin:6px 0; align-items:center; }
+.dsh-mem-task-board { display:flex; gap:10px; overflow-x:auto; align-items:stretch; padding-bottom:8px; }
+.dsh-mem-task-column { flex:0 0 190px; min-height:140px; padding:8px; border:1px solid var(--dsw-alias-border-l1); border-radius:6px; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.04)); }
+.dsh-mem-task-column-title { display:flex; justify-content:space-between; align-items:center; font-size:12px; font-weight:600; margin-bottom:8px; }
+.dsh-mem-task-card { border:1px solid var(--dsw-alias-border-l2); border-left:4px solid; padding:7px 6px; margin-bottom:6px; }
+.dsh-mem-task-card summary { cursor:pointer; font-size:13px; line-height:1.4; }
+.dsh-mem-task-color { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+.dsh-mem-task-detail { padding:7px 2px 2px; font-size:12px; }
+.dsh-mem-task-description { white-space:pre-wrap; opacity:.75; line-height:1.5; margin-bottom:8px; }
+.dsh-mem-task-controls { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }
+.dsh-mem-task-color-label { display:flex; align-items:center; gap:5px; }
+.dsh-mem-task-color-label select { max-width:90px; }
+.dsh-mem-task-blocked { color:#e05858; margin-bottom:6px; }
+.dsh-mem-task-empty { opacity:.45; font-size:12px; padding:8px 2px; }
 .dsh-mem-task-row-blocked { border-color:#e05858; background:rgba(224,88,88,.08); }
 
 `
@@ -660,33 +672,36 @@ export function apply(ctx) {
     const [creating, setCreating] = React.useState(false)
     const [newTitle, setNewTitle] = React.useState('')
     const [newDesc, setNewDesc] = React.useState('')
+    const [newColor, setNewColor] = React.useState('neutral')
     const [msg, setMsg] = React.useState('')
+    const colors = { neutral: '#8a8f98', red: '#d94f4f', orange: '#e58a32', yellow: '#c6a52b', green: '#3e9b68', blue: '#4c83c3' }
+    const colorNames = { neutral: '默认', red: '红', orange: '橙', yellow: '黄', green: '绿', blue: '蓝' }
     async function load() {
-      const res = await api('GET', '/v1/v2/tasks?limit=50')
+      const res = await api('GET', '/v1/v2/tasks?limit=100')
       if (res && Array.isArray(res.tasks)) setTasks(res.tasks)
     }
     React.useEffect(function () { load() }, [])
     async function createTask() {
       if (!newTitle.trim()) return
-      const res = await api('POST', '/v1/v2/tasks', { title: newTitle.trim(), description: newDesc.trim(), status: 'todo' })
-      if (res && res.task) { setNewTitle(''); setNewDesc(''); setCreating(false); load(); setMsg(t('saved')) }
+      const res = await api('POST', '/v1/v2/tasks', { title: newTitle.trim(), description: newDesc.trim(), task_color: newColor, status: 'planned' })
+      if (res && res.task) { setNewTitle(''); setNewDesc(''); setNewColor('neutral'); setCreating(false); load(); setMsg(t('saved')) }
       else setMsg(t('cfgFail') + (res.error || ''))
     }
     async function transition(task, toStatus) {
-      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/transition', {
-        to_status: toStatus, expected_version: task.version, reason: 'UI transition'
-      })
-      if (res && res.task) { load(); setMsg(t('saved')) }
-      else setMsg(t('cfgFail') + (res.error || ''))
+      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/transition', { to_status: toStatus, expected_version: task.version, reason: 'UI transition' })
+      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
     }
     async function toggleBlocked(task) {
-      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/blocked', {
-        blocked: !task.blocked, expected_version: task.version, reason: task.blocked ? 'unblock' : 'block', missing_conditions: []
-      })
-      if (res && res.task) { load(); setMsg(t('saved')) }
-      else setMsg(t('cfgFail') + (res.error || ''))
+      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/blocked', { blocked: !task.blocked, expected_version: task.version, reason: task.blocked ? 'unblock' : 'block', missing_conditions: [] })
+      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
+    }
+    async function setColor(task, color) {
+      if (color === (task.task_color || 'neutral')) return
+      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/color', { task_color: color, expected_version: task.version })
+      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
     }
     const statusMap = { planned: t('planned'), todo: t('todo'), in_progress: t('inProgress'), completed: t('completed'), failed: t('failed') }
+    const canTransition = { planned: ['todo'], todo: ['in_progress'], in_progress: ['completed', 'failed'], completed: [], failed: ['todo', 'in_progress'] }
     return React.createElement('div', { className: 'dsh-mem-panel' },
       React.createElement('div', { className: 'dsh-mem-actions' },
         React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('tasks')),
@@ -696,41 +711,36 @@ export function apply(ctx) {
       ),
       msg ? React.createElement('div', { style: { opacity: .7 } }, msg) : null,
       creating ? React.createElement('div', { className: 'dsh-mem-box' },
-        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
-          React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskTitle')),
-          React.createElement('input', { className: 'dsh-mem-input', value: newTitle, onChange: function (e) { setNewTitle(e.target.value) } }),
-        ),
-        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0 } },
-          React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskDesc')),
-          React.createElement('textarea', { className: 'dsh-mem-input', style: { minHeight: 60 }, value: newDesc, onChange: function (e) { setNewDesc(e.target.value) } }),
-        ),
+        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } }, React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskTitle')), React.createElement('input', { className: 'dsh-mem-input', value: newTitle, onChange: function (e) { setNewTitle(e.target.value) } })),
+        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0 } }, React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskDesc')), React.createElement('textarea', { className: 'dsh-mem-input', style: { minHeight: 60 }, value: newDesc, onChange: function (e) { setNewDesc(e.target.value) } })),
+        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0 } }, React.createElement('span', { className: 'dsh-mem-cfg-label' }, '颜色'), React.createElement('select', { className: 'dsh-mem-input', value: newColor, onChange: function (e) { setNewColor(e.target.value) } }, Object.keys(colors).map(function (c) { return React.createElement('option', { key: c, value: c }, colorNames[c]) }))),
         React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: createTask }, t('save')),
       ) : null,
-      React.createElement('div', { className: 'dsh-mem-box' },
-        tasks.length ? tasks.map(function (task) {
-          const canTransition = { planned: ['todo'], todo: ['in_progress'], in_progress: ['completed', 'failed'], completed: [], failed: ['todo', 'in_progress'] }
-          const nextStates = canTransition[task.status] || []
-          return React.createElement('div', { key: task.id, className: 'dsh-mem-task-row' + (task.blocked ? ' dsh-mem-task-row-blocked' : '') },
-            React.createElement('div', { style: { flex: 1 } },
-              React.createElement('div', { style: { fontWeight: 500 } }, task.title),
-              React.createElement('div', { style: { fontSize: 11, opacity: .7, marginTop: 2 } },
-                React.createElement('span', { className: 'dsh-mem-badge' }, statusMap[task.status] || task.status),
-                task.blocked ? React.createElement('span', { style: { marginLeft: 6, color: '#e05858' } }, '🚫 ' + t('taskBlocked')) : null,
-              ),
-            ),
-            React.createElement('button', {
-              className: 'dsh-mem-btn' + (task.blocked ? '' : ' dsh-mem-btn-warn'),
-              onClick: function () { toggleBlocked(task) }
-            }, task.blocked ? t('taskUnblock') : t('taskBlocked')),
-            nextStates.map(function (st) {
-              return React.createElement('button', { key: st, className: 'dsh-mem-btn', onClick: function () { transition(task, st) } }, '→ ' + (statusMap[st] || st))
-            }),
+      React.createElement('div', { className: 'dsh-mem-task-board' },
+        ['planned', 'todo', 'in_progress', 'completed', 'failed'].map(function (status) {
+          const items = tasks.filter(function (task) { return task.status === status })
+          return React.createElement('section', { key: status, className: 'dsh-mem-task-column' },
+            React.createElement('div', { className: 'dsh-mem-task-column-title' }, React.createElement('span', null, statusMap[status]), React.createElement('span', { className: 'dsh-mem-badge' }, String(items.length))),
+            items.length ? items.map(function (task) {
+              const color = task.task_color || 'neutral'
+              return React.createElement('details', { key: task.id, className: 'dsh-mem-task-card', style: { borderLeftColor: colors[color] || colors.neutral } },
+                React.createElement('summary', null, React.createElement('span', { className: 'dsh-mem-task-color', style: { background: colors[color] || colors.neutral }, title: colorNames[color] || color }), task.title),
+                React.createElement('div', { className: 'dsh-mem-task-detail' },
+                  task.description ? React.createElement('div', { className: 'dsh-mem-task-description' }, task.description) : null,
+                  task.blocked ? React.createElement('div', { className: 'dsh-mem-task-blocked' }, t('taskBlocked')) : null,
+                  React.createElement('label', { className: 'dsh-mem-task-color-label' }, '颜色 ', React.createElement('select', { value: color, onChange: function (e) { setColor(task, e.target.value) } }, Object.keys(colors).map(function (c) { return React.createElement('option', { key: c, value: c }, colorNames[c]) }))),
+                  React.createElement('div', { className: 'dsh-mem-task-controls' },
+                    status === 'in_progress' ? React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-warn', onClick: function () { toggleBlocked(task) } }, task.blocked ? t('taskUnblock') : t('taskBlocked')) : null,
+                    (canTransition[status] || []).map(function (st) { return React.createElement('button', { key: st, className: 'dsh-mem-btn', onClick: function () { transition(task, st) } }, statusMap[st]) }),
+                  ),
+                ),
+              )
+            }) : React.createElement('div', { className: 'dsh-mem-task-empty' }, t('noTasks')),
           )
-        }) : React.createElement('div', { style: { opacity: .6 } }, t('noTasks')),
+        }),
       ),
     )
   }
-
 
   function MemoryPanel(props) {
     const [view, setView] = React.useState('main')

@@ -84,6 +84,16 @@ class V2DomainTest(unittest.TestCase):
                     "VALUES ('bad','bad','unknown',0,0)"
                 )
 
+    def test_task_color_is_persistent_validated_and_versioned(self):
+        task = self.store.create_task("colored", task_color="blue")
+        self.assertEqual("blue", task["task_color"])
+        task = self.store.set_task_color(task["id"], "red", task["version"])
+        self.assertEqual("red", task["task_color"])
+        with self.assertRaises(ConflictError):
+            self.store.set_task_color(task["id"], "green", 1)
+        with self.assertRaises(InvalidTransition):
+            self.store.set_task_color(task["id"], "purple", task["version"])
+
     def test_failure_and_reopen_history_is_append_only(self):
         task = self.store.create_task("retry", status="todo")
         task = self.store.transition_task(task["id"], "in_progress", task["version"])
