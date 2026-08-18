@@ -4,7 +4,7 @@
 [![Platform: DeepSeek Harness](https://img.shields.io/badge/Platform-DeepSeek%20Harness-4c8dff)](https://github.com/deepseek-ai)
 [**中文版**](README.zh-CN.md)
 
-Give your DeepSeek Harness agents **cross-session memory** and a **near-infinite context**. Facts, preferences, decisions, plans and tasks survive across sessions — structured, searchable and protected. Conceptually aligned with [AstrBot livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory), implemented natively for DSH: a Python memory backend, a Cordis web plugin and three agent presets.
+Give your DeepSeek Harness agents **cross-session memory** and a **near-infinite context**. Facts, preferences, decisions, plans and tasks survive across sessions — structured, searchable and protected. Conceptually aligned with [AstrBot living memory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory), implemented natively for DSH: a Python memory backend, a Cordis web plugin and three agent presets.
 
 ## Highlights
 
@@ -104,7 +104,7 @@ Switching providers (e.g. `local` → `api`) is safe: the FAISS index is rebuilt
 └────────────────────────────────────────┘
 ```
 
-## Design References
+## Inspiration & References
 
 - [Generative Agents: Interactive Simulacra of Human Behavior](https://arxiv.org/abs/2304.03442) — memory stream, recency × importance × relevance retrieval, reflection
 - [Memory in the Age of AI Agents: A Survey](https://arxiv.org/abs/2512.13564) — 2025 survey of agent memory architectures
@@ -112,4 +112,4 @@ Switching providers (e.g. `local` → `api`) is safe: the FAISS index is rebuilt
 
 ## License
 
-**AGPL-3.0**. Design credit to [AstrBot livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory) by [lxfight](https://github.com/lxfight-s); this project is an independent native implementation for DeepSeek Harness, not a code port. Modifications, derivatives and distribution (including network service provision) must comply with AGPL terms.
+**AGPL-3.0**. Design credit to [AstrBot living memory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory) by [lxfight](https://github.com/lxfight-s); this project is an independent native implementation for DeepSeek Harness, not a code port. Modifications, derivatives and distribution (including network service provision) must comply with AGPL terms.
