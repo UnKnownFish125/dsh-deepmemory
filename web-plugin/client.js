@@ -37,7 +37,7 @@ const I18N = {
     expand: '展开原文', approvalGranted: '已授权（剩余N次）', approvalExpired: '授权已过期',
     tasks: '任务看板', taskTitle: '任务标题', taskDesc: '任务描述', taskStatus: '状态',
     taskCreate: '创建任务', taskEdit: '编辑', taskBlocked: '阻塞', taskUnblock: '解除阻塞',
-    planned: '计划', todo: '待办', inProgress: '进行中', completed: '完成', failed: '失败',
+    planned: '待规划', todo: '待办', inProgress: '进行中', completed: '已完成', failed: '已失败',
     blockReason: '阻塞原因', noTasks: '（无任务）', taskTransition: '流转', cardRevisions: '修订历史',
   },
   en: {
@@ -124,20 +124,23 @@ const PANEL_CSS = `
 .dsh-mem-pcard-save:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }
 .dsh-mem-cfg-override { display:inline-flex; align-items:center; gap:4px; font-size:11px; opacity:.7; margin-left:8px; }
 .dsh-mem-sensitive-box { background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.08)); border:1px solid rgba(255,140,0,.4); border-radius:6px; padding:8px; margin:6px 0; }
-.dsh-mem-task-board { display:flex; gap:10px; overflow-x:auto; align-items:stretch; padding-bottom:8px; }
-.dsh-mem-task-column { flex:0 0 190px; min-height:140px; padding:8px; border:1px solid var(--dsw-alias-border-l1); border-radius:6px; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.04)); }
-.dsh-mem-task-column-title { display:flex; justify-content:space-between; align-items:center; font-size:12px; font-weight:600; margin-bottom:8px; }
-.dsh-mem-task-card { border:1px solid var(--dsw-alias-border-l2); border-left:4px solid; padding:7px 6px; margin-bottom:6px; }
-.dsh-mem-task-card summary { cursor:pointer; font-size:13px; line-height:1.4; }
-.dsh-mem-task-color { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
-.dsh-mem-task-detail { padding:7px 2px 2px; font-size:12px; }
-.dsh-mem-task-description { white-space:pre-wrap; opacity:.75; line-height:1.5; margin-bottom:8px; }
-.dsh-mem-task-controls { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }
-.dsh-mem-task-color-label { display:flex; align-items:center; gap:5px; }
+.dsh-mem-task-board { display:grid; grid-template-columns:repeat(5, minmax(210px, 1fr)); gap:8px; overflow-x:auto; align-items:stretch; padding:2px 0 10px; scrollbar-width:thin; }
+.dsh-mem-task-column { min-width:210px; min-height:360px; padding:7px; border:0; border-radius:8px; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.035)); }
+.dsh-mem-task-column-title { min-height:38px; display:flex; justify-content:space-between; align-items:center; padding:4px 7px 10px; color:var(--dsw-alias-label-secondary, #a3a6ac); font-size:12px; font-weight:500; }
+.dsh-mem-task-column-title .dsh-mem-badge { border:0; background:transparent; color:var(--dsw-alias-label-tertiary, #6f737b); padding:0; }
+.dsh-mem-task-card { position:relative; overflow:hidden; border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.18)); border-radius:7px; padding:0; margin-bottom:7px; background:var(--dsw-alias-bg-layer-2, rgba(30,31,35,.72)); transition:border-color .15s, background .15s; }
+.dsh-mem-task-card:hover, .dsh-mem-task-card[open] { border-color:var(--dsw-alias-label-dimmed, rgba(128,128,128,.45)); background:var(--dsw-alias-bg-layer-3, rgba(38,39,44,.9)); }
+.dsh-mem-task-card summary { position:relative; cursor:pointer; list-style:none; min-height:44px; padding:11px 12px 11px 16px; color:var(--dsw-alias-label-primary, #e5e5e5); font-size:13px; line-height:1.45; }
+.dsh-mem-task-card summary::-webkit-details-marker { display:none; }
+.dsh-mem-task-priority { position:absolute; z-index:1; inset:10px auto 10px 0; width:3px; border-radius:0 2px 2px 0; }
+.dsh-mem-task-detail { border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.12)); padding:10px 12px 12px; font-size:12px; }
+.dsh-mem-task-description { white-space:pre-wrap; color:var(--dsw-alias-label-secondary, #a3a6ac); line-height:1.55; margin-bottom:10px; }
+.dsh-mem-task-controls { display:flex; flex-wrap:wrap; gap:5px; margin-top:9px; }
+.dsh-mem-task-color-label { display:flex; align-items:center; gap:6px; color:var(--dsw-alias-label-tertiary, #777b82); }
 .dsh-mem-task-color-label select { max-width:90px; }
-.dsh-mem-task-blocked { color:#e05858; margin-bottom:6px; }
-.dsh-mem-task-empty { opacity:.45; font-size:12px; padding:8px 2px; }
-.dsh-mem-task-row-blocked { border-color:#e05858; background:rgba(224,88,88,.08); }
+.dsh-mem-task-blocked { display:inline-flex; color:#d16a63; border:1px solid rgba(209,106,99,.35); border-radius:4px; padding:2px 6px; margin-bottom:7px; font-size:11px; }
+.dsh-mem-task-empty { color:var(--dsw-alias-label-tertiary, #696d74); font-size:12px; padding:9px 7px; }
+@media (max-width:760px) { .dsh-mem-task-board { grid-template-columns:repeat(5, minmax(82vw, 82vw)); } .dsh-mem-task-column { min-width:82vw; } }
 
 `
 
@@ -719,12 +722,13 @@ export function apply(ctx) {
       React.createElement('div', { className: 'dsh-mem-task-board' },
         ['planned', 'todo', 'in_progress', 'completed', 'failed'].map(function (status) {
           const items = tasks.filter(function (task) { return task.status === status })
-          return React.createElement('section', { key: status, className: 'dsh-mem-task-column' },
+          return React.createElement('section', { key: status, className: 'dsh-mem-task-column', 'data-status': status },
             React.createElement('div', { className: 'dsh-mem-task-column-title' }, React.createElement('span', null, statusMap[status]), React.createElement('span', { className: 'dsh-mem-badge' }, String(items.length))),
             items.length ? items.map(function (task) {
               const color = task.task_color || 'neutral'
-              return React.createElement('details', { key: task.id, className: 'dsh-mem-task-card', style: { borderLeftColor: colors[color] || colors.neutral } },
-                React.createElement('summary', null, React.createElement('span', { className: 'dsh-mem-task-color', style: { background: colors[color] || colors.neutral }, title: colorNames[color] || color }), task.title),
+              return React.createElement('details', { key: task.id, className: 'dsh-mem-task-card' },
+                React.createElement('span', { className: 'dsh-mem-task-priority', style: { background: colors[color] || colors.neutral }, title: colorNames[color] || color }),
+                React.createElement('summary', null, task.title),
                 React.createElement('div', { className: 'dsh-mem-task-detail' },
                   task.description ? React.createElement('div', { className: 'dsh-mem-task-description' }, task.description) : null,
                   task.blocked ? React.createElement('div', { className: 'dsh-mem-task-blocked' }, t('taskBlocked')) : null,

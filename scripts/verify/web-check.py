@@ -69,7 +69,7 @@ with sync_playwright() as p:
     tab.click()
 
     # 5. 记忆面板渲染出内容
-    panel = page.locator(".dsh-mem-panel").first
+    panel = page.locator(".dsh-mem-panel:visible").first
     panel.wait_for(state="visible", timeout=30000)
     text = panel.inner_text()
     if len(text) < 20:
@@ -126,13 +126,36 @@ with sync_playwright() as p:
     # 先关闭 Settings 返回记忆面板
     page.keyboard.press("Escape")
     page.wait_for_timeout(1500)
+    memory_tab = page.get_by_text("记忆", exact=True)
+    if memory_tab.count() > 0:
+        memory_tab.first.click()
+        page.wait_for_timeout(700)
+    panel = page.locator(".dsh-mem-panel:visible").first
+    panel_back = panel.locator("button:visible").filter(has_text="返回")
+    if panel_back.count() == 0:
+        panel_back = panel.locator("button:visible").filter(has_text="Back")
+    if panel_back.count() > 0:
+        panel_back.first.click()
+        page.wait_for_timeout(700)
     # 检查任务看板按钮存在（验证功能已添加）
-    task_btn = page.get_by_text("任务看板", exact=True)
+    task_btn = panel.locator("button:visible").filter(has_text="任务看板")
     if task_btn.count() == 0:
-        task_btn = page.get_by_text("Task Board", exact=True)
+        task_btn = panel.locator("button:visible").filter(has_text="Task Board")
     if task_btn.count() == 0:
         raise AssertionError("6. 任务看板按钮未找到")
-    print("6. 任务看板按钮存在 OK")
+    task_btn.first.click()
+    page.wait_for_timeout(1000)
+    board = panel.locator(".dsh-mem-task-board").first
+    board.wait_for(state="visible", timeout=10000)
+    if board.locator(".dsh-mem-task-column").count() != 5:
+        raise AssertionError("6. 任务看板不是固定五列")
+    if board.locator(".dsh-mem-task-column[data-status='todo']").count() != 1 or board.locator(".dsh-mem-task-column[data-status='in_progress']").count() != 1:
+        raise AssertionError("6. 待办与进行中没有独立列")
+    if board.locator(".dsh-mem-task-priority").count() == 0 and board.locator(".dsh-mem-task-card").count() > 0:
+        raise AssertionError("6. 任务卡缺少 B 版颜色识别条")
+    print("6. B 版任务看板固定五列 OK")
+    panel.locator("button:visible").filter(has_text="返回").first.click()
+    page.wait_for_timeout(700)
 
     # 7. AST-25 P1: 会话配置验证（默认配置保存 + session override/reset 逻辑存在）
     # 注：完整测试需要真实会话 ID，这里验证 UI 元素存在即可
