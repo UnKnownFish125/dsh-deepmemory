@@ -37,6 +37,15 @@ def main():
     # 3) 包裹（幂等）
     already = src.startswith("__ModuleLoader__.load({")
     if already:
+        src, replacements = re.subn(
+            r"(__ModuleLoader__\.load\(\{\s*id:\s*)'[^']+'",
+            lambda match: match.group(1) + repr(pid),
+            src,
+            count=1,
+        )
+        if replacements != 1:
+            print("ERROR: 已包裹文件缺少 loader id")
+            sys.exit(1)
         src = ensure_react_binding(src)
         open(path, 'w').write(src + "\n")
         print("已包裹，跳过包裹（仅清理 import/export）")
@@ -56,6 +65,12 @@ def main():
         sys.exit(1)
     if "require('react')" not in final:
         print("ERROR: React 绑定缺失")
+        sys.exit(1)
+    loader_id = re.search(r"__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'", final)
+    if not loader_id or loader_id.group(1) != pid:
+        print("ERROR: loader id 不匹配: %s != %s" % (
+            loader_id.group(1) if loader_id else "<missing>", pid
+        ))
         sys.exit(1)
     r = subprocess.run(['node', '--check', path], capture_output=True, text=True)
     if r.returncode != 0:

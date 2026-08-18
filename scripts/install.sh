@@ -90,7 +90,7 @@ for f in client.js index.js package.json dsh.patch.yml; do
 done
 # client.js 幂等转换为 __ModuleLoader__.load 格式（自动，无需手工）
 if [ -f "${ROOT}/scripts/fix-client-bundle.py" ]; then
-  "${VENV_PY}" "${ROOT}/scripts/fix-client-bundle.py" "${PLUGIN_DIR}/client.js" deepmemory
+  "${VENV_PY}" "${ROOT}/scripts/fix-client-bundle.py" "${PLUGIN_DIR}/client.js" dsh-deepmemory
   LAYERS=$(grep -c '__ModuleLoader__.load({' "${PLUGIN_DIR}/client.js" || true)
   [ "${LAYERS}" = "1" ] || die "client.js 转换后包裹层数=${LAYERS}，需人工处理"
   say "   client.js 已转换为 __ModuleLoader__ 格式"

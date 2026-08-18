@@ -11,6 +11,7 @@ const ReactDOMServer = require('react-dom/server')
 
 const src = fs.readFileSync(path, 'utf8')
 let renderFn = null
+let loaderId = null
 const fakeSlots = {
   inject: (key, cb) => { cb() },
   register: (config, fn) => { renderFn = fn; return () => {} },
@@ -24,10 +25,11 @@ const sandbox = {
   document: { createElement: () => ({ dataset: {}, style: {}, appendChild() {}, remove() {} }), head: { appendChild() {} } },
   fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({ memories: [], card: null, documents: 0, archived: 0, atoms: 0, session_enabled: true }) }),
   console,
-  __ModuleLoader__: { load: (spec) => { const m = spec.factory(sandbox.require); m.apply(fakeCtx) } },
+  __ModuleLoader__: { load: (spec) => { loaderId = spec.id; const m = spec.factory(sandbox.require); m.apply(fakeCtx) } },
 }
 vm.createContext(sandbox)
 vm.runInNewContext(src, sandbox, { filename: 'client.js' })
+if (loaderId !== 'dsh-deepmemory') throw new Error('loader id 异常: ' + loaderId)
 if (typeof renderFn !== 'function') throw new Error('slot renderFn 未注册')
 const html = ReactDOMServer.renderToString(React.createElement(renderFn, { sessionId: 'verify' }))
 if (!html || html.length < 100) throw new Error('渲染输出为空或异常: ' + html.length)
