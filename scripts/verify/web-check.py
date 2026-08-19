@@ -103,27 +103,37 @@ with sync_playwright() as p:
             page.evaluate("async ({id}) => { await fetch('/mem-api/v1/memories/' + id, {method:'DELETE'}); }", {"id": fixture_id})
 
     # 4. 图谱视图：Obsidian 交互（节点拖拽 + hover 高亮 + 重置）
-    page.get_by_text("图谱", exact=True).first.click()
-    svg = page.locator(".dsh-mem-graph-svg").first
-    svg.wait_for(state="visible", timeout=20000)
-    circles = page.locator(".dsh-mem-graph-node")
-    if circles.count() > 0:
-        c1 = circles.first.bounding_box()
-        cx = c1["x"] + c1["width"] / 2
-        cy = c1["y"] + c1["height"] / 2
-        # React 合成事件用原生 dispatch 更可靠（playwright mouse API 有时不触发 React handler）
-        circles.first.dispatch_event("mousedown", {"bubbles": True, "clientX": cx, "clientY": cy, "button": 0})
-        for i in range(1, 11):
-            svg.dispatch_event("mousemove", {"bubbles": True, "clientX": cx + i * 7, "clientY": cy + i * 4.5})
-        svg.dispatch_event("mouseup", {"bubbles": True, "clientX": cx + 70, "clientY": cy + 45})
-        page.wait_for_timeout(600)
-        c2 = circles.first.bounding_box()
-        moved = abs(c2["x"] - c1["x"]) + abs(c2["y"] - c1["y"])
-        if moved < 8:
-            raise AssertionError("图谱节点拖拽无效: 位移 " + str(moved))
-        print("4. 图谱节点拖拽 OK (位移", round(moved, 1), "px)")
-    else:
-        print("4. 图谱暂无节点（跳过拖拽断言）")
+    # 空数据时图谱只显示"（暂无）"且不渲染 SVG，先写入带实体/关系的记忆让图有节点
+    graph_fixture = "web-check-graph-fixture"
+    graph_id = page.evaluate("""async ({content}) => {
+      const r = await fetch('/mem-api/v1/memories/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content: content, type:'fact', scope:'workspace', domain:'work', importance:0.6, workspace_id:'deepseek-hardness', entities:[{name:'图谱试验机', kind:'tool'}], relations:[{source:'图谱试验机', relation:'验证', target:'图谱链路'}]})});
+      return (await r.json()).id;
+    }""", {"content": graph_fixture})
+    try:
+        page.get_by_text("图谱", exact=True).first.click()
+        svg = page.locator(".dsh-mem-graph-svg").first
+        svg.wait_for(state="visible", timeout=20000)
+        circles = page.locator(".dsh-mem-graph-node")
+        if circles.count() > 0:
+            c1 = circles.first.bounding_box()
+            cx = c1["x"] + c1["width"] / 2
+            cy = c1["y"] + c1["height"] / 2
+            # React 合成事件用原生 dispatch 更可靠（playwright mouse API 有时不触发 React handler）
+            circles.first.dispatch_event("mousedown", {"bubbles": True, "clientX": cx, "clientY": cy, "button": 0})
+            for i in range(1, 11):
+                svg.dispatch_event("mousemove", {"bubbles": True, "clientX": cx + i * 7, "clientY": cy + i * 4.5})
+            svg.dispatch_event("mouseup", {"bubbles": True, "clientX": cx + 70, "clientY": cy + 45})
+            page.wait_for_timeout(600)
+            c2 = circles.first.bounding_box()
+            moved = abs(c2["x"] - c1["x"]) + abs(c2["y"] - c1["y"])
+            if moved < 8:
+                raise AssertionError("图谱节点拖拽无效: 位移 " + str(moved))
+            print("4. 图谱节点拖拽 OK (位移", round(moved, 1), "px)")
+        else:
+            print("4. 图谱暂无节点（跳过拖拽断言）")
+    finally:
+        if graph_id:
+            page.evaluate("async ({id}) => { await fetch('/mem-api/v1/memories/' + id, {method:'DELETE'}); }", {"id": graph_id})
 
     # 5. 设置 → 插件 → 插件配置：deepmemory 官方风卡片折叠/展开
     page.get_by_text("Settings", exact=True).first.click()

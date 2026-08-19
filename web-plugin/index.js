@@ -12,7 +12,7 @@ export const name = 'deepmemory'
 export const inject = ['webServer']
 
 const TARGET_HOST = 'localhost'
-const TARGET_PORT = 6230
+const TARGET_PORT = Number(process.env.MEMORY_SERVER_PORT || 6230)
 const PREFIX = '/mem-api'
 const TOKEN_FILE = process.env.MEMORY_API_TOKEN_FILE || `${process.env.DSH_HOME || process.env.HOME}/.dsh-memory-api-token`
 

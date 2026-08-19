@@ -137,8 +137,10 @@ say "   preset 已就位"
 
 # 三套独立 preset（新会话选择器直接可选）: task / daily / blank-template
 # 共享插件目录用 _ 前缀，避开 PRESET_ID (^[a-z0-9]) 规则，不会被扫成 broken preset
-for p in harness-memory-task harness-memory-daily; do
-  rsync -a --delete "${ROOT}/agent-preset/${p}/" "${DSH_HOME}/.agent-presets/${p}/"
+for pair in "task:harness-memory-task" "daily:harness-memory-daily"; do
+  src="${pair%%:*}"
+  dst="${pair##*:}"
+  rsync -a --delete "${ROOT}/agent-preset/${src}/" "${DSH_HOME}/.agent-presets/${dst}/"
 done
 rsync -a --delete "${ROOT}/agent-preset/blank-template/" "${DSH_HOME}/.agent-presets/harness-memory-blank/"
 rsync -a --delete "${ROOT}/agent-preset/memory-plugin/" "${DSH_HOME}/.agent-presets/_memory-plugin/"

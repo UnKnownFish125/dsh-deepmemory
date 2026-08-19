@@ -170,8 +170,25 @@ PY
   [ -f "$REAL_HOME/settings.yaml" ] && cp "$REAL_HOME/settings.yaml" "$VHOME/"
   # 凭证：让验证会话能真实发一条消息（临时复制，验证完随 VHOME 删除）
   [ -f "$REAL_HOME/.credentials.yaml" ] && cp "$REAL_HOME/.credentials.yaml" "$VHOME/"
+  # /mem-api 代理目标：起隔离 memory-server（临时 data + 随机端口）。
+  # 不生成 api-token（API_TOKEN_FILE 不存在 → server 不要求鉴权），
+  # 避免依赖外部 6230 实例——加固鉴权后外部实例会拒绝无 token 的 verify 请求。
+  MPORT=$((20000 + RANDOM % 20000))
+  MTMP=$(mktemp -d "$VERIFY_TMP_ROOT/memsrv-XXXXXX")
+  cp "$ROOT/memory-server/"*.py "$ROOT/memory-server/"*.json "$MTMP/" 2>/dev/null
+  [ -d "$ROOT/memory-server/models" ] && ln -s "$ROOT/memory-server/models" "$MTMP/models"
+  MEMORY_SERVER_PORT=$MPORT "$VENV_PY" "$MTMP/server.py" >"$MTMP/run.log" 2>&1 &
+  MSPID=$!
+  MUP=0
+  for _ in $(seq 1 40); do
+    sleep 1
+    curl -s -m 3 "http://localhost:$MPORT/v1/health" | grep -q '"status": "ok"' && { MUP=1; break; }
+  done
+  if [ "$MUP" != "1" ]; then
+    bad; tail -5 "$MTMP/run.log"
+  else
   WPORT=$((30000 + RANDOM % 15000))
-  DSH_HOME="$VHOME" node /usr/local/bin/dsh web --port "$WPORT" >"$VHOME/web.log" 2>&1 &
+  DSH_HOME="$VHOME" MEMORY_SERVER_PORT=$MPORT node /usr/local/bin/dsh web --port "$WPORT" >"$VHOME/web.log" 2>&1 &
   WPID=$!
   WUP=0
   for _ in $(seq 1 90); do
@@ -184,6 +201,9 @@ PY
     VERIFY_BASE_URL="http://localhost:$WPORT" VERIFY_SHOT="$VHOME/shot.png" "$WEBPY" "$HERE/verify/web-check.py" && ok || bad
   fi
   kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
+  fi
+  kill "$MSPID" 2>/dev/null; wait "$MSPID" 2>/dev/null
+  rm -rf "$MTMP"
   rm -rf "$VHOME"
 fi
 
