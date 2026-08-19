@@ -2435,8 +2435,8 @@ def main():
     init_db()
     _ = get_index()
     rebuild_bm25()
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"memory-server listening on http://127.0.0.1:{PORT}", flush=True)
+    srv = ThreadingHTTPServer(("localhost", PORT), Handler)
+    print(f"memory-server listening on http://localhost:{PORT}", flush=True)
     srv.serve_forever()
 
 

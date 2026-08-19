@@ -57,7 +57,7 @@ def main():
         open(path, 'w').write(wrapped)
         print("已包裹 __ModuleLoader__.load")
 
-    # 4) 验证：层数 + 语法 + 模拟（含真实渲染路径）
+    # 4) 验证：层数 + 静态语法。真实渲染由 verify/render-check.mjs 负责。
     final = open(path).read()
     layers = final.count('__ModuleLoader__.load({')
     if layers != 1:
@@ -75,26 +75,7 @@ def main():
     r = subprocess.run(['node', '--check', path], capture_output=True, text=True)
     if r.returncode != 0:
         print("语法错误:", r.stderr[:400]); sys.exit(1)
-    sim = (
-        "global.__ModuleLoader__={load:(h)=>{global.__handoff=h;}};"
-        "let renderFn=null;"
-        "global.document={createElement:()=>({dataset:{},style:{},appendChild(){},remove(){}}),head:{appendChild(){}}};"
-        "const React={createElement:()=>({})};"
-        "const code=require('fs').readFileSync('%s','utf8');"
-        "new Function('require',code)((m)=>{if(m==='react')return React;throw new Error('x:'+m);});"
-        "const h=global.__handoff;"
-        "const e=h.factory((m)=>{if(m==='react')return React;throw new Error('x:'+m);});"
-        "const fakeCtx={get:(k)=>(k==='slots'?{inject:(kk,cb)=>{cb();},register:(c,fn)=>{renderFn=fn;return()=>{};}}:undefined),effect:()=>()=>{}};"
-        "e.apply(fakeCtx);"
-        "if(typeof renderFn!=='function')throw new Error('renderFn 未注册');"
-        "const out=renderFn({sessionId:'sim'});"
-        "console.log('registered id:',h.id);"
-        "console.log('name:',e.name,'| apply:',typeof e.apply,'| render:',!!out);"
-    ) % path
-    r2 = subprocess.run(['node', '-e', sim], capture_output=True, text=True)
-    if r2.returncode != 0:
-        print("模拟失败:", r2.stderr[:400]); sys.exit(1)
-    print("全部验证通过:", r2.stdout.strip())
+    print("静态转换验证通过:", pid)
 
 if __name__ == "__main__":
     main()

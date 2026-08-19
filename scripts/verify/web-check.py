@@ -4,7 +4,7 @@
 并断言无致命 console 错误。
 
 环境变量:
-  VERIFY_BASE_URL  临时 dsh web 实例地址 (http://127.0.0.1:PORT)
+  VERIFY_BASE_URL  临时 dsh web 实例地址 (http://localhost:PORT)
   VERIFY_SHOT      可选，最终截图输出路径
 """
 import os

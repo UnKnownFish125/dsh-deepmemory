@@ -7,7 +7,7 @@
         "description": "记忆后端地址",
         "hint": "memory-server 的 HTTP 地址，可指向远程部署",
         "type": "string",
-        "default": "http://127.0.0.1:6230"
+        "default": "http://localhost:6230"
       },
       "workspace": {
         "description": "工作区标识",

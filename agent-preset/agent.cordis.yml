@@ -253,7 +253,7 @@
 # ── long-term memory ────────────────────────────────────────────────────────
 
 # 长期记忆插件（本地实现，相对路径行）。依赖本机 memory-server
-# （systemd: dsh-memory-server，http://127.0.0.1:6230）。
+# （systemd: dsh-memory-server，http://localhost:6230）。
 # pre-step 语义召回注入 + turn-stopping 廉价 LLM 自动抽取 +
 # 工作区状态卡 + /memory on|off|status|clean 会话级开关。
 # 注册到宿主 tools 注册表、不发布服务，无需 isolate 域。

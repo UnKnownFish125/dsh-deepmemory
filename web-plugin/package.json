@@ -20,7 +20,7 @@
     "dsh.patch.yml",
     "package.json"
   ],
-  "license": "AGPL-3.0",
+  "license": "AGPL-3.0-only",
   "dsh": {
     "client": {
       "inject": [

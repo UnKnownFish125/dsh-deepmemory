@@ -72,7 +72,7 @@ systemctl restart dsh-memory-server
 sleep 2
 
 for i in 1 2 3 4 5; do
-  if HEALTH=$(curl -s --max-time 5 http://127.0.0.1:6230/v1/health); then
+  if HEALTH=$(curl -s --max-time 5 http://localhost:6230/v1/health); then
     echo "${HEALTH}" | grep -q '"status": "ok"' && break
   fi
   sleep 2
@@ -137,7 +137,7 @@ say "   三套独立 preset + 共享插件已就位"
 
 # ---------- 验证摘要 ----------
 say "安装完成。当前状态:"
-curl -s http://127.0.0.1:6230/v1/stats || true
+curl -s http://localhost:6230/v1/stats || true
 echo
 cat <<RESTART
 ==================================================================

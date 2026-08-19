@@ -32,10 +32,10 @@ class V2HttpTest(unittest.TestCase):
                 ("v2-test", "short term deploy note", "short_term", "active", 0, "active"),
             )
             self.memory_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.httpd = server.ThreadingHTTPServer(("localhost", 0), server.Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever)
         self.thread.start()
-        self.base = f"http://127.0.0.1:{self.httpd.server_port}"
+        self.base = f"http://localhost:{self.httpd.server_port}"
 
     def tearDown(self):
         self.httpd.shutdown()

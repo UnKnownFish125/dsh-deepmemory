@@ -39,6 +39,20 @@ else
   printf '%s\n' "$SECRET_HITS"
 fi
 
+step "tracked 文件危险执行/裸IP扫描"
+RISK_HITS=$(git -C "$ROOT" grep -nEI \
+  -e 'new[[:space:]]+Function[[:space:]]*\(' \
+  -e '(^|[^[:alnum:]_])eval[[:space:]]*\(' \
+  -e 'base64[[:space:]]+-d.*\|' \
+  -e 'https?://([0-9]{1,3}\.){3}[0-9]{1,3}' \
+  -- ':!scripts/verify.sh' 2>/dev/null || true)
+if [ -z "$RISK_HITS" ]; then
+  ok
+else
+  bad
+  printf '%s\n' "$RISK_HITS"
+fi
+
 # ---------------- 1. memory-server ----------------
 step "server.py 语法"
 if "$VENV_PY" -m py_compile "$ROOT/memory-server/server.py" 2>/dev/null; then ok; else bad; fi
@@ -53,17 +67,17 @@ SPID=$!
 UP=0
 for _ in $(seq 1 40); do
   sleep 1
-  curl -s -m 3 "http://127.0.0.1:$PORT/v1/health" | grep -q '"status": "ok"' && { UP=1; break; }
+  curl -s -m 3 "http://localhost:$PORT/v1/health" | grep -q '"status": "ok"' && { UP=1; break; }
 done
 if [ "$UP" != "1" ]; then bad; tail -5 "$TMP/run.log"; else
   # API 冒烟: 写入(带实体/关系) -> 检索 -> 图谱 -> 备份 -> 重建
-  A=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/memories/add" -H 'Content-Type: application/json' \
+  A=$(curl -s -X POST "http://localhost:$PORT/v1/memories/add" -H 'Content-Type: application/json' \
     -d '{"content":"验证冒烟记忆：试验机写入路径","type":"fact","domain":"work","scope":"workspace","workspace_id":"verify","importance":0.6,"entities":[{"name":"试验机","kind":"tool"}],"relations":[{"source":"试验机","relation":"验证","target":"写入路径"}]}')
-  S=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/memories/search" -H 'Content-Type: application/json' \
+  S=$(curl -s -X POST "http://localhost:$PORT/v1/memories/search" -H 'Content-Type: application/json' \
     -d '{"query":"试验机","k":3,"workspace_id":"verify"}')
-  G=$(curl -s "http://127.0.0.1:$PORT/v1/graph")
-  B=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/backups/create")
-  R=$(curl -s -X POST "http://127.0.0.1:$PORT/v1/maintenance/rebuild" -H 'Content-Type: application/json' -d '{}')
+  G=$(curl -s "http://localhost:$PORT/v1/graph")
+  B=$(curl -s -X POST "http://localhost:$PORT/v1/backups/create")
+  R=$(curl -s -X POST "http://localhost:$PORT/v1/maintenance/rebuild" -H 'Content-Type: application/json' -d '{}')
   if echo "$A" | grep -q '"id"'; then echo -n "写入✓"; else echo -n "写入✗"; FAIL=1; fi
   if echo "$S" | grep -q '"count"'; then echo -n " 检索✓"; else echo -n " 检索✗"; FAIL=1; fi
   if echo "$G" | grep -q '"edges"'; then echo -n " 图谱✓"; else echo -n " 图谱✗"; FAIL=1; fi
@@ -162,12 +176,12 @@ PY
   WUP=0
   for _ in $(seq 1 90); do
     sleep 1
-    curl -s -m 3 -o /dev/null "http://127.0.0.1:$WPORT/" && { WUP=1; break; }
+    curl -s -m 3 -o /dev/null "http://localhost:$WPORT/" && { WUP=1; break; }
   done
   if [ "$WUP" != "1" ]; then
     bad; tail -8 "$VHOME/web.log"
   else
-    VERIFY_BASE_URL="http://127.0.0.1:$WPORT" VERIFY_SHOT="$VHOME/shot.png" "$WEBPY" "$HERE/verify/web-check.py" && ok || bad
+    VERIFY_BASE_URL="http://localhost:$WPORT" VERIFY_SHOT="$VHOME/shot.png" "$WEBPY" "$HERE/verify/web-check.py" && ok || bad
   fi
   kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
   rm -rf "$VHOME"

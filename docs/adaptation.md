@@ -10,7 +10,7 @@ deepmemory = 记忆后端（memory-server）+ Web 记忆面板（web 插件）+ 
 
 | 配置键 | 默认值 | 说明 |
 |---|---|---|
-| `deepmemory.server_url` | `http://127.0.0.1:6230` | 插件连接的记忆后端地址（可改为远程地址） |
+| `deepmemory.server_url` | `http://localhost:6230` | 插件连接的记忆后端地址（可改为远程地址） |
 | `deepmemory.workspace` | `deepseek-hardness` | 当前工作区标识（绑定 workspace 级记忆） |
 | `deepmemory.extract_threshold` | `4` | 累积多少条消息触发一次自动抽取 |
 | `deepmemory.recall_k` | `5` | 每轮注入的召回记忆条数 |
@@ -18,9 +18,9 @@ deepmemory = 记忆后端（memory-server）+ Web 记忆面板（web 插件）+ 
 
 ```bash
 # 例：适配新环境（新工作区 + 远程后端）
-curl -X POST http://127.0.0.1:6230/v1/settings/set -H 'Content-Type: application/json' \
+curl -X POST http://localhost:6230/v1/settings/set -H 'Content-Type: application/json' \
   -d '{"key":"deepmemory.workspace","value":"my-project"}'
-curl -X POST http://127.0.0.1:6230/v1/settings/set -H 'Content-Type: application/json' \
+curl -X POST http://localhost:6230/v1/settings/set -H 'Content-Type: application/json' \
   -d '{"key":"deepmemory.server_url","value":"http://mem.example.com:6230"}'
 ```
 
@@ -54,9 +54,9 @@ curl -X POST http://127.0.0.1:6230/v1/settings/set -H 'Content-Type: application
 ## 五、验证清单（部署后逐项确认）
 
 ```bash
-curl -s http://127.0.0.1:6230/v1/health            # 后端健康
-curl -s http://127.0.0.1:3081/mem-api/v1/health    # 同源代理
-curl -s http://127.0.0.1:3081/ | grep -c dsh-deepmemory  # web 插件在 boot 中
+curl -s http://localhost:6230/v1/health            # 后端健康
+curl -s http://localhost:3081/mem-api/v1/health    # 同源代理
+curl -s http://localhost:3081/ | grep -c dsh-deepmemory  # web 插件在 boot 中
 ```
 
 - Web：对话页「记忆」tab 出现（第二位），面板可增删改查

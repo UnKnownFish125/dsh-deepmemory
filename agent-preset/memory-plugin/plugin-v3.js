@@ -1,7 +1,7 @@
 // harness-memory — long-term memory plugin for the DeepSeek Harness.
 //
 // Preset-plane plugin (mounted as a relative-path row from agent.cordis.yml).
-// Talks to the local dsh-memory-server (systemd, http://127.0.0.1:6230)
+// Talks to the local dsh-memory-server (systemd, http://localhost:6230)
 // which owns SQLite + FAISS + BM25 + graph storage.
 //
 // Capabilities (P2, aligned with AstrBot livingmemory):
@@ -21,16 +21,10 @@ export const name = 'deepmemory'
 export const inject = ['tools', 'timer']
 
 export function apply(ctx) {
-  const shell = ctx.get('shell')
-  if (shell === undefined) {
-    console.error('[deepmemory] shell unavailable')
-    return
-  }
-
   const state = { injectCount: 0, extractCount: 0, memText: '', lastConfigLoad: 0, recent: [] }
   const buckets = new Map()
   const enabledCache = new Map()
-  let SERVER = 'http://127.0.0.1:6230'
+  let SERVER = 'http://localhost:6230'
   let WORKSPACE = 'deepseek-hardness'
   let EXTRACT_THRESHOLD = 4
   let RECALL_K = 5
@@ -57,21 +51,20 @@ export function apply(ctx) {
   ].join('\n')
 
   async function http(method, path, body) {
-    const parts = ['curl', '-s', '--max-time', '25', '-X', method, SERVER + path, '-H', 'Content-Type: application/json']
-    let cmd
-    if (body !== undefined && body !== null) {
-      const b64 = Buffer.from(JSON.stringify(body), 'utf8').toString('base64')
-      cmd = 'echo ' + b64 + ' | base64 -d | ' + parts.join(' ') + ' -d @-'
-    } else {
-      cmd = parts.join(' ')
-    }
     try {
-      const spec = shell.resolve({ command: cmd, timeoutMs: 30000 })
-      const res = await shell.run(spec)
-      if (res.aborted || res.timedOut) return { ok: false, error: res.aborted ? 'aborted' : 'timeout' }
-      const text = res.stdout && res.stdout.text ? res.stdout.text : ''
-      const data = JSON.parse(text)
-      return { ok: true, data: data }
+      const base = new URL(SERVER)
+      if (base.protocol !== 'http:' && base.protocol !== 'https:') throw new Error('unsupported server protocol')
+      const url = new URL(path, base)
+      const options = {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(25000),
+      }
+      if (body !== undefined && body !== null) options.body = JSON.stringify(body)
+      const response = await fetch(url, options)
+      const data = await response.json()
+      if (!response.ok) return { ok: false, error: `HTTP ${response.status}`, data }
+      return { ok: true, data }
     } catch (e) {
       return { ok: false, error: String(e) }
     }

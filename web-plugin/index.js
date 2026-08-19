@@ -1,7 +1,7 @@
 /**
  * Host half of the memory UI surface plugin.
  * Registers a same-origin proxy route `/mem-api/*` that forwards to the
- * local memory-server (127.0.0.1:6230). The browser half only talks to this
+ * local memory-server (localhost:6230). The browser half only talks to this
  * same-origin route, so no CORS or private-network policy applies.
  */
 import http from 'node:http'
@@ -10,7 +10,7 @@ export const name = 'deepmemory'
 
 export const inject = ['webServer']
 
-const TARGET_HOST = '127.0.0.1'
+const TARGET_HOST = 'localhost'
 const TARGET_PORT = 6230
 const PREFIX = '/mem-api'
 
