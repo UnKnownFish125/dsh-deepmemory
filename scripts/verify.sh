@@ -25,6 +25,20 @@ VERIFY_TMP_ROOT="${VERIFY_TMP_ROOT:-/www/verify-tmp}"
 mkdir -p "$VERIFY_TMP_ROOT"
 export TMPDIR="$VERIFY_TMP_ROOT"   # playwright/chromium 的临时文件同样走数据盘
 
+# ---------------- 0. repository security hygiene ----------------
+step "tracked 文件密钥形状扫描"
+SECRET_HITS=$(git -C "$ROOT" grep -nEI \
+  -e '(^|[^[:alnum:]_])sk-[[:alnum:]_-]{12,}' \
+  -e 'AKIA[0-9A-Z]{16}' \
+  -e 'gh[pousr]_[[:alnum:]]{20,}' \
+  -- ':!scripts/verify.sh' 2>/dev/null || true)
+if [ -z "$SECRET_HITS" ]; then
+  ok
+else
+  bad
+  printf '%s\n' "$SECRET_HITS"
+fi
+
 # ---------------- 1. memory-server ----------------
 step "server.py 语法"
 if "$VENV_PY" -m py_compile "$ROOT/memory-server/server.py" 2>/dev/null; then ok; else bad; fi
