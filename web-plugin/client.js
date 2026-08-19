@@ -100,7 +100,7 @@ const PANEL_CSS = `
 .dsh-mem-cfg-item:first-child { border-top:none; }
 .dsh-mem-cfg-label { font-weight:500; }
 .dsh-mem-cfg-hint { opacity:.65; font-size:11px; line-height:1.4; }
-.dsh-mem-graph-svg { width:100%; min-height:520px; height:auto; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06)); border-radius:8px; touch-action:none; }
+.dsh-mem-graph-svg { width:100%; height:clamp(480px, 62vh, 640px); display:block; overflow:hidden; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06)); border-radius:8px; touch-action:none; }
 .dsh-mem-graph-node { transition:opacity .14s, stroke-width .14s; }
 .dsh-mem-graph-label { fill:var(--dsw-alias-label-primary, #e8e8e8); font-size:11px; paint-order:stroke; stroke:var(--dsw-alias-bg-layer-1, #17191c); stroke-width:3px; stroke-linejoin:round; pointer-events:none; }
 .dsh-mem-graph-edge { stroke:var(--dsw-alias-border-l2, rgba(128,128,128,.5)); }
@@ -194,7 +194,7 @@ export function apply(ctx) {
     })
     nodes.forEach(function (node, index) {
       const angle = index * 2.399963229728653
-      const spread = Math.min(width, height) * 0.42 * Math.sqrt((index + 1) / Math.max(1, count))
+      const spread = Math.min(width, height) * 0.47 * Math.sqrt((index + 1) / Math.max(1, count))
       const item = {
         id: node.id,
         x: cx + Math.cos(angle) * spread,
@@ -217,8 +217,8 @@ export function apply(ctx) {
           let distance2 = dx * dx + dy * dy
           if (distance2 < 1) { dx = ((i + 1) * 17 % 11) - 5; dy = ((j + 1) * 13 % 11) - 5; distance2 = dx * dx + dy * dy || 1 }
           const distance = Math.sqrt(distance2)
-          const minimum = a.radius + b.radius + 13
-          const repel = Math.min(2.8, 820 / distance2) + (distance < minimum ? (minimum - distance) * 0.08 : 0)
+          const minimum = a.radius + b.radius + 24
+          const repel = Math.min(4.2, 1450 / distance2) + (distance < minimum ? (minimum - distance) * 0.08 : 0)
           const fx = dx / distance * repel, fy = dy / distance * repel
           a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy
         }
@@ -228,13 +228,13 @@ export function apply(ctx) {
         if (!a || !b) return
         const dx = b.x - a.x, dy = b.y - a.y
         const distance = Math.sqrt(dx * dx + dy * dy) || 1
-        const target = 78 + Math.min(30, (a.radius + b.radius) * 1.2)
+        const target = 128 + Math.min(44, (a.radius + b.radius) * 1.5)
         const pull = (distance - target) * 0.008
         const fx = dx / distance * pull, fy = dy / distance * pull
         a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy
       })
       positions.forEach(function (item) {
-        item.vx += (cx - item.x) * 0.0009
+        item.vx += (cx - item.x) * 0.00032
         item.vy += (cy - item.y) * 0.0009
         item.vx *= 0.72; item.vy *= 0.72
         item.x += item.vx * (0.7 + cooling * 0.6)
@@ -276,12 +276,22 @@ export function apply(ctx) {
     const nodes = data && Array.isArray(data.nodes) ? data.nodes : []
     const edges = data && Array.isArray(data.edges) ? data.edges : []
     const W = 920, H = 560
+    // Keep the viewport fixed while the graph lives in a larger world, like Obsidian's graph view.
+    const worldScale = Math.max(3.4, Math.min(5.2, Math.sqrt(Math.max(nodes.length, 1) / 24)))
+    const WORLD_W = Math.round(W * worldScale)
+    const WORLD_H = Math.round(H * worldScale)
     const deg = {}
     edges.forEach(function (e) {
       deg[e.source_id] = (deg[e.source_id] || 0) + 1
       deg[e.target_id] = (deg[e.target_id] || 0) + 1
     })
-    const base = React.useMemo(function () { return buildGraphLayout(nodes, edges, W, H) }, [data, layoutVersion])
+    const base = React.useMemo(function () { return buildGraphLayout(nodes, edges, WORLD_W, WORLD_H) }, [data, layoutVersion, WORLD_W, WORLD_H])
+    React.useEffect(function () {
+      if (!data) return
+      const initialZoom = 1.35
+      setZoom(initialZoom)
+      setPan({ x: (W - WORLD_W * initialZoom) / 2, y: (H - WORLD_H * initialZoom) / 2 })
+    }, [data, layoutVersion, WORLD_W, WORLD_H])
     if (!data) return React.createElement('div', { className: 'dsh-mem-panel' },
       React.createElement('div', { style: { opacity: .6 } }, t('loading')))
     const getPos = function (nid) { return pos[nid] || base[nid] }
@@ -333,12 +343,38 @@ export function apply(ctx) {
     }
     function onWheel(e) {
       e.preventDefault()
-      const factor = e.deltaY < 0 ? 1.12 : 0.89
-      setZoom(function (z) { return Math.min(4, Math.max(0.42, z * factor)) })
+      const svg = e.currentTarget
+      const matrix = svg.getScreenCTM && svg.getScreenCTM()
+      if (!matrix) return
+      // Use SVG's screen matrix so responsive sizing and letterboxing cannot offset the anchor.
+      const point = svg.createSVGPoint()
+      point.x = e.clientX
+      point.y = e.clientY
+      const local = point.matrixTransform(matrix.inverse())
+      const mx = local.x
+      const my = local.y
+      const factor = Math.exp(-e.deltaY * 0.0015)
+      const nextZoom = Math.min(5, Math.max(0.28, zoom * factor))
+      const worldX = (mx - pan.x) / zoom
+      const worldY = (my - pan.y) / zoom
+      setPan({ x: mx - worldX * nextZoom, y: my - worldY * nextZoom })
+      setZoom(nextZoom)
     }
+    const viewportPadding = 90 / zoom
+    const viewport = {
+      left: -pan.x / zoom - viewportPadding,
+      top: -pan.y / zoom - viewportPadding,
+      right: (W - pan.x) / zoom + viewportPadding,
+      bottom: (H - pan.y) / zoom + viewportPadding,
+    }
+    const visibleNodeIds = new Set()
+    nodes.forEach(function (n) {
+      const p = getPos(n.id)
+      if (p && p[0] >= viewport.left && p[0] <= viewport.right && p[1] >= viewport.top && p[1] <= viewport.bottom) visibleNodeIds.add(String(n.id))
+    })
     const edgeEls = edges.map(function (e, i) {
       const a = getPos(e.source_id), b = getPos(e.target_id)
-      if (!a || !b) return null
+      if (!a || !b || (!visibleNodeIds.has(String(e.source_id)) && !visibleNodeIds.has(String(e.target_id)))) return null
       const hot = hover === null || hover === e.source_id || hover === e.target_id
       return React.createElement('line', {
         key: 'e' + i,
@@ -351,12 +387,12 @@ export function apply(ctx) {
     const typeLabels = lang === 'en' ? TYPE_EN : TYPE_ZH
     const nodeEls = nodes.map(function (n) {
       const p = getPos(n.id)
-      if (!p) return null
+      if (!p || !visibleNodeIds.has(String(n.id))) return null
       const isSel = selected && selected.id === n.id
       const dim = neighbors !== null && !neighbors.has(n.id)
       const hot = hover === n.id
       const importance = Number(n.importance == null ? 0.5 : n.importance)
-      const showLabel = hot || isSel || importance >= 0.65 || (deg[n.id] || 0) >= 5 || zoom >= 1.55
+      const showLabel = hot || isSel || importance >= 0.78 || (deg[n.id] || 0) >= 7 || zoom >= 1.7
       const tooltip = n.name + ' · ' + t('importance') + ' ' + importance.toFixed(2) + ' · ' + (deg[n.id] || 0) + ' ' + t('edgeCount')
       return React.createElement('g', {
         key: 'n' + n.id,
@@ -367,7 +403,7 @@ export function apply(ctx) {
       },
         React.createElement('title', null, tooltip),
         React.createElement('circle', {
-          className: 'dsh-mem-graph-node', cx: p[0], cy: p[1], r: radiusOf(n),
+          className: 'dsh-mem-graph-node', 'data-node-id': String(n.id), cx: p[0], cy: p[1], r: radiusOf(n),
           fill: graphImportanceColor(importance),
           opacity: dim ? 0.12 : (importance < 0.45 ? 0.62 : 0.94),
           stroke: hot ? graphImportanceColor(importance) : (isSel ? 'var(--dsw-alias-label-primary, #fff)' : 'rgba(255,255,255,.28)'),
@@ -387,7 +423,7 @@ export function apply(ctx) {
       React.createElement('div', { className: 'dsh-mem-actions' },
         React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('graphTitle')),
         React.createElement('span', { className: 'dsh-mem-imp' }, t('graphDragHint')),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setPos({}); setPan({ x: 0, y: 0 }); setZoom(1); setLayoutVersion(function (v) { return v + 1 }) } }, t('graphReset')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setPos({}); setLayoutVersion(function (v) { return v + 1 }) } }, t('graphReset')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: props.onBack }, t('back')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, t('refresh')),
       ),
