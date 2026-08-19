@@ -55,6 +55,28 @@ class V2HttpTest(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.load(exc)
 
+    def test_graph_nodes_include_aggregated_importance(self):
+        with sqlite3.connect(server.DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO documents (uuid,content,importance,status) VALUES (?,?,?,?)",
+                ("graph-high", "important relation", 0.92, "active"),
+            )
+            memory_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute("INSERT INTO graph_nodes (name,kind,created_at) VALUES (?,?,?)", ("alpha", "entity", 1))
+            source_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute("INSERT INTO graph_nodes (name,kind,created_at) VALUES (?,?,?)", ("beta", "entity", 1))
+            target_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO graph_edges (source_id,target_id,relation,memory_id,created_at) VALUES (?,?,?,?,?)",
+                (source_id, target_id, "relates", memory_id, 1),
+            )
+        code, graph = self.request("GET", "/v1/graph")
+        self.assertEqual(200, code)
+        nodes = {node["name"]: node for node in graph["nodes"]}
+        self.assertAlmostEqual(0.92, nodes["alpha"]["importance"])
+        self.assertEqual(1, nodes["alpha"]["memory_count"])
+        self.assertEqual(1, nodes["alpha"]["edge_count"])
+
     def test_task_status_history_and_conflicts(self):
         code, created = self.request("POST", "/v1/v2/tasks", {"title": "ship", "status": "todo"})
         self.assertEqual(200, code)

@@ -72,7 +72,7 @@ const I18N = {
 }
 
 const PANEL_CSS = `
-.dsh-mem-panel { padding:16px 20px; display:flex; flex-direction:column; gap:12px; font-size:13px; max-width:860px; }
+.dsh-mem-panel { padding:16px 20px; display:flex; flex-direction:column; gap:12px; font-size:13px; max-width:1120px; }
 .dsh-mem-panel .dsh-mem-title { margin:0; font-size:12px; opacity:.7; letter-spacing:.04em; }
 .dsh-mem-box { border:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.35)); border-radius:8px; padding:10px; }
 .dsh-mem-row { display:flex; gap:8px; align-items:flex-start; padding:7px 0; border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.15)); }
@@ -100,10 +100,13 @@ const PANEL_CSS = `
 .dsh-mem-cfg-item:first-child { border-top:none; }
 .dsh-mem-cfg-label { font-weight:500; }
 .dsh-mem-cfg-hint { opacity:.65; font-size:11px; line-height:1.4; }
-.dsh-mem-graph-svg { width:100%; height:auto; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06)); border-radius:8px; }
-.dsh-mem-graph-node { fill:var(--dsw-alias-brand-primary, #4c8dff); opacity:.85; }
-.dsh-mem-graph-label { fill:var(--dsw-alias-label-primary, #e8e8e8); font-size:11px; pointer-events:none; }
-.dsh-mem-graph-edge { stroke:var(--dsw-alias-border-l2, rgba(128,128,128,.5)); stroke-width:1.2; }
+.dsh-mem-graph-svg { width:100%; min-height:520px; height:auto; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06)); border-radius:8px; touch-action:none; }
+.dsh-mem-graph-node { transition:opacity .14s, stroke-width .14s; }
+.dsh-mem-graph-label { fill:var(--dsw-alias-label-primary, #e8e8e8); font-size:11px; paint-order:stroke; stroke:var(--dsw-alias-bg-layer-1, #17191c); stroke-width:3px; stroke-linejoin:round; pointer-events:none; }
+.dsh-mem-graph-edge { stroke:var(--dsw-alias-border-l2, rgba(128,128,128,.5)); }
+.dsh-mem-graph-legend { display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:11px; opacity:.78; }
+.dsh-mem-graph-key { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
+.dsh-mem-graph-dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
 .dsh-mem-pcard { border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-3); border-radius:12px; list-style:none; transition:border-color .16s, background .16s; }
 .dsh-mem-pcard:hover { border-color:var(--dsw-alias-label-dimmed); }
 .dsh-mem-pcard-open { background:var(--dsw-alias-bg-layer-2); border-color:var(--dsw-alias-label-dimmed); }
@@ -171,6 +174,81 @@ export function apply(ctx) {
   styleEl.textContent = PANEL_CSS
   document.head.appendChild(styleEl)
 
+  function graphImportanceColor(value) {
+    const importance = Number(value == null ? 0.5 : value)
+    if (importance >= 0.85) return '#d85b4b'
+    if (importance >= 0.65) return '#d28b36'
+    if (importance >= 0.45) return '#4f9870'
+    return '#7b838d'
+  }
+
+  function buildGraphLayout(nodes, edges, width, height) {
+    const count = nodes.length
+    const cx = width / 2, cy = height / 2
+    const byId = new Map()
+    const positions = []
+    const degree = {}
+    edges.forEach(function (edge) {
+      degree[edge.source_id] = (degree[edge.source_id] || 0) + 1
+      degree[edge.target_id] = (degree[edge.target_id] || 0) + 1
+    })
+    nodes.forEach(function (node, index) {
+      const angle = index * 2.399963229728653
+      const spread = Math.min(width, height) * 0.42 * Math.sqrt((index + 1) / Math.max(1, count))
+      const item = {
+        id: node.id,
+        x: cx + Math.cos(angle) * spread,
+        y: cy + Math.sin(angle) * spread,
+        vx: 0,
+        vy: 0,
+        radius: 5 + Math.min(8, Math.sqrt(degree[node.id] || 0) * 2) + Number(node.importance || 0.5) * 5,
+      }
+      positions.push(item)
+      byId.set(String(node.id), item)
+    })
+    const iterations = count > 320 ? 70 : count > 160 ? 100 : 140
+    for (let tick = 0; tick < iterations; tick += 1) {
+      const cooling = 1 - tick / iterations
+      for (let i = 0; i < count; i += 1) {
+        const a = positions[i]
+        for (let j = i + 1; j < count; j += 1) {
+          const b = positions[j]
+          let dx = b.x - a.x, dy = b.y - a.y
+          let distance2 = dx * dx + dy * dy
+          if (distance2 < 1) { dx = ((i + 1) * 17 % 11) - 5; dy = ((j + 1) * 13 % 11) - 5; distance2 = dx * dx + dy * dy || 1 }
+          const distance = Math.sqrt(distance2)
+          const minimum = a.radius + b.radius + 13
+          const repel = Math.min(2.8, 820 / distance2) + (distance < minimum ? (minimum - distance) * 0.08 : 0)
+          const fx = dx / distance * repel, fy = dy / distance * repel
+          a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy
+        }
+      }
+      edges.forEach(function (edge) {
+        const a = byId.get(String(edge.source_id)), b = byId.get(String(edge.target_id))
+        if (!a || !b) return
+        const dx = b.x - a.x, dy = b.y - a.y
+        const distance = Math.sqrt(dx * dx + dy * dy) || 1
+        const target = 78 + Math.min(30, (a.radius + b.radius) * 1.2)
+        const pull = (distance - target) * 0.008
+        const fx = dx / distance * pull, fy = dy / distance * pull
+        a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy
+      })
+      positions.forEach(function (item) {
+        item.vx += (cx - item.x) * 0.0009
+        item.vy += (cy - item.y) * 0.0009
+        item.vx *= 0.72; item.vy *= 0.72
+        item.x += item.vx * (0.7 + cooling * 0.6)
+        item.y += item.vy * (0.7 + cooling * 0.6)
+        const margin = item.radius + 24
+        item.x = Math.max(margin, Math.min(width - margin, item.x))
+        item.y = Math.max(margin, Math.min(height - margin, item.y))
+      })
+    }
+    const result = {}
+    positions.forEach(function (item) { result[item.id] = [item.x, item.y] })
+    return result
+  }
+
   function GraphView(props) {
     const t = props.t
     const lang = props.lang
@@ -179,12 +257,13 @@ export function apply(ctx) {
     const [linked, setLinked] = React.useState(null)
     const [hover, setHover] = React.useState(null)
     const [pos, setPos] = React.useState({})
+    const [layoutVersion, setLayoutVersion] = React.useState(0)
     const [zoom, setZoom] = React.useState(1)
     const [pan, setPan] = React.useState({ x: 0, y: 0 })
     const drag = React.useRef(null)
     async function load() {
       const g = await api('GET', '/v1/graph')
-      if (g && Array.isArray(g.nodes)) { setData(g); setPos({}) }
+      if (g && Array.isArray(g.nodes)) { setData(g); setPos({}); setLayoutVersion(function (v) { return v + 1 }) }
     }
     React.useEffect(function () { load() }, [])
     async function selectNode(n) {
@@ -194,27 +273,21 @@ export function apply(ctx) {
       const res = await api('GET', '/v1/graph/memories?entity=' + encodeURIComponent(n.name))
       if (res && Array.isArray(res.memories)) setLinked(res.memories)
     }
-    if (!data) return React.createElement('div', { className: 'dsh-mem-panel' },
-      React.createElement('div', { style: { opacity: .6 } }, t('loading')))
-    const nodes = data.nodes || []
-    const edges = data.edges || []
-    const W = 640, H = 400, cx = W / 2, cy = H / 2
-    const R = Math.min(W, H) / 2 - 60
-    // 初始环形布局；pos 覆盖被拖拽过的节点（Obsidian 风格：拖哪停哪）
-    const base = {}
-    nodes.forEach(function (n, i) {
-      const a = (2 * Math.PI * i) / Math.max(1, nodes.length) - Math.PI / 2
-      base[n.id] = [cx + R * Math.cos(a), cy + R * Math.sin(a)]
-    })
-    const getPos = function (nid) { return pos[nid] || base[nid] }
-    // 节点度数 -> 半径
+    const nodes = data && Array.isArray(data.nodes) ? data.nodes : []
+    const edges = data && Array.isArray(data.edges) ? data.edges : []
+    const W = 920, H = 560
     const deg = {}
     edges.forEach(function (e) {
       deg[e.source_id] = (deg[e.source_id] || 0) + 1
       deg[e.target_id] = (deg[e.target_id] || 0) + 1
     })
-    const radiusOf = function (n) { return 4 + Math.min(deg[n.id] || 0, 8) * 1.5 }
-    // hover 邻居集
+    const base = React.useMemo(function () { return buildGraphLayout(nodes, edges, W, H) }, [data, layoutVersion])
+    if (!data) return React.createElement('div', { className: 'dsh-mem-panel' },
+      React.createElement('div', { style: { opacity: .6 } }, t('loading')))
+    const getPos = function (nid) { return pos[nid] || base[nid] }
+    const radiusOf = function (n) {
+      return 5 + Math.min(8, Math.sqrt(deg[n.id] || Number(n.edge_count) || 0) * 2) + Number(n.importance || 0.5) * 5
+    }
     let neighbors = null
     if (hover !== null) {
       neighbors = new Set([hover])
@@ -225,7 +298,6 @@ export function apply(ctx) {
     }
     const id2name = {}
     nodes.forEach(function (n) { id2name[n.id] = n.name })
-    // 鼠标交互：节点拖拽 / 空白平移 / 滚轮缩放
     function onNodeDown(e, n) {
       e.stopPropagation()
       drag.current = { kind: 'node', id: n.id, sx: e.clientX, sy: e.clientY, ox: getPos(n.id)[0], oy: getPos(n.id)[1], moved: false }
@@ -237,8 +309,8 @@ export function apply(ctx) {
     function onMove(e) {
       const d = drag.current
       if (!d) return
-      const dx = e.clientX - d.sx
-      const dy = e.clientY - d.sy
+      const dx = (e.clientX - d.sx) / zoom
+      const dy = (e.clientY - d.sy) / zoom
       if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true
       if (!d.moved) return
       if (d.kind === 'node') {
@@ -248,7 +320,7 @@ export function apply(ctx) {
           return next
         })
       } else if (d.kind === 'pan') {
-        setPan({ x: d.ox + dx, y: d.oy + dy })
+        setPan({ x: d.ox + dx * zoom, y: d.oy + dy * zoom })
       }
     }
     function onUp() {
@@ -261,8 +333,8 @@ export function apply(ctx) {
     }
     function onWheel(e) {
       e.preventDefault()
-      const factor = e.deltaY < 0 ? 1.1 : 0.9
-      setZoom(function (z) { return Math.min(4, Math.max(0.4, z * factor)) })
+      const factor = e.deltaY < 0 ? 1.12 : 0.89
+      setZoom(function (z) { return Math.min(4, Math.max(0.42, z * factor)) })
     }
     const edgeEls = edges.map(function (e, i) {
       const a = getPos(e.source_id), b = getPos(e.target_id)
@@ -272,8 +344,8 @@ export function apply(ctx) {
         key: 'e' + i,
         className: 'dsh-mem-graph-edge',
         x1: a[0], y1: a[1], x2: b[0], y2: b[1],
-        opacity: hot ? 1 : 0.2,
-        strokeWidth: hot ? 1.6 : 1,
+        opacity: hot ? (hover === null ? 0.22 : 0.82) : 0.045,
+        strokeWidth: hot && hover !== null ? 1.5 : 0.8,
       }, React.createElement('title', null, (id2name[e.source_id] || '?') + ' → ' + (e.relation || '') + ' → ' + (id2name[e.target_id] || '?')))
     }).filter(Boolean)
     const typeLabels = lang === 'en' ? TYPE_EN : TYPE_ZH
@@ -283,6 +355,9 @@ export function apply(ctx) {
       const isSel = selected && selected.id === n.id
       const dim = neighbors !== null && !neighbors.has(n.id)
       const hot = hover === n.id
+      const importance = Number(n.importance == null ? 0.5 : n.importance)
+      const showLabel = hot || isSel || importance >= 0.65 || (deg[n.id] || 0) >= 5 || zoom >= 1.55
+      const tooltip = n.name + ' · ' + t('importance') + ' ' + importance.toFixed(2) + ' · ' + (deg[n.id] || 0) + ' ' + t('edgeCount')
       return React.createElement('g', {
         key: 'n' + n.id,
         style: { cursor: 'grab' },
@@ -290,38 +365,46 @@ export function apply(ctx) {
         onMouseEnter: function () { setHover(n.id) },
         onMouseLeave: function () { setHover(null) },
       },
+        React.createElement('title', null, tooltip),
         React.createElement('circle', {
           className: 'dsh-mem-graph-node', cx: p[0], cy: p[1], r: radiusOf(n),
-          opacity: dim ? 0.18 : 1,
-          stroke: hot ? 'var(--dsw-alias-brand-primary, #4c8dff)' : (isSel ? 'var(--dsw-alias-label-primary, #fff)' : 'none'),
-          strokeWidth: (hot || isSel) ? 2 : 0,
-          title: n.name + ' (' + (n.kind || '') + ') · ' + (deg[n.id] || 0) + ' 关系',
+          fill: graphImportanceColor(importance),
+          opacity: dim ? 0.12 : (importance < 0.45 ? 0.62 : 0.94),
+          stroke: hot ? graphImportanceColor(importance) : (isSel ? 'var(--dsw-alias-label-primary, #fff)' : 'rgba(255,255,255,.28)'),
+          strokeWidth: (hot || isSel) ? 2.6 : 0.7,
         }),
-        React.createElement('text', {
-          className: 'dsh-mem-graph-label', x: p[0] + 12, y: p[1] + 4, textAnchor: 'start',
-          fontWeight: (isSel || hot) ? 700 : 400,
-          opacity: dim ? 0.18 : 1,
-        }, String(n.name).slice(0, 16)),
+        showLabel ? React.createElement('text', {
+          className: 'dsh-mem-graph-label', x: p[0] + radiusOf(n) + 5, y: p[1] + 4, textAnchor: 'start',
+          fontWeight: (isSel || hot || importance >= 0.85) ? 700 : 500,
+          opacity: dim ? 0.12 : (importance < 0.45 ? 0.72 : 1),
+        }, String(n.name).slice(0, 18)) : null,
       )
     })
+    const legend = lang === 'en'
+      ? [['Low < .45', '#7b838d'], ['Medium .45–.64', '#4f9870'], ['High .65–.84', '#d28b36'], ['Critical ≥ .85', '#d85b4b']]
+      : [['较低 < 0.45', '#7b838d'], ['一般 0.45–0.64', '#4f9870'], ['重要 0.65–0.84', '#d28b36'], ['核心 ≥ 0.85', '#d85b4b']]
     return React.createElement('div', { className: 'dsh-mem-panel' },
       React.createElement('div', { className: 'dsh-mem-actions' },
         React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('graphTitle')),
         React.createElement('span', { className: 'dsh-mem-imp' }, t('graphDragHint')),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setPos({}); setPan({ x: 0, y: 0 }); setZoom(1) } }, t('graphReset')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setPos({}); setPan({ x: 0, y: 0 }); setZoom(1); setLayoutVersion(function (v) { return v + 1 }) } }, t('graphReset')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: props.onBack }, t('back')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, t('refresh')),
       ),
       React.createElement('div', { className: 'dsh-mem-stats' },
         React.createElement('span', null, t('nodeCount') + ' ' + nodes.length),
         React.createElement('span', null, t('edgeCount') + ' ' + edges.length),
+        React.createElement('span', { className: 'dsh-mem-graph-legend' }, legend.map(function (item) {
+          return React.createElement('span', { key: item[0], className: 'dsh-mem-graph-key' },
+            React.createElement('i', { className: 'dsh-mem-graph-dot', style: { background: item[1] } }), item[0])
+        })),
       ),
       React.createElement('div', { className: 'dsh-mem-box' },
         React.createElement('div', { className: 'dsh-mem-title' }, t('graphHint')),
         nodes.length
           ? React.createElement('svg', {
             className: 'dsh-mem-graph-svg', viewBox: '0 0 ' + W + ' ' + H,
-            onMouseDown: onBgDown, onMouseMove: onMove, onMouseUp: onUp, onWheel: onWheel,
+            onMouseDown: onBgDown, onMouseMove: onMove, onMouseUp: onUp, onMouseLeave: onUp, onWheel: onWheel,
             style: { cursor: drag.current && drag.current.kind === 'pan' ? 'grabbing' : 'default' },
           },
             React.createElement('g', { transform: 'translate(' + pan.x + ' ' + pan.y + ') scale(' + zoom + ')' },
@@ -340,6 +423,7 @@ export function apply(ctx) {
               return React.createElement('div', { key: String(m.id), className: 'dsh-mem-row' },
                 React.createElement('span', { className: 'dsh-mem-badge' }, typeLabels[m.type] || m.type),
                 React.createElement('span', { className: 'dsh-mem-content' }, m.content),
+                React.createElement('span', { className: 'dsh-mem-imp' }, Number(m.importance || 0.5).toFixed(2)),
               )
             })
             : React.createElement('div', { style: { opacity: .6 } }, t('empty')),

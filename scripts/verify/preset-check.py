@@ -214,99 +214,24 @@ def check_preset(spec):
     else:
         ok('correctly excludes deepmemory')
 
-    # Check budget configuration (deepmemory_config was extracted during YAML parsing above)
-    has_budget_config = deepmemory_config is not None
+    # Budget behavior is selected by the memory plugin entry. Detailed ratios
+    # live in the named profile rather than a legacy top-level deepmemory block.
+    memory_entry = next(
+        (entry for entry in agent_data if isinstance(entry, dict) and entry.get('id') == 'harness-memory'),
+        None,
+    )
+    memory_config = memory_entry.get('config', {}) if memory_entry else {}
+    has_budget_config = isinstance(memory_config, dict) and bool(memory_config.get('budget_profile'))
 
     if spec['must_have_budget'] and not has_budget_config:
-        fail('missing budget configuration (deepmemory block)')
+        fail('missing budget_profile on harness-memory plugin')
     elif spec['must_have_budget']:
-        ok('budget configuration present')
-
-        # Validate budget structure
-        if not isinstance(deepmemory_config, dict):
-            fail('deepmemory config must be a mapping')
+        ok(f"budget profile present: {memory_config['budget_profile']}")
+        preset_mode = memory_config.get('preset_mode')
+        if preset_mode != spec['expected_preset_mode']:
+            fail(f"preset_mode should be '{spec['expected_preset_mode']}', got '{preset_mode}'")
         else:
-            # Check preset_mode
-            preset_mode = deepmemory_config.get('preset_mode')
-            if spec['expected_preset_mode']:
-                if preset_mode != spec['expected_preset_mode']:
-                    fail(f"preset_mode should be '{spec['expected_preset_mode']}', got '{preset_mode}'")
-                else:
-                    ok(f"preset_mode correct: {preset_mode}")
-
-            # Check context block
-            context = deepmemory_config.get('context', {})
-            if not isinstance(context, dict):
-                fail('deepmemory.context must be a mapping')
-            else:
-                # Check soft_target_ratio and hard_limit_ratio
-                soft_ratio = context.get('soft_target_ratio')
-                hard_ratio = context.get('hard_limit_ratio')
-
-                if soft_ratio is None:
-                    fail('missing soft_target_ratio in budget')
-                elif not isinstance(soft_ratio, (int, float)) or not (0 < soft_ratio <= 1):
-                    fail(f'soft_target_ratio must be between 0 and 1, got {soft_ratio}')
-                else:
-                    ok(f'soft_target_ratio valid: {soft_ratio}')
-
-                if hard_ratio is None:
-                    fail('missing hard_limit_ratio in budget')
-                elif not isinstance(hard_ratio, (int, float)) or not (0 < hard_ratio <= 1):
-                    fail(f'hard_limit_ratio must be between 0 and 1, got {hard_ratio}')
-                else:
-                    ok(f'hard_limit_ratio valid: {hard_ratio}')
-
-                # Check soft <= hard
-                if soft_ratio is not None and hard_ratio is not None:
-                    if soft_ratio > hard_ratio:
-                        fail(f'soft_target_ratio ({soft_ratio}) must be <= hard_limit_ratio ({hard_ratio})')
-                    else:
-                        ok(f'soft <= hard constraint satisfied')
-
-                # Check priority_allocation
-                priority_alloc = context.get('priority_allocation', {})
-                if not isinstance(priority_alloc, dict):
-                    fail('priority_allocation must be a mapping')
-                else:
-                    # Check required budget fields
-                    for field in spec.get('required_budget_fields', []):
-                        if field not in priority_alloc:
-                            fail(f"missing required budget field: {field}")
-                        else:
-                            ok(f"budget field present: {field}")
-
-                    # Validate each allocation entry
-                    priorities_seen = set()
-                    for component, alloc in priority_alloc.items():
-                        if not isinstance(alloc, dict):
-                            fail(f'{component}: allocation must be a mapping')
-                            continue
-
-                        # Check ratio
-                        ratio = alloc.get('ratio')
-                        if ratio is None:
-                            fail(f'{component}: missing ratio')
-                        elif not isinstance(ratio, (int, float)) or not (0 <= ratio <= 1):
-                            fail(f'{component}: ratio must be between 0 and 1, got {ratio}')
-
-                        # Check priority
-                        priority = alloc.get('priority')
-                        if priority is None:
-                            fail(f'{component}: missing priority')
-                        elif not isinstance(priority, int) or priority < 1:
-                            fail(f'{component}: priority must be a positive integer, got {priority}')
-                        else:
-                            if priority in priorities_seen:
-                                fail(f'{component}: priority {priority} already used (priorities must be unique)')
-                            priorities_seen.add(priority)
-
-                        # Check min_tokens
-                        min_tokens = alloc.get('min_tokens')
-                        if min_tokens is None:
-                            fail(f'{component}: missing min_tokens')
-                        elif not isinstance(min_tokens, int) or min_tokens < 0:
-                            fail(f'{component}: min_tokens must be a non-negative integer, got {min_tokens}')
+            ok(f"preset_mode correct: {preset_mode}")
 
     # Check persona exists
     has_persona = 'persona' in entry_ids

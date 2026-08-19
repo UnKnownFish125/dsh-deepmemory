@@ -2129,7 +2129,14 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/v1/graph"):
                 conn = get_conn()
                 nodes = conn.execute(
-                    "SELECT * FROM graph_nodes ORDER BY id DESC LIMIT 500"
+                    "SELECT n.id, n.name, n.kind, n.created_at, "
+                    "COALESCE(MAX(CASE WHEN d.status='active' THEN d.importance END), 0.5) AS importance, "
+                    "COUNT(DISTINCT CASE WHEN d.status='active' THEN d.id END) AS memory_count, "
+                    "COUNT(DISTINCT e.id) AS edge_count "
+                    "FROM graph_nodes n "
+                    "LEFT JOIN graph_edges e ON e.source_id=n.id OR e.target_id=n.id "
+                    "LEFT JOIN documents d ON d.id=e.memory_id "
+                    "GROUP BY n.id ORDER BY n.id DESC LIMIT 500"
                 ).fetchall()
                 edges = conn.execute(
                     "SELECT * FROM graph_edges ORDER BY id DESC LIMIT 500"
