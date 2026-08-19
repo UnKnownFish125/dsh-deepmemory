@@ -100,7 +100,7 @@ const PANEL_CSS = `
 .dsh-mem-cfg-item:first-child { border-top:none; }
 .dsh-mem-cfg-label { font-weight:500; }
 .dsh-mem-cfg-hint { opacity:.65; font-size:11px; line-height:1.4; }
-.dsh-mem-graph-svg { width:100%; height:clamp(480px, 62vh, 640px); display:block; overflow:hidden; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06)); border-radius:8px; touch-action:none; }
+.dsh-mem-graph-svg { width:100%; height:clamp(480px, 62vh, 640px); display:block; overflow:hidden; overscroll-behavior:contain; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06)); border-radius:8px; touch-action:none; }
 .dsh-mem-graph-node { transition:opacity .14s, stroke-width .14s; }
 .dsh-mem-graph-label { fill:var(--dsw-alias-label-primary, #e8e8e8); font-size:11px; paint-order:stroke; stroke:var(--dsw-alias-bg-layer-1, #17191c); stroke-width:3px; stroke-linejoin:round; pointer-events:none; }
 .dsh-mem-graph-edge { stroke:var(--dsw-alias-border-l2, rgba(128,128,128,.5)); }
@@ -174,12 +174,20 @@ export function apply(ctx) {
   styleEl.textContent = PANEL_CSS
   document.head.appendChild(styleEl)
 
+  const GRAPH_RAINBOW = [
+    [0, [79, 107, 237]], [0.2, [39, 169, 225]], [0.4, [53, 166, 111]],
+    [0.6, [214, 183, 44]], [0.8, [226, 130, 50]], [1, [217, 75, 75]],
+  ]
+
   function graphImportanceColor(value) {
-    const importance = Number(value == null ? 0.5 : value)
-    if (importance >= 0.85) return '#d85b4b'
-    if (importance >= 0.65) return '#d28b36'
-    if (importance >= 0.45) return '#4f9870'
-    return '#7b838d'
+    const importance = Math.min(1, Math.max(0, Number(value == null ? 0.5 : value)))
+    let upper = 1
+    while (upper < GRAPH_RAINBOW.length && importance > GRAPH_RAINBOW[upper][0]) upper += 1
+    const hi = GRAPH_RAINBOW[Math.min(upper, GRAPH_RAINBOW.length - 1)]
+    const lo = GRAPH_RAINBOW[Math.max(0, upper - 1)]
+    const mix = hi[0] === lo[0] ? 0 : (importance - lo[0]) / (hi[0] - lo[0])
+    const rgb = lo[1].map(function (channel, i) { return Math.round(channel + (hi[1][i] - channel) * mix) })
+    return 'rgb(' + rgb.join(',') + ')'
   }
 
   function buildGraphLayout(nodes, edges, width, height) {
@@ -235,10 +243,32 @@ export function apply(ctx) {
       })
       positions.forEach(function (item) {
         item.vx += (cx - item.x) * 0.00032
-        item.vy += (cy - item.y) * 0.0009
+        item.vy += (cy - item.y) * 0.00032
         item.vx *= 0.72; item.vy *= 0.72
         item.x += item.vx * (0.7 + cooling * 0.6)
         item.y += item.vy * (0.7 + cooling * 0.6)
+        const margin = item.radius + 24
+        item.x = Math.max(margin, Math.min(width - margin, item.x))
+        item.y = Math.max(margin, Math.min(height - margin, item.y))
+      })
+    }
+    // Final collision relaxation: links may pull clusters together, but circles must not overlap.
+    for (let pass = 0; pass < 24; pass += 1) {
+      for (let i = 0; i < count; i += 1) {
+        const a = positions[i]
+        for (let j = i + 1; j < count; j += 1) {
+          const b = positions[j]
+          let dx = b.x - a.x, dy = b.y - a.y
+          let distance = Math.sqrt(dx * dx + dy * dy)
+          if (distance < 0.01) { dx = ((i + 3) * 19 % 13) - 6; dy = ((j + 5) * 17 % 13) - 6; distance = Math.sqrt(dx * dx + dy * dy) || 1 }
+          const minimum = a.radius + b.radius + 18
+          if (distance >= minimum) continue
+          const shift = (minimum - distance) * 0.52
+          const sx = dx / distance * shift, sy = dy / distance * shift
+          a.x -= sx; a.y -= sy; b.x += sx; b.y += sy
+        }
+      }
+      positions.forEach(function (item) {
         const margin = item.radius + 24
         item.x = Math.max(margin, Math.min(width - margin, item.x))
         item.y = Math.max(margin, Math.min(height - margin, item.y))
@@ -261,6 +291,7 @@ export function apply(ctx) {
     const [zoom, setZoom] = React.useState(1)
     const [pan, setPan] = React.useState({ x: 0, y: 0 })
     const drag = React.useRef(null)
+    const svgRef = React.useRef(null)
     async function load() {
       const g = await api('GET', '/v1/graph')
       if (g && Array.isArray(g.nodes)) { setData(g); setPos({}); setLayoutVersion(function (v) { return v + 1 }) }
@@ -341,24 +372,32 @@ export function apply(ctx) {
         if (n) selectNode(n)
       }
     }
-    function onWheel(e) {
+    function applyWheelZoom(e) {
       e.preventDefault()
-      const svg = e.currentTarget
+      e.stopPropagation()
+      const svg = svgRef.current
+      if (!svg) return
       const matrix = svg.getScreenCTM && svg.getScreenCTM()
       if (!matrix) return
-      // Use SVG's screen matrix so responsive sizing and letterboxing cannot offset the anchor.
       const point = svg.createSVGPoint()
       point.x = e.clientX
       point.y = e.clientY
       const local = point.matrixTransform(matrix.inverse())
-      const mx = local.x
-      const my = local.y
-      const factor = Math.exp(-e.deltaY * 0.0015)
+      const mx = local.x, my = local.y
+      const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * H : e.deltaY
+      const factor = Math.exp(-delta * 0.0015)
       const nextZoom = Math.min(5, Math.max(0.28, zoom * factor))
-      const worldX = (mx - pan.x) / zoom
-      const worldY = (my - pan.y) / zoom
+      const worldX = (mx - pan.x) / zoom, worldY = (my - pan.y) / zoom
       setPan({ x: mx - worldX * nextZoom, y: my - worldY * nextZoom })
       setZoom(nextZoom)
+    }
+    function bindSvg(svg) {
+      const previous = svgRef.current
+      if (previous && previous.__dshMemoryWheel) previous.removeEventListener('wheel', previous.__dshMemoryWheel)
+      svgRef.current = svg
+      if (!svg) return
+      svg.__dshMemoryWheel = applyWheelZoom
+      svg.addEventListener('wheel', applyWheelZoom, { passive: false })
     }
     const viewportPadding = 90 / zoom
     const viewport = {
@@ -416,9 +455,9 @@ export function apply(ctx) {
         }, String(n.name).slice(0, 18)) : null,
       )
     })
-    const legend = lang === 'en'
-      ? [['Low < .45', '#7b838d'], ['Medium .45–.64', '#4f9870'], ['High .65–.84', '#d28b36'], ['Critical ≥ .85', '#d85b4b']]
-      : [['较低 < 0.45', '#7b838d'], ['一般 0.45–0.64', '#4f9870'], ['重要 0.65–0.84', '#d28b36'], ['核心 ≥ 0.85', '#d85b4b']]
+    const legendLevels = [0, 0.2, 0.4, 0.6, 0.8, 1]
+    const legendNames = lang === 'en' ? ['Low', 'Guarded', 'Medium', 'Notable', 'High', 'Core'] : ['较低', '偏低', '一般', '较高', '重要', '核心']
+    const legend = legendLevels.map(function (level, i) { return [legendNames[i] + ' ' + level.toFixed(1), graphImportanceColor(level)] })
     return React.createElement('div', { className: 'dsh-mem-panel' },
       React.createElement('div', { className: 'dsh-mem-actions' },
         React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('graphTitle')),
@@ -439,8 +478,8 @@ export function apply(ctx) {
         React.createElement('div', { className: 'dsh-mem-title' }, t('graphHint')),
         nodes.length
           ? React.createElement('svg', {
-            className: 'dsh-mem-graph-svg', viewBox: '0 0 ' + W + ' ' + H,
-            onMouseDown: onBgDown, onMouseMove: onMove, onMouseUp: onUp, onMouseLeave: onUp, onWheel: onWheel,
+            ref: bindSvg, className: 'dsh-mem-graph-svg', viewBox: '0 0 ' + W + ' ' + H,
+            onMouseDown: onBgDown, onMouseMove: onMove, onMouseUp: onUp, onMouseLeave: onUp,
             style: { cursor: drag.current && drag.current.kind === 'pan' ? 'grabbing' : 'default' },
           },
             React.createElement('g', { transform: 'translate(' + pan.x + ' ' + pan.y + ') scale(' + zoom + ')' },
