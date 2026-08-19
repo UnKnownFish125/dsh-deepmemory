@@ -193,7 +193,7 @@ PY
   WUP=0
   for _ in $(seq 1 90); do
     sleep 1
-    curl -s -m 3 -o /dev/null "http://localhost:$WPORT/" && { WUP=1; break; }
+    "$NODE" -e 'const http = require("node:http"); const port = Number(process.argv[1]); const req = http.get({hostname: "127.0.0.1", port, path: "/", timeout: 3000}, res => { res.resume(); process.exit(res.statusCode >= 200 && res.statusCode < 500 ? 0 : 1); }); req.on("timeout", () => req.destroy()); req.on("error", () => process.exit(1));' "$WPORT" && { WUP=1; break; }
   done
   if [ "$WUP" != "1" ]; then
     bad; tail -8 "$VHOME/web.log"
