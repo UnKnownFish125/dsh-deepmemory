@@ -47,6 +47,15 @@ else
   rsync -a --delete --exclude='data/' --exclude='models/' "${ROOT}/memory-server/" "${SERVER_DIR}/"
 fi
 mkdir -p "${SERVER_DIR}/data"
+TOKEN_FILE="${SERVER_DIR}/data/api-token"
+CLIENT_TOKEN_FILE="${DSH_HOME}/.dsh-memory-api-token"
+if [ ! -s "${TOKEN_FILE}" ]; then
+  umask 077
+  "${VENV_PY}" -c 'import secrets, sys; print(secrets.token_urlsafe(32))' > "${TOKEN_FILE}"
+fi
+chmod 600 "${TOKEN_FILE}"
+mkdir -p "${DSH_HOME}"
+install -m 600 "${TOKEN_FILE}" "${CLIENT_TOKEN_FILE}"
 
 say "   安装 systemd unit"
 cat > "${UNIT_FILE}" <<UNIT
@@ -72,7 +81,7 @@ systemctl restart dsh-memory-server
 sleep 2
 
 for i in 1 2 3 4 5; do
-  if HEALTH=$(curl -s --max-time 5 http://localhost:6230/v1/health); then
+  if HEALTH=$(curl -s --max-time 5 -H "Authorization: Bearer $(cat "${TOKEN_FILE}")" http://localhost:6230/v1/health); then
     echo "${HEALTH}" | grep -q '"status": "ok"' && break
   fi
   sleep 2
@@ -137,7 +146,7 @@ say "   三套独立 preset + 共享插件已就位"
 
 # ---------- 验证摘要 ----------
 say "安装完成。当前状态:"
-curl -s http://localhost:6230/v1/stats || true
+curl -s -H "Authorization: Bearer $(cat "${TOKEN_FILE}")" http://localhost:6230/v1/stats || true
 echo
 cat <<RESTART
 ==================================================================

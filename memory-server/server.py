@@ -37,12 +37,15 @@ import sqlite3
 import threading
 import time
 import uuid
+import ipaddress
+import socket
 from datetime import datetime
 import hashlib
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
+import urllib.error
 import urllib.request
 
 from sensitive import redact_text, sensitivity_types
@@ -69,6 +72,10 @@ INDEX_PATH = os.path.join(DATA_DIR, "memory.faiss")
 DIM_PATH = os.path.join(DATA_DIR, "dim.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 PORT = int(os.environ.get("MEMORY_SERVER_PORT", "6230"))
+MAX_BODY_BYTES = int(os.environ.get("MEMORY_MAX_BODY_BYTES", str(10 * 1024 * 1024)))
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("MEMORY_REQUEST_TIMEOUT_SECONDS", "30"))
+SECRET_CONFIG_KEYS = frozenset({"embedding.api_key"})
+API_TOKEN_FILE = os.environ.get("MEMORY_API_TOKEN_FILE", os.path.join(DATA_DIR, "api-token"))
 DIM = 512
 
 # weighting: alpha*relevance + beta*importance + gamma*recency (AstrBot formula)
@@ -91,7 +98,7 @@ _embed_model = None
 
 def get_embed_config():
     """读取 embedding.* 配置，未设置时回落到 config_schema 默认值。"""
-    values = get_config_values()
+    values = get_config_values(include_secrets=True)
     items = get_config_schema().get("embedding", {}).get("items", {})
     cfg = {k: meta.get("default") for k, meta in items.items()}
     for k in cfg:
@@ -139,6 +146,40 @@ def get_model():
         return _embed_model
 
 
+def _validate_embedding_base_url(base):
+    """Require HTTPS and a public destination to prevent SSRF and key exfiltration."""
+    parsed = urlparse(base)
+    allow_private = os.environ.get("MEMORY_ALLOW_PRIVATE_EMBEDDING", "") == "1"
+    if parsed.scheme not in ({"https", "http"} if allow_private else {"https"}) or not parsed.hostname:
+        raise ValueError("embedding api_base_url must be an HTTPS public endpoint")
+    if parsed.username or parsed.password or parsed.fragment:
+        raise ValueError("embedding api_base_url contains forbidden URL components")
+    if allow_private:
+        return base.rstrip("/")
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
+    except socket.gaierror as exc:
+        raise ValueError("embedding api_base_url hostname cannot be resolved") from exc
+    if not addresses:
+        raise ValueError("embedding api_base_url hostname cannot be resolved")
+    for address in addresses:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+        if not ip.is_global:
+            raise ValueError("embedding api_base_url must resolve to a public address")
+    return base.rstrip("/")
+
+
+def _validate_embedding_destination(base):
+    """Re-check DNS immediately before connecting; redirects are disabled below."""
+    _validate_embedding_base_url(base)
+    return base
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "embedding redirects are disabled", headers, fp)
+
+
 def _embed_api(texts):
     """OpenAI 兼容 /v1/embeddings（provider=api）。"""
     cfg = get_embed_config()
@@ -149,6 +190,7 @@ def _embed_api(texts):
         raise RuntimeError(
             "embedding provider=api 需要 api_base_url 与 api_key（或环境变量 EMBED_API_KEY）"
         )
+    base = _validate_embedding_destination(base)
     body = json.dumps({"model": model, "input": texts}).encode("utf-8")
     req = urllib.request.Request(
         base + "/embeddings",
@@ -159,7 +201,8 @@ def _embed_api(texts):
             "Authorization": "Bearer " + key,
         },
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    opener = urllib.request.build_opener(_NoRedirect)
+    with opener.open(req, timeout=60) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     out = []
     for item in sorted(payload["data"], key=lambda x: x.get("index", 0)):
@@ -1335,7 +1378,7 @@ def get_config_schema():
         return {}
 
 
-def get_config_values():
+def get_config_values(include_secrets=False):
     conn = get_conn()
     rows = conn.execute(
         "SELECT key, value FROM settings WHERE key LIKE 'deepmemory.%'"
@@ -1344,6 +1387,8 @@ def get_config_values():
     out = {}
     for r in rows:
         key = r["key"][len("deepmemory."):]
+        if not include_secrets and key in SECRET_CONFIG_KEYS:
+            continue
         try:
             out[key] = json.loads(r["value"])
         except Exception:
@@ -1387,6 +1432,8 @@ def get_session_config(session_id):
     prefix = f"deepmemory.session.{session_id}."
     for r in rows:
         key = r["key"][len(prefix):]
+        if key in SECRET_CONFIG_KEYS:
+            continue
         try:
             overrides[key] = json.loads(r["value"])
         except Exception:
@@ -1881,28 +1928,40 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
         return True
 
+    def _reject_browser_origin(self):
+        if self.headers.get("Origin"):
+            self._send(403, {"error": "browser origin is not allowed"})
+            return True
+        token = ""
+        try:
+            with open(API_TOKEN_FILE, encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except FileNotFoundError:
+            pass
+        if token and self.headers.get("Authorization") != "Bearer " + token:
+            self._send(401, {"error": "bearer token required"})
+            return True
+        return False
+
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Private-Network", "true")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self._send(403, {"error": "browser origin is not allowed"})
 
     def _read_body(self):
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid Content-Length") from exc
+        if length < 0 or length > MAX_BODY_BYTES:
+            raise OverflowError("request body too large")
         if length <= 0:
             return {}
+        self.connection.settimeout(REQUEST_TIMEOUT_SECONDS)
         return json.loads(self.rfile.read(length))
 
     @staticmethod
@@ -1989,6 +2048,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            if self._reject_browser_origin():
+                return
             parsed = urlparse(self.path)
             path = parsed.path
             qs = parse_qs(parsed.query)
@@ -2045,7 +2106,9 @@ class Handler(BaseHTTPRequestHandler):
                     "field_name": source["field_name"], "redacted_content": source["redacted_content"],
                     "sensitivity_types": json.loads(source["sensitivity_types"] or "[]")}})
             if path.startswith("/v1/settings/"):
-                key = path.rsplit("/", 1)[-1]
+                key = unquote(path[len("/v1/settings/"):])
+                if key.startswith("deepmemory.") and key[len("deepmemory."):] in SECRET_CONFIG_KEYS:
+                    return self._send(404, {"error": "setting not found"})
                 return self._send(200, {"key": key, "value": get_setting(key)})
             if path.startswith("/v1/cards/"):
                 wid = path.rsplit("/", 1)[-1]
@@ -2149,11 +2212,17 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/v1/backups/list"):
                 return self._send(200, {"backups": list_backups()})
             return self._send(404, {"error": "not found"})
+        except OverflowError as e:
+            return self._send(413, {"error": str(e)})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._send(400, {"error": str(e)})
         except Exception as e:
             return self._send(500, {"error": redact_text(str(e))[0]})
 
     def do_POST(self):
         try:
+            if self._reject_browser_origin():
+                return
             path = urlparse(self.path).path
             if path.startswith("/v1/v2/"):
                 body = self._read_body()
@@ -2384,11 +2453,17 @@ class Handler(BaseHTTPRequestHandler):
                 aid = add_atom(int(body.get("memory_id") or 0), body)
                 return self._send(200, {"id": aid})
             return self._send(404, {"error": "not found"})
+        except OverflowError as e:
+            return self._send(413, {"error": str(e)})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._send(400, {"error": str(e)})
         except Exception as e:
             return self._send(500, {"error": redact_text(str(e))[0]})
 
     def do_PUT(self):
         try:
+            if self._reject_browser_origin():
+                return
             path = urlparse(self.path).path
             if path.startswith("/v1/v2/"):
                 body = self._read_body()
@@ -2409,11 +2484,17 @@ class Handler(BaseHTTPRequestHandler):
                 ok = update_memory(doc_id, body)
                 return self._send(200 if ok else 404, {"updated": ok, "id": doc_id})
             return self._send(404, {"error": "not found"})
+        except OverflowError as e:
+            return self._send(413, {"error": str(e)})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._send(400, {"error": str(e)})
         except Exception as e:
             return self._send(500, {"error": redact_text(str(e))[0]})
 
     def do_DELETE(self):
         try:
+            if self._reject_browser_origin():
+                return
             path = urlparse(self.path).path
             if path.startswith("/v1/backups/"):
                 name = os.path.basename(path.rsplit("/", 1)[-1])
@@ -2427,6 +2508,10 @@ class Handler(BaseHTTPRequestHandler):
                 ok = delete_memory(doc_id)
                 return self._send(200 if ok else 404, {"deleted": ok, "id": doc_id})
             return self._send(404, {"error": "not found"})
+        except OverflowError as e:
+            return self._send(413, {"error": str(e)})
+        except (ValueError, json.JSONDecodeError) as e:
+            return self._send(400, {"error": str(e)})
         except Exception as e:
             return self._send(500, {"error": redact_text(str(e))[0]})
 

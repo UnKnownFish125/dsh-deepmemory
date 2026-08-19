@@ -21,6 +21,8 @@ class V2HttpTest(unittest.TestCase):
         server.DB_PATH = os.path.join(root, "memory.db")
         server.INDEX_PATH = os.path.join(root, "memory.faiss")
         server.BACKUP_DIR = os.path.join(root, "backups")
+        self.original_api_token_file = server.API_TOKEN_FILE
+        server.API_TOKEN_FILE = os.path.join(root, "api-token")
         os.makedirs(server.BACKUP_DIR)
         server._index = None
         server._search_cache.clear()
@@ -38,22 +40,33 @@ class V2HttpTest(unittest.TestCase):
         self.base = f"http://localhost:{self.httpd.server_port}"
 
     def tearDown(self):
+        server.API_TOKEN_FILE = self.original_api_token_file
         self.httpd.shutdown()
         self.thread.join(timeout=5)
         self.httpd.server_close()
         self.tmp.cleanup()
 
-    def request(self, method, path, payload=None):
+    def request(self, method, path, payload=None, headers=None):
         data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request_headers = {"Content-Type": "application/json"}
+        request_headers.update(headers or {})
         req = urllib.request.Request(
             self.base + path, data=data, method=method,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status, json.load(response)
         except urllib.error.HTTPError as exc:
             return exc.code, json.load(exc)
+
+    def test_bearer_token_required_when_configured(self):
+        with open(server.API_TOKEN_FILE, "w", encoding="utf-8") as fh:
+            fh.write("test-token")
+        self.assertEqual(401, self.request("GET", "/v1/graph")[0])
+        self.assertEqual(401, self.request("GET", "/v1/graph", headers={"Authorization": "Bearer wrong"})[0])
+        code, _ = self.request("GET", "/v1/graph", headers={"Authorization": "Bearer test-token"})
+        self.assertEqual(200, code)
 
     def test_graph_nodes_include_aggregated_importance(self):
         with sqlite3.connect(server.DB_PATH) as conn:
@@ -143,6 +156,47 @@ class V2HttpTest(unittest.TestCase):
         )
         self.assertEqual(200, code)
         self.assertEqual("a", restored["card"]["payload"]["goal"])
+
+    def test_browser_origin_cannot_access_loopback_api(self):
+        code, response = self.request(
+            "GET", "/v1/config", headers={"Origin": "https://attacker.example"}
+        )
+        self.assertEqual(403, code)
+        self.assertEqual("browser origin is not allowed", response["error"])
+
+    def test_config_read_redacts_secrets(self):
+        code, _ = self.request("POST", "/v1/config", {
+            "embedding.api_key": "sk-" + "test-secret-value-1234567890",
+            "embedding.provider": "api",
+        })
+        self.assertEqual(200, code)
+        code, response = self.request("GET", "/v1/config")
+        self.assertEqual(200, code)
+        self.assertNotIn("embedding.api_key", response["config"])
+        code, response = self.request("GET", "/v1/settings/deepmemory.embedding.api_key")
+        self.assertEqual(404, code)
+        self.assertNotIn("sk-test-secret", json.dumps(response))
+
+    def test_oversized_request_is_rejected(self):
+        old_limit = server.MAX_BODY_BYTES
+        server.MAX_BODY_BYTES = 32
+        try:
+            code, response = self.request("POST", "/v1/config", {"padding": "x" * 64})
+        finally:
+            server.MAX_BODY_BYTES = old_limit
+        self.assertEqual(413, code)
+        self.assertEqual("request body too large", response["error"])
+
+    def test_private_embedding_target_is_rejected(self):
+        code, _ = self.request("POST", "/v1/config", {
+            "embedding.provider": "api",
+            "embedding.api_base_url": "http://" + "127.0.0.1" + ":9999/v1",
+            "embedding.api_key": "sk-" + "test-only",
+        })
+        self.assertEqual(200, code)
+        code, response = self.request("POST", "/v1/embeddings", {"input": ["hello"]})
+        self.assertEqual(400, code)
+        self.assertIn("HTTPS public endpoint", response["error"])
 
     def test_lifecycle_dispute_recall_and_illegal_transition(self):
         code, moved = self.request(

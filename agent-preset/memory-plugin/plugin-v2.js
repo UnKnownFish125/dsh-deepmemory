@@ -14,6 +14,7 @@
 //  - config centre reload (deepmemory.* keys) every minute
 //  - daily importance decay with access reinforcement (server-side)
 
+import fs from 'node:fs'
 import { defineTool } from '/usr/local/node/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tools/lib/index.js'
 
 export const name = 'deepmemory'
@@ -25,6 +26,10 @@ export function apply(ctx) {
   const buckets = new Map()
   const enabledCache = new Map()
   let SERVER = 'http://localhost:6230'
+  const TOKEN_FILE = process.env.MEMORY_API_TOKEN_FILE || `${process.env.DSH_HOME || process.env.HOME}/.dsh-memory-api-token`
+  function readToken() {
+    try { return fs.readFileSync(TOKEN_FILE, 'utf8').trim() } catch { return '' }
+  }
   let WORKSPACE = 'deepseek-hardness'
   let EXTRACT_THRESHOLD = 4
   let RECALL_K = 5
@@ -55,9 +60,10 @@ export function apply(ctx) {
       const base = new URL(SERVER)
       if (base.protocol !== 'http:' && base.protocol !== 'https:') throw new Error('unsupported server protocol')
       const url = new URL(path, base)
+      const token = readToken()
       const options = {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         signal: AbortSignal.timeout(25000),
       }
       if (body !== undefined && body !== null) options.body = JSON.stringify(body)
