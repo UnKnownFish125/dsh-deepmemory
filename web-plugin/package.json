@@ -1,7 +1,7 @@
 {
   "name": "dsh-deepmemory",
   "version": "0.1.0",
-  "description": "DeepSeek Harness 长期记忆系统 Web 插件：记忆面板、实体图谱、归档维护、配置中心（设计对齐 AstrBot livingmemory）",
+  "description": "DeepSeek Harness 长期记忆系统 Web 插件：记忆面板、实体图谱、归档维护、配置中心",
   "type": "module",
   "repository": {
     "type": "git",

@@ -4,7 +4,7 @@
 [![Platform: DeepSeek Harness](https://img.shields.io/badge/Platform-DeepSeek%20Harness-4c8dff)](https://github.com/deepseek-ai)
 [**English**](README.md)
 
-让 DeepSeek Harness 的 agent 拥有**跨会话记忆**与**近乎无限的上下文**。事实、偏好、决定、计划与任务在会话之间持续存在——结构化、可检索、受保护。设计概念对齐 [AstrBot living memory](https://github.com/lxfight-s-AstrBot-Plugins/astrbot_plugin_livingmemory)，实现为 DSH 平台的原生实现：Python 记忆后端 + Cordis Web 插件 + 三套 agent preset。
+让 DeepSeek Harness 的 agent 拥有**跨会话记忆**与**近乎无限的上下文**。事实、偏好、决定、计划与任务在会话之间持续存在——结构化、可检索、受保护。实现为 DSH 平台的原生实现：Python 记忆后端 + Cordis Web 插件 + 三套 agent preset。
 
 ## 核心特性
 
@@ -112,4 +112,4 @@ sudo bash scripts/install.sh
 
 ## 许可
 
-**AGPL-3.0**。设计致谢 [AstrBot living memory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory) 作者 [lxfight](https://github.com/lxfight-s)；本项目是面向 DeepSeek Harness 的独立原生实现，非代码搬运。修改、衍生与分发（含网络服务提供）须遵守 AGPL 条款。
+**AGPL-3.0**。本项目是面向 DeepSeek Harness 的独立原生实现，非代码搬运。修改、衍生与分发（含网络服务提供）须遵守 AGPL 条款。

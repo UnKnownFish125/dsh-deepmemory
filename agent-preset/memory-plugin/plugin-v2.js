@@ -4,7 +4,7 @@
 // Talks to the local dsh-memory-server (systemd, http://localhost:6230)
 // which owns SQLite + FAISS + BM25 + graph storage.
 //
-// Capabilities (P2, aligned with AstrBot livingmemory):
+// Capabilities (P2):
 //  - agent/pre-step: recall injection (workspace card + top memories),
 //    query expanded with recent-turn context slices
 //  - agent/turn-stopping: cheap-LLM extraction — rich fields, atoms, entities,
