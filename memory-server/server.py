@@ -3,7 +3,7 @@
 """
 DSH memory-server — semantic long-term memory backend for the DeepSeek Harness.
 
-Aligned with AstrBot livingmemory's storage/retrieval strategy:
+Aligned with AstrBot living memory's storage/retrieval strategy:
   - documents table (summary/key_facts/persona_summary/canonical_summary)
   - atoms table (fine-grained facts with TTL/decay)
   - graph nodes/edges (entity-relation layer)
@@ -702,7 +702,7 @@ def search_memories(
     if not query or not query.strip():
         return []
     k = max(1, min(int(k), 50))
-    # 检索缓存：相同查询参数组合在 TTL 内直接复用（livingmemory 检索缓存）
+    # 检索缓存：相同查询参数组合在 TTL 内直接复用（living memory 检索缓存）
     cache_enabled = cfg_bool("search_cache.enabled", True)
     cache_key = (query.strip()[:200], k, session_id or "", workspace_id or "", domain or "", type_ or "", persona_id or "")
     if cache_enabled:
@@ -745,7 +745,7 @@ def search_memories(
                 "UPDATE documents SET last_access_at=?, access_count=access_count+1 WHERE id=?",
                 (now, r["id"]),
             )
-        # 访问强化：被召回的活跃原子刷新强化时间并延长 TTL（livingmemory access reinforcement）
+        # 访问强化：被召回的活跃原子刷新强化时间并延长 TTL（living memory access reinforcement）
         if cfg_bool("access_reinforcement.reinforce_atoms", True):
             extension = max(0.0, cfg_float("access_reinforcement.atom_ttl_extension_days", 1.0))
             for r in out:
@@ -782,7 +782,7 @@ def add_memory(payload):
     persona_summary = clean.get("persona_summary") or ""
     canonical_summary = clean.get("canonical_summary") or ""
     clean = _mark_sensitive(clean, records)
-    # 检索文本 = 摘要 + 关键事实，提升检索信息密度（对齐 livingmemory）
+    # 检索文本 = 摘要 + 关键事实，提升检索信息密度（对齐 living memory）
     search_text = content + (" " + key_facts if key_facts else "")
     vecs = embed_texts([search_text])
     vec = normalize(vecs[0])
@@ -887,7 +887,7 @@ def add_atom(memory_id, payload):
     now = time.time()
     ttl = float(clean.get("ttl_days", 30) or 30)
     content = (clean.get("content") or "").strip()
-    # 原子级查重（livingmemory 对齐）：与同记忆的活跃原子 Jaccard 相似，
+    # 原子级查重（living memory 对齐）：与同记忆的活跃原子 Jaccard 相似，
     # 超过阈值视为重复 → 强化已有原子（计数+刷新+延长 TTL），不再新增。
     if content:
         threshold = cfg_float("fusion_strategy.atom_dedup_threshold", 0.6)
@@ -1703,12 +1703,12 @@ def _rebuild_indexes_internal():
 
 
 def rebuild_indexes():
-    """索引重建：指纹校验 + 影子重建（临时文件生成后原子替换，livingmemory 对齐）。"""
+    """索引重建：指纹校验 + 影子重建（临时文件生成后原子替换，living memory 对齐）。"""
     return _rebuild_indexes_internal()
 
 
 def consolidate_memories(similarity=None, limit_groups=None, dry_run=False):
-    """记忆整合（livingmemory 对齐）：语义聚类高度相似的活跃记忆，组内保留
+    """记忆整合（living memory 对齐）：语义聚类高度相似的活跃记忆，组内保留
     importance 最高者为主记忆，其余并入 canonical_summary 后归档。
 
     参数读 memory_consolidation 配置组；dry_run=True 只返回候选组不落库
