@@ -5,11 +5,13 @@
  * same-origin route, so no CORS or private-network policy applies.
  */
 import http from 'node:http'
+import z from '@deepseek-ai/schemastery'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import fs from 'node:fs'
 
 export const name = 'deepmemory'
 
-export const inject = ['webServer']
+export const inject = ['webServer', 'settings']
 
 const TARGET_HOST = 'localhost'
 const TARGET_PORT = Number(process.env.MEMORY_SERVER_PORT || 6230)
@@ -21,6 +23,12 @@ function readToken() {
 }
 
 export function apply(ctx) {
+  // The official Plugins settings page discovers configurable cards from the
+  // Host settings namespace list, then dispatches settings.plugin.item by key.
+  // Deepmemory keeps its actual config in memory-server, so this empty section
+  // is only the discovery contract for the browser-owned configuration card.
+  ctx.settings.register(settingsNamespace('deepmemory'), z.object({}))
+
   ctx.webServer.register({
     kind: 'prefix',
     path: PREFIX,

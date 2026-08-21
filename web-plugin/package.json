@@ -21,6 +21,10 @@
     "package.json"
   ],
   "license": "AGPL-3.0-only",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.6 <0.2",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
   "dsh": {
     "category": "Memory",
     "categories": ["Memory"],
