@@ -1241,12 +1241,12 @@ export function apply(ctx) {
   // 记忆配置卡片：设置 → 插件 → 插件配置页（官方 configurable tab），独立卡片
   slots.inject('settings.plugin.item', function () {
     return slots.register(
-      { name: 'settings.plugin.item', id: 'deepmemory', order: 30, label: 'deepmemory 记忆' },
+      { name: 'settings.plugin.item', key: 'deepmemory', order: 30, label: 'deepmemory 记忆' },
       function () {
         const dict = I18N.zh
         const t = function (key) { return dict[key] !== undefined ? dict[key] : key }
         return React.createElement(ConfigView, { t: t, lang: 'zh', embedded: true, sessionId: null })
       },
     )
-  })
+  }, { key: 'deepmemory' })
 }
