@@ -11,15 +11,301 @@ import fs from 'node:fs'
 
 export const name = 'deepmemory'
 
-export const inject = ['webServer', 'settings']
+export const inject = ['webServer', 'settings', 'timer']
 
 const TARGET_HOST = 'localhost'
 const TARGET_PORT = Number(process.env.MEMORY_SERVER_PORT || 6230)
 const PREFIX = '/mem-api'
-const TOKEN_FILE = process.env.MEMORY_API_TOKEN_FILE || `${process.env.DSH_HOME || process.env.HOME}/.dsh-memory-api-token`
+const TOKEN_FILES = [
+  process.env.MEMORY_API_TOKEN_FILE,
+  process.env.DSH_HOME ? `${process.env.DSH_HOME}/.dsh-memory-api-token` : '',
+  process.env.HOME ? `${process.env.HOME}/.dsh-memory-api-token` : '',
+].filter((path, index, paths) => path && paths.indexOf(path) === index)
+let consolidationRun = null
+let consolidationRunForce = false
+let queuedForceRun = null
 
 function readToken() {
-  try { return fs.readFileSync(TOKEN_FILE, 'utf8').trim() } catch { return '' }
+  for (const path of TOKEN_FILES) {
+    try {
+      const token = fs.readFileSync(path, 'utf8').trim()
+      if (token) return token
+    } catch {}
+  }
+  return ''
+}
+
+function memoryRequest(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body))
+    const token = readToken()
+    const headers = { Accept: 'application/json' }
+    if (payload) {
+      headers['Content-Type'] = 'application/json'
+      headers['Content-Length'] = String(payload.length)
+    }
+    if (token) headers.Authorization = `Bearer ${token}`
+    const req = http.request({
+      host: TARGET_HOST,
+      port: TARGET_PORT,
+      path,
+      method,
+      headers,
+      timeout: 60000,
+    }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        let data
+        try { data = text ? JSON.parse(text) : {} } catch { data = { error: text || `HTTP ${res.statusCode}` } }
+        if ((res.statusCode || 500) >= 400) reject(new Error(data.error || `HTTP ${res.statusCode}`))
+        else resolve(data)
+      })
+    })
+    req.on('timeout', () => req.destroy(new Error('memory-server request timeout')))
+    req.on('error', reject)
+    if (payload) req.write(payload)
+    req.end()
+  })
+}
+
+function boolValue(value, fallback) {
+  if (value === undefined || value === null) return fallback
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['false', '0', 'no', 'off', ''].includes(normalized)) return false
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true
+  }
+  return Boolean(value)
+}
+
+async function summarizeGroup(llm, route, group) {
+  const source = [group.primary_content].concat(group.contents || []).filter(Boolean)
+  let output = ''
+  const stream = llm.stream({
+    provider: route.provider,
+    model: route.model,
+    system: '你是长期记忆整合器。将同组记忆合并为一段准确、自包含、无重复的规范摘要。保留事实、决定、约束和时间关系，不添加新信息。只输出摘要正文。',
+    messages: [{ role: 'user', content: [{ type: 'text', text: source.map((text, index) => `${index + 1}. ${text}`).join('\n').slice(0, 12000) }] }],
+    temperature: 0.1,
+    maxTokens: 1200,
+  })
+  for await (const chunk of stream) {
+    if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') output += chunk.text
+    if (chunk && (chunk.type === 'error' || chunk.type === 'aborted')) throw new Error('consolidation summary stream failed')
+  }
+  const summary = output.trim()
+  if (!summary) throw new Error('consolidation summary was empty')
+  return summary.slice(0, 4000)
+}
+
+async function extractSessionCard(llm, dialog, existingCard) {
+  let output = ''
+  const stream = llm.stream({
+    provider: 'uuapi',
+    model: 'deepseek-v4-flash',
+    system: [
+      '你是会话状态卡提取器。根据对话片段提取当前会话状态。',
+      '只输出一个 JSON 对象，不要 markdown：',
+      '{"card":null} 或 {"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]}}',
+      '输出必须是合并现有状态与新增对话后的完整卡；goal/current_plan 各一句；数组各最多 4 条；没有明确任务、主题或状态变化时 card 为 null。',
+    ].join('\n'),
+    messages: [{ role: 'user', content: [{ type: 'text', text: (
+      '现有状态卡：\n' + JSON.stringify(existingCard || {}) + '\n\n新增对话：\n' + dialog
+    ).slice(0, 12000) }] }],
+    temperature: 0.1,
+    maxTokens: 1600,
+  })
+  for await (const chunk of stream) {
+    if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') output += chunk.text
+    if (chunk && (chunk.type === 'error' || chunk.type === 'aborted')) throw new Error('state card extraction stream failed')
+  }
+  const start = output.indexOf('{')
+  const end = output.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error('state card extraction returned no JSON')
+  return JSON.parse(output.slice(start, end + 1)).card || null
+}
+
+function eventText(event) {
+  const type = event && event.type
+  if (type !== 'user/message' && type !== 'assistant/message') return ''
+  const data = event.data || {}
+  const message = type === 'user/message' ? data : (data.message || data)
+  if (message.source && message.source.kind === 'plugin' && message.source.plugin === 'compact') return ''
+  const content = message.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.filter((item) => item && item.type === 'text' && typeof item.text === 'string').map((item) => item.text).join('')
+}
+
+function stateCardKind(agent) {
+  const preset = String((agent && agent.session && agent.session.header && agent.session.header.agentPreset) || '')
+  return preset.includes('task') ? 'task' : 'daily'
+}
+
+function cadenceCompactionRange(agent, cadenceTurn, retainTurns = 3) {
+  const turnBySeq = new Map()
+  let currentTurn = 0
+  for (const event of agent.session.events) {
+    if (event.type === 'turn/start') currentTurn = Number((event.data && event.data.turn) || currentTurn)
+    turnBySeq.set(event.seq, currentTurn)
+  }
+  const surface = Array.from(agent.session.surface.nodes)
+  const cutoff = cadenceTurn - retainTurns
+  let endIndex = -1
+  for (let index = 0; index < surface.length; index++) {
+    if (Number(turnBySeq.get(surface[index]) || 0) > cutoff) break
+    endIndex = index
+  }
+  if (endIndex < 0) return null
+  return { start: surface[0], end: surface[endIndex] }
+}
+
+async function sessionEvents(ctx, sessionId) {
+  const agent = ctx.get('agents')?.get(sessionId)
+  if (agent && agent.session) return agent.session.events
+  const persistence = ctx.get('sessionPersistence')
+  if (!persistence) return null
+  const inspection = await persistence.inspect(sessionId)
+  return inspection && inspection.events
+}
+
+async function initializeStateCard(ctx, sessionId, kind) {
+  const existing = await memoryRequest('GET', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sessionId)).catch((error) => {
+    if (String(error.message).includes('state card not found')) return { card: null }
+    throw error
+  })
+  if (existing.card) return { status: 'exists', card: existing.card }
+  const events = await sessionEvents(ctx, sessionId)
+  if (!events) throw new Error('session is not available')
+  const messages = []
+  for (const event of events) {
+    const text = eventText(event).trim()
+    if (!text) continue
+    messages.push({ role: event.type === 'user/message' ? '用户' : '助手', text: text.slice(0, 1600) })
+  }
+  const recent = messages.slice(-30)
+  if (!recent.length) return { status: 'no_messages' }
+  const llm = ctx.get('llm')
+  if (!llm) throw new Error('llm service unavailable')
+  const dialog = recent.map((item) => item.role + ': ' + item.text).join('\n')
+  const card = await extractSessionCard(llm, dialog, null)
+  if (!card) return { status: 'no_state' }
+  const result = await memoryRequest('PUT', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sessionId), {
+    expected_version: 0,
+    payload: {
+      goal: String(card.goal || ''),
+      current_plan: String(card.current_plan || ''),
+      key_decisions: Array.isArray(card.key_decisions) ? card.key_decisions.slice(0, 4) : [],
+      in_progress: Array.isArray(card.in_progress) ? card.in_progress.slice(0, 4) : [],
+      next_steps: Array.isArray(card.next_steps) ? card.next_steps.slice(0, 4) : [],
+    },
+    actor: 'user',
+    reason: 'manual session card initialization',
+  })
+  return { status: 'created', card: result.card }
+}
+
+async function performConsolidation(ctx, options = {}) {
+  if (consolidationRun) {
+    if (!options.force || consolidationRunForce) return consolidationRun
+    if (!queuedForceRun) {
+      queuedForceRun = consolidationRun
+        .catch(() => undefined)
+        .then(() => performConsolidation(ctx, options))
+        .finally(() => { queuedForceRun = null })
+    }
+    return queuedForceRun
+  }
+  consolidationRunForce = options.force === true
+  consolidationRun = (async () => {
+    const configResponse = await memoryRequest('GET', '/v1/config')
+    const config = configResponse.config || {}
+    const force = options.force === true
+    const enabled = boolValue(config['memory_consolidation.enabled'], false)
+    const trigger = String(config['memory_consolidation.trigger'] || 'daily')
+    if (!force && (!enabled || trigger !== 'daily')) {
+      return { status: 'disabled', enabled, trigger }
+    }
+    const lastResponse = await memoryRequest('GET', '/v1/settings/last_consolidation_at')
+    const last = Number(lastResponse.value || 0)
+    const now = Date.now() / 1000
+    if (!force && last > 0 && now - last < 86400) {
+      return { status: 'skipped', next_run_in_seconds: Math.ceil(86400 - (now - last)) }
+    }
+    const similarity = Number.isFinite(Number(options.similarity))
+      ? Number(options.similarity)
+      : Number(config['memory_consolidation.semantic_similarity_threshold'] || 0.92)
+    const limitGroups = Number.isFinite(Number(options.limitGroups))
+      ? Number(options.limitGroups)
+      : Number(config['memory_consolidation.max_groups_per_run'] || 5)
+    const candidates = await memoryRequest('POST', '/v1/maintenance/consolidate/candidates', {
+      similarity,
+      limit_groups: limitGroups,
+    })
+    if (candidates.error) throw new Error(String(candidates.error))
+    if (!candidates.groups) {
+      await memoryRequest('POST', '/v1/settings/set', { key: 'last_consolidation_at', value: now })
+      return {
+        status: 'no_candidates', merged: 0, groups: 0, threshold: candidates.threshold,
+        min_age_days: Number(config['memory_consolidation.min_age_days'] || 1),
+        max_importance: Number(config['memory_consolidation.max_importance'] || 0.5),
+      }
+    }
+    const useLlm = boolValue(config['memory_consolidation.llm_summarize'], false)
+    const llm = ctx.get('llm')
+    let route = null
+    const groups = []
+    if (useLlm && llm) {
+      const configuredProvider = String(config['memory_consolidation.llm_provider'] || '').trim()
+      const configuredModel = String(config['memory_consolidation.llm_model'] || '').trim()
+      const legacyDefault = !configuredProvider && (!configuredModel || configuredModel === 'deepseek-chat')
+      route = legacyDefault
+        ? { provider: 'uuapi', model: 'deepseek-v4-flash' }
+        : { provider: configuredProvider || 'uuapi', model: configuredModel || 'deepseek-v4-flash' }
+      for (const group of candidates.candidates || []) {
+        groups.push({
+          primary_id: group.primary_id,
+          archived_ids: group.archived_ids || [],
+          canonical_summary: await summarizeGroup(llm, route, group),
+        })
+      }
+    } else {
+      for (const group of candidates.candidates || []) {
+        groups.push({ primary_id: group.primary_id, archived_ids: group.archived_ids || [] })
+      }
+    }
+    const applied = await memoryRequest('POST', '/v1/maintenance/consolidate/apply', { groups })
+    await memoryRequest('POST', '/v1/settings/set', { key: 'last_consolidation_at', value: now })
+    return {
+      status: 'completed', merged: applied.merged || 0, groups: applied.groups || groups.length,
+      threshold: candidates.threshold, mode: useLlm && llm ? 'llm' : 'deterministic', route,
+    }
+  })().finally(() => {
+    consolidationRun = null
+    consolidationRunForce = false
+  })
+  return consolidationRun
+}
+
+function readRequestJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > 64 * 1024) {
+        reject(new Error('request body too large'))
+        req.destroy()
+      } else chunks.push(chunk)
+    })
+    req.on('end', () => {
+      try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}) }
+      catch (error) { reject(error) }
+    })
+    req.on('error', reject)
+  })
 }
 
 export function apply(ctx) {
@@ -28,6 +314,158 @@ export function apply(ctx) {
   // Deepmemory keeps its actual config in memory-server, so this empty section
   // is only the discovery contract for the browser-owned configuration card.
   ctx.settings.register(settingsNamespace('deepmemory'), z.object({}))
+
+  const cardBuckets = new Map()
+  const cardRuns = new Set()
+  const cadenceRuns = new Map()
+  ctx.on('session/event', (session, event) => {
+    const text = eventText(event).trim()
+    if (!text || !session || !session.id) return
+    const sessionId = String(session.id)
+    let bucket = cardBuckets.get(sessionId)
+    if (!bucket) {
+      bucket = []
+      cardBuckets.set(sessionId, bucket)
+    }
+    bucket.push({ role: event.type === 'user/message' ? '用户' : '助手', text: text.slice(0, 1200) })
+    if (bucket.length > 40) bucket.shift()
+  })
+
+  ctx.on('agent/turn-stopping', async ({ agent, turn, signal }) => {
+    if (!agent) return
+    const sessionId = String(agent.session.id)
+    if (cardRuns.has(sessionId)) return
+    const bucket = cardBuckets.get(sessionId) || []
+    let configResponse
+    try {
+      configResponse = await memoryRequest('GET', '/v1/config/session?session_id=' + encodeURIComponent(sessionId))
+    } catch (error) {
+      ctx.logger.warn('automatic state card config failed for session %s: %s', sessionId, String((error && error.message) || error))
+      return
+    }
+    const config = configResponse.config || {}
+    const syncTurns = Math.max(1, Math.min(100, Number(config['state_card.sync_turns'] || 5)))
+    let cadence = cadenceRuns.get(sessionId)
+    if (!cadence) {
+      if (!turn || turn % syncTurns !== 0) return
+      cadence = { turn, cardDone: false }
+      cadenceRuns.set(sessionId, cadence)
+    }
+    const enabled = boolValue(config['state_card.auto_generate'], true)
+    const consumed = bucket.length ? bucket.slice() : []
+    cardRuns.add(sessionId)
+    try {
+      if (!cadence.cardDone) {
+        if (enabled) {
+          const llm = ctx.get('llm')
+          if (!llm) throw new Error('llm service unavailable')
+          const kind = stateCardKind(agent)
+          const existing = await memoryRequest('GET', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sessionId)).catch((error) => {
+            if (String(error.message).includes('state card not found')) return { card: null }
+            throw error
+          })
+          let input = consumed
+          if (!input.length) {
+            input = []
+            for (const event of agent.session.events) {
+              const text = eventText(event).trim()
+              if (text) input.push({ role: event.type === 'user/message' ? '用户' : '助手', text: text.slice(0, 1200) })
+            }
+            input = input.slice(-20)
+          }
+          const dialog = input.map((item) => item.role + ': ' + item.text).join('\n')
+          const card = dialog ? await extractSessionCard(llm, dialog, existing.card && existing.card.payload) : null
+          if (card) {
+            const result = await memoryRequest('PUT', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sessionId), {
+              expected_version: existing.card ? Number(existing.card.version || 0) : 0,
+              payload: {
+                goal: String(card.goal || ''),
+                current_plan: String(card.current_plan || ''),
+                key_decisions: Array.isArray(card.key_decisions) ? card.key_decisions.slice(0, 4) : [],
+                in_progress: Array.isArray(card.in_progress) ? card.in_progress.slice(0, 4) : [],
+                next_steps: Array.isArray(card.next_steps) ? card.next_steps.slice(0, 4) : [],
+              },
+              actor: 'main_agent',
+              reason: 'five-turn state card and compaction cadence',
+            })
+            ctx.logger.info('five-turn state card updated session %s v%s', sessionId, result.card && result.card.version)
+          } else {
+            ctx.logger.info('five-turn state card: no update for session %s', sessionId)
+          }
+        }
+        if (consumed.length) cardBuckets.set(sessionId, (cardBuckets.get(sessionId) || []).slice(consumed.length))
+        cadence.cardDone = true
+      }
+      const range = cadenceCompactionRange(agent, cadence.turn)
+      const compaction = agent.ctx.get('compaction')
+      if (range && compaction) {
+        const result = await compaction.compactRegion(range.start, range.end, agent, signal)
+        ctx.logger.info('five-turn compaction completed session %s turn %s id %s', sessionId, cadence.turn, result && result.compactionId)
+      } else if (range && !compaction) {
+        ctx.logger.warn('five-turn compaction unavailable for session %s', sessionId)
+      } else {
+        ctx.logger.info('five-turn compaction had no eligible history for session %s turn %s', sessionId, cadence.turn)
+      }
+      cadenceRuns.delete(sessionId)
+    } catch (error) {
+      ctx.logger.warn('five-turn state card/compaction failed for session %s: %s', sessionId, String((error && error.message) || error))
+    } finally {
+      cardRuns.delete(sessionId)
+    }
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/v1/maintenance/consolidate',
+    handler: (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(405)
+        res.end()
+        return
+      }
+      readRequestJson(req)
+        .then((body) => performConsolidation(ctx, {
+          force: true,
+          similarity: body.similarity,
+          limitGroups: body.limit_groups,
+        }))
+        .then((result) => {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(result))
+        })
+        .catch((error) => {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: String((error && error.message) || error) }))
+        })
+    },
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/v1/cards/initialize',
+    handler: (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(405)
+        res.end()
+        return
+      }
+      readRequestJson(req)
+        .then((body) => {
+          const sessionId = String(body.session_id || '').trim()
+          const kind = body.kind === 'task' ? 'task' : 'daily'
+          if (!sessionId) throw new Error('session_id is required')
+          return initializeStateCard(ctx, sessionId, kind)
+        })
+        .then((result) => {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify(result))
+        })
+        .catch((error) => {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: String((error && error.message) || error) }))
+        })
+    },
+  })
 
   ctx.webServer.register({
     kind: 'prefix',
@@ -67,4 +505,17 @@ export function apply(ctx) {
       req.pipe(upstream)
     },
   })
+
+  const scheduled = async () => {
+    try {
+      const result = await performConsolidation(ctx)
+      if (result.status !== 'disabled' && result.status !== 'skipped') {
+        ctx.logger.info('scheduled consolidation: %o', result)
+      }
+    } catch (error) {
+      ctx.logger.warn('scheduled consolidation failed: %s', String((error && error.message) || error))
+    }
+  }
+  ctx.timeout(scheduled, 15000)
+  ctx.interval(scheduled, 3600 * 1000)
 }

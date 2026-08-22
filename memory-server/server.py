@@ -482,6 +482,7 @@ def tokenize(text):
 
 class BM25:
     def __init__(self):
+        self._lock = threading.RLock()
         self.docs = {}
         self.df = {}
         self.avgdl = 1.0
@@ -490,36 +491,62 @@ class BM25:
         tokens = tokenize(text)
         if not tokens:
             return
-        self.docs[doc_id] = tokens
-        seen = set()
-        for t in tokens:
-            if t not in seen:
-                self.df[t] = self.df.get(t, 0) + 1
-                seen.add(t)
-        total = sum(len(v) for v in self.docs.values())
-        self.avgdl = total / max(1, len(self.docs))
+        with self._lock:
+            self.docs[doc_id] = tokens
+            for token in set(tokens):
+                self.df[token] = self.df.get(token, 0) + 1
+            total = sum(len(v) for v in self.docs.values())
+            self.avgdl = total / max(1, len(self.docs))
 
     def remove(self, doc_id):
-        self.docs.pop(doc_id, None)
-        total = sum(len(v) for v in self.docs.values())
-        self.avgdl = total / max(1, len(self.docs))
+        with self._lock:
+            removed = self.docs.pop(doc_id, None)
+            if removed:
+                for token in set(removed):
+                    count = self.df.get(token, 0) - 1
+                    if count > 0:
+                        self.df[token] = count
+                    else:
+                        self.df.pop(token, None)
+            total = sum(len(v) for v in self.docs.values())
+            self.avgdl = total / max(1, len(self.docs))
+
+    def replace(self, rows):
+        docs = {}
+        df = {}
+        for doc_id, text in rows:
+            tokens = tokenize(text)
+            if not tokens:
+                continue
+            docs[doc_id] = tokens
+            for token in set(tokens):
+                df[token] = df.get(token, 0) + 1
+        total = sum(len(v) for v in docs.values())
+        with self._lock:
+            self.docs = docs
+            self.df = df
+            self.avgdl = total / max(1, len(docs))
 
     def search(self, query, k):
         tokens = tokenize(query)
         if not tokens:
             return []
-        n = max(1, len(self.docs))
+        with self._lock:
+            docs = list(self.docs.items())
+            df = dict(self.df)
+            avgdl = self.avgdl
+        n = max(1, len(docs))
         scores = {}
         for t in tokens:
-            if t not in self.df:
+            if t not in df:
                 continue
-            idf = math.log(1.0 + (n - self.df[t] + 0.5) / (self.df[t] + 0.5))
-            for doc_id, doc_tokens in self.docs.items():
+            idf = math.log(1.0 + (n - df[t] + 0.5) / (df[t] + 0.5))
+            for doc_id, doc_tokens in docs:
                 tf = doc_tokens.count(t)
                 if tf == 0:
                     continue
                 dl = len(doc_tokens)
-                denom = tf + 1.5 * (1 - 0.75 + 0.75 * dl / max(1.0, self.avgdl))
+                denom = tf + 1.5 * (1 - 0.75 + 0.75 * dl / max(1.0, avgdl))
                 scores[doc_id] = scores.get(doc_id, 0.0) + idf * (tf * 1.5) / denom
         return sorted(scores.items(), key=lambda kv: -kv[1])[:k]
 
@@ -538,11 +565,10 @@ def rebuild_bm25():
     ).fetchall()
     conn.close()
     bm = get_bm25()
-    bm.docs = {}
-    bm.df = {}
-    for r in rows:
-        text = " ".join(x for x in (r["content"], r["key_facts"], r["keywords"]) if x)
-        bm.add(r["id"], text)
+    bm.replace([
+        (r["id"], " ".join(x for x in (r["content"], r["key_facts"], r["keywords"]) if x))
+        for r in rows
+    ])
 
 
 # ---------------------------------------------------------------- retrieval
@@ -627,7 +653,15 @@ def cfg_float(key, default):
 
 def cfg_bool(key, default):
     v = get_setting("deepmemory." + key)
-    return default if v is None else bool(v)
+    if v is None:
+        return default
+    if isinstance(v, str):
+        normalized = v.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off", ""):
+            return False
+    return bool(v)
 
 
 def rrf_fuse(ranked_lists):
@@ -1485,6 +1519,15 @@ DECAY_PROTECTED = 0.85      # importance above this is exempt from decay
 DECAY_CLEANUP_IMPORTANCE = 0.1
 DECAY_CLEANUP_DAYS = 30.0
 DECAY_LAST_KEY = "last_decay_at"
+DECAY_INTERVAL_HOURS = 24.0
+_decay_lock = threading.Lock()
+
+
+def decay_interval_hours():
+    return min(
+        8760.0,
+        max(0.01, cfg_float("importance_decay.interval_hours", DECAY_INTERVAL_HOURS)),
+    )
 
 
 def count_active():
@@ -1496,7 +1539,7 @@ def count_active():
     return n
 
 
-def run_decay(decay_rate=0.01, force=False):
+def _run_decay(decay_rate=0.01, force=False):
     """Daily importance decay with access reinforcement (AstrBot-aligned).
 
     Memories accessed recently decay less: reference timestamp =
@@ -1513,13 +1556,16 @@ def run_decay(decay_rate=0.01, force=False):
             pass
     if not cfg_bool("access_reinforcement.enabled", True):
         decay_rate = max(0.0, decay_rate)
+    interval_hours = decay_interval_hours()
+    interval_seconds = interval_hours * 3600.0
     now = time.time()
     last = get_setting(DECAY_LAST_KEY)
     last = float(last) if last else 0.0
-    if not force and now - last < 86400:
+    if not force and now - last < interval_seconds:
         return {
             "skipped": True,
-            "next_run_in_seconds": int(86400 - (now - last)),
+            "interval_hours": interval_hours,
+            "next_run_in_seconds": int(interval_seconds - (now - last)),
             "documents": count_active(),
         }
     protect = cfg_float("access_reinforcement.protect_importance", DECAY_PROTECTED)
@@ -1567,7 +1613,35 @@ def run_decay(decay_rate=0.01, force=False):
     conn.commit()
     conn.close()
     set_setting(DECAY_LAST_KEY, now)
-    return {"decayed": decayed, "archived": len(archived_ids), "documents": count_active()}
+    return {
+        "decayed": decayed,
+        "archived": len(archived_ids),
+        "documents": count_active(),
+        "interval_hours": interval_hours,
+    }
+
+
+def run_decay(decay_rate=0.01, force=False):
+    with _decay_lock:
+        return _run_decay(decay_rate, force)
+
+
+def lifecycle_scheduler(stop_event, check_interval=3600):
+    """Keep daily decay independent from any Agent preset or active session."""
+    while not stop_event.is_set():
+        wait_seconds = check_interval
+        try:
+            result = run_decay()
+            if not result.get("skipped"):
+                print("memory lifecycle decay: " + json.dumps(result, ensure_ascii=False), flush=True)
+            else:
+                wait_seconds = min(
+                    check_interval,
+                    max(1, int(result.get("next_run_in_seconds") or check_interval)),
+                )
+        except Exception as exc:
+            print("memory lifecycle decay failed: " + redact_text(str(exc))[0], flush=True)
+        stop_event.wait(wait_seconds)
 
 
 def archive_memories(ids):
@@ -2391,7 +2465,12 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
             if path == "/v1/maintenance/consolidate/candidates":
-                return self._send(200, consolidate_memories(dry_run=True))
+                body = self._read_body()
+                return self._send(200, consolidate_memories(
+                    similarity=body.get("similarity"),
+                    limit_groups=int(body.get("limit_groups", 0) or 0) or None,
+                    dry_run=True,
+                ))
             if path == "/v1/maintenance/consolidate/apply":
                 body = self._read_body()
                 return self._send(200, apply_consolidation(body.get("groups")))
@@ -2527,6 +2606,13 @@ def main():
     init_db()
     _ = get_index()
     rebuild_bm25()
+    lifecycle_stop = threading.Event()
+    threading.Thread(
+        target=lifecycle_scheduler,
+        args=(lifecycle_stop,),
+        name="deepmemory-lifecycle",
+        daemon=True,
+    ).start()
     srv = ThreadingHTTPServer(("localhost", PORT), Handler)
     print(f"memory-server listening on http://localhost:{PORT}", flush=True)
     srv.serve_forever()

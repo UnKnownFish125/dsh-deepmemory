@@ -1,3 +1,5 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+dist/deepmemory-v*.tar.gz
+!dist/deepmemory-v0.1.0.tar.gz

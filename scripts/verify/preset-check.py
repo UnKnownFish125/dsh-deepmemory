@@ -175,6 +175,22 @@ def check_preset(spec):
 
     all_ids = entry_ids | nested_ids
 
+    if spec['must_have_memory']:
+        compaction_group = next(
+            (entry for entry in agent_data if isinstance(entry, dict) and entry.get('id') == 'compaction'),
+            None,
+        )
+        compaction_entries = compaction_group.get('config', []) if compaction_group else []
+        compaction = next(
+            (entry for entry in compaction_entries if isinstance(entry, dict) and entry.get('id') == 'compaction-basic'),
+            None,
+        )
+        policy = compaction.get('config', {}) if compaction else {}
+        if policy.get('thresholdRatio') != 0.55 or policy.get('retainRatio') != 0.2:
+            fail('compaction policy must use thresholdRatio=0.55 and retainRatio=0.2')
+        else:
+            ok('compaction policy correct: 0.55 trigger / 0.2 retain')
+
     # Check required capabilities with fuzzy matching
     # Capabilities can match: exact ID, part of ID, or in plugin name
     for cap in spec.get('required_capabilities', []):

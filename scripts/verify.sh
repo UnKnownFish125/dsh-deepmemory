@@ -78,11 +78,18 @@ if [ "$UP" != "1" ]; then bad; tail -5 "$TMP/run.log"; else
   G=$(curl -s "http://localhost:$PORT/v1/graph")
   B=$(curl -s -X POST "http://localhost:$PORT/v1/backups/create")
   R=$(curl -s -X POST "http://localhost:$PORT/v1/maintenance/rebuild" -H 'Content-Type: application/json' -d '{}')
+  D=''
+  for _ in $(seq 1 20); do
+    D=$(curl -s "http://localhost:$PORT/v1/settings/last_decay_at")
+    echo "$D" | grep -Eq '"value"[[:space:]]*:[[:space:]]*[0-9]' && break
+    sleep 0.1
+  done
   if echo "$A" | grep -q '"id"'; then echo -n "写入✓"; else echo -n "写入✗"; FAIL=1; fi
   if echo "$S" | grep -q '"count"'; then echo -n " 检索✓"; else echo -n " 检索✗"; FAIL=1; fi
   if echo "$G" | grep -q '"edges"'; then echo -n " 图谱✓"; else echo -n " 图谱✗"; FAIL=1; fi
   if echo "$B" | grep -q '"name"'; then echo -n " 备份✓"; else echo -n " 备份✗"; FAIL=1; fi
   if echo "$R" | grep -q '"rebuilt"'; then echo -n " 重建✓"; else echo -n " 重建✗"; FAIL=1; fi
+  if echo "$D" | grep -Eq '"value"[[:space:]]*:[[:space:]]*[0-9]'; then echo -n " 每日衰减调度✓"; else echo -n " 每日衰减调度✗"; FAIL=1; fi
   echo
 fi
 kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
@@ -95,6 +102,14 @@ cp "$ROOT/web-plugin/client.js" "$CTMP/client.js"
 "$VENV_PY" "$ROOT/scripts/fix-client-bundle.py" "$CTMP/client.js" dsh-deepmemory >/dev/null 2>&1 || { bad; rm -rf "$CTMP"; }
 CLIENT_JS="$CTMP/client.js" "$NODE" "$HERE/verify/render-check.mjs" >/dev/null 2>&1 && ok || bad
 rm -rf "$CTMP"
+
+step "web Host 插件语法"
+"$NODE" --check "$ROOT/web-plugin/index.js" 2>/dev/null && ok || bad
+
+step "五轮状态卡/压缩同步契约"
+if grep -q "state_card.sync_turns.*|| 5" "$ROOT/web-plugin/index.js" \
+  && grep -q "five-turn state card and compaction cadence" "$ROOT/web-plugin/index.js" \
+  && grep -q "compaction.compactRegion" "$ROOT/web-plugin/index.js"; then ok; else bad; fi
 
 # ---------------- 3. preset plugin ----------------
 step "preset 插件语法+apply+defineTool"

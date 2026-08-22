@@ -24,6 +24,7 @@ const I18N = {
     restore: '恢复', noArchive: '（无归档记忆）', maintainTitle: '维护与备份',
     backup: '创建备份', backups: '备份列表', backupDocs: '记忆数', restoreBackup: '恢复', delBackup: '删除',
     rebuild: '重建索引', consolidate: '记忆整合', similarity: '相似度阈值', decayRun: '执行衰减',
+    noConsolidationCandidates: '暂无符合条件的记忆组', consolidationDone: '整合完成', consolidationMode: '模式',
     stats: '统计', atoms: '原子', nodes: '节点', edges: '关系', archived: '归档',
     enabled: '已开启', disabled: '已关闭', result: '结果', cfgTitle: 'deepmemory 配置',
     cfgSave: '保存全部', cfgSaving: '保存中…', cfgSaved: '已保存 N 项。行为类配置在下一轮对话生效。', cfgFail: '保存失败: ',
@@ -31,7 +32,9 @@ const I18N = {
     memOn: '记忆已开启', memOff: '记忆已关闭', stateV: '状态卡 v',
     source: '原文', noSource: '（无原文切片）来源会话: ',
     graphDragHint: '拖拽节点布局 · 滚轮缩放 · 空白处拖拽平移 · 悬停高亮关联', graphReset: '重置视图',
-    cardEdit: '编辑', cardSave: '保存', cardCancel: '取消',
+    cardEdit: '编辑', cardSave: '保存', cardCancel: '取消', cardInitialize: '初始化', cardInitializing: '初始化中…',
+    cardNoMessages: '当前会话没有可用于初始化的消息', cardNoState: '未从会话历史中提取到明确状态',
+    cardHostReload: '初始化服务尚未加载，请受控重启 DSH Web 后重试',
     sessionConfig: '会话配置', defaultConfig: '默认配置', override: '覆盖', reset: '重置', overridden: '已覆盖',
     sensitiveWarning: '此内容含敏感信息，默认脱敏', requestApproval: '请求授权', approving: '授权中…',
     expand: '展开原文', approvalGranted: '已授权（剩余N次）', approvalExpired: '授权已过期',
@@ -39,6 +42,8 @@ const I18N = {
     taskCreate: '创建任务', taskEdit: '编辑', taskBlocked: '阻塞', taskUnblock: '解除阻塞',
     planned: '待规划', todo: '待办', inProgress: '进行中', completed: '已完成', failed: '已失败',
     blockReason: '阻塞原因', noTasks: '（无任务）', taskTransition: '流转', cardRevisions: '修订历史',
+    revisionChanged: '变更字段', revisionReason: '原因', showAll: '显示全部', collapse: '收起',
+    revisionExpand: '展开', revisionBefore: '修改前', revisionAfter: '修改后', revisionEmpty: '（空）',
   },
   en: {
     panelTitle: 'deepmemory Memory', config: 'Config', graph: 'Graph', archive: 'Archive', maintain: 'Maintain',
@@ -53,6 +58,7 @@ const I18N = {
     restore: 'Restore', noArchive: '(no archived memories)', maintainTitle: 'Maintenance & Backup',
     backup: 'Create backup', backups: 'Backups', backupDocs: 'docs', restoreBackup: 'Restore', delBackup: 'Delete',
     rebuild: 'Rebuild index', consolidate: 'Consolidate', similarity: 'Similarity', decayRun: 'Run decay',
+    noConsolidationCandidates: 'No eligible memory groups', consolidationDone: 'Consolidation complete', consolidationMode: 'Mode',
     stats: 'Stats', atoms: 'atoms', nodes: 'nodes', edges: 'edges', archived: 'archived',
     enabled: 'Enabled', disabled: 'Disabled', result: 'Result', cfgTitle: 'deepmemory Config',
     cfgSave: 'Save all', cfgSaving: 'Saving…', cfgSaved: 'Saved N items. Behavior config applies next turn.', cfgFail: 'Save failed: ',
@@ -60,7 +66,9 @@ const I18N = {
     memOn: 'Memory enabled', memOff: 'Memory disabled', stateV: 'card v',
     source: 'Source', noSource: '(no source slice) origin session: ',
     graphDragHint: 'Drag nodes · wheel zoom · drag canvas to pan · hover highlights links', graphReset: 'Reset view',
-    cardEdit: 'Edit', cardSave: 'Save', cardCancel: 'Cancel',
+    cardEdit: 'Edit', cardSave: 'Save', cardCancel: 'Cancel', cardInitialize: 'Initialize', cardInitializing: 'Initializing…',
+    cardNoMessages: 'No session messages are available for initialization', cardNoState: 'No explicit state was found in session history',
+    cardHostReload: 'The initialization service is not loaded; restart DSH Web safely and retry',
     sessionConfig: 'Session Config', defaultConfig: 'Default Config', override: 'Override', reset: 'Reset', overridden: 'Overridden',
     sensitiveWarning: 'This content contains sensitive info, redacted by default', requestApproval: 'Request Authorization', approving: 'Authorizing…',
     expand: 'Expand Source', approvalGranted: 'Authorized (N remaining)', approvalExpired: 'Authorization expired',
@@ -68,6 +76,8 @@ const I18N = {
     taskCreate: 'Create Task', taskEdit: 'Edit', taskBlocked: 'Blocked', taskUnblock: 'Unblock',
     planned: 'Planned', todo: 'To Do', inProgress: 'In Progress', completed: 'Completed', failed: 'Failed',
     blockReason: 'Block Reason', noTasks: '(no tasks)', taskTransition: 'Transition', cardRevisions: 'Revisions',
+    revisionChanged: 'Changed fields', revisionReason: 'Reason', showAll: 'Show all', collapse: 'Collapse',
+    revisionExpand: 'Expand', revisionBefore: 'Before', revisionAfter: 'After', revisionEmpty: '(empty)',
   },
 }
 
@@ -94,6 +104,15 @@ const PANEL_CSS = `
 .dsh-mem-stats { display:flex; gap:14px; opacity:.8; flex-wrap:wrap; }
 .dsh-mem-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .dsh-mem-meta { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+.dsh-mem-revision-head { display:flex; align-items:center; gap:8px; min-height:28px; }
+.dsh-mem-revision-card { display:flex; flex-direction:column; gap:7px; }
+.dsh-mem-revision-summary { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dsh-mem-revision-card > summary { cursor:pointer; list-style:none; }
+.dsh-mem-revision-card > summary::-webkit-details-marker { display:none; }
+.dsh-mem-revision-diff { display:grid; grid-template-columns:minmax(90px, .35fr) minmax(0, 1fr) minmax(0, 1fr); gap:6px 10px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.15)); }
+.dsh-mem-revision-diff-label { font-size:11px; opacity:.7; }
+.dsh-mem-revision-value { white-space:pre-wrap; word-break:break-word; line-height:1.45; }
+.dsh-mem-maintenance-result { display:flex; flex-direction:column; gap:6px; }
 .dsh-mem-form { display:flex; gap:8px; flex-wrap:wrap; }
 .dsh-mem-section-head { display:flex; align-items:center; gap:8px; margin:0 0 4px; }
 .dsh-mem-cfg-item { display:flex; flex-direction:column; gap:3px; padding:8px 0; border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.12)); }
@@ -552,16 +571,20 @@ export function apply(ctx) {
 
   function MaintenanceView(props) {
     const t = props.t
+    const lang = props.lang || 'zh'
     const [backups, setBackups] = React.useState([])
     const [sim, setSim] = React.useState('0.92')
     const [msg, setMsg] = React.useState('')
+    const [resultData, setResultData] = React.useState(null)
+    const [busy, setBusy] = React.useState(false)
     async function load() {
       const b = await api('GET', '/v1/backups/list')
       if (b && Array.isArray(b.backups)) setBackups(b.backups)
     }
     React.useEffect(function () { load() }, [])
     function result(res) {
-      setMsg(t('result') + ': ' + JSON.stringify(res))
+      setResultData(res || {})
+      setMsg(res && res.error ? String(res.error) : '')
       load()
     }
     async function doBackup() { result(await api('POST', '/v1/backups/create', {})) }
@@ -569,8 +592,10 @@ export function apply(ctx) {
     async function doDelBackup(name) { result(await api('DELETE', '/v1/backups/' + encodeURIComponent(name))) }
     async function doRebuild() { result(await api('POST', '/v1/maintenance/rebuild', {})) }
     async function doConsolidate() {
+      setBusy(true)
       const s = parseFloat(sim)
       result(await api('POST', '/v1/maintenance/consolidate', { similarity: Number.isFinite(s) ? s : 0.92, limit_groups: 5 }))
+      setBusy(false)
     }
     async function doDecay() { result(await api('POST', '/v1/maintenance/decay', { force: true })) }
     return React.createElement('div', { className: 'dsh-mem-panel' },
@@ -580,6 +605,24 @@ export function apply(ctx) {
         React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, t('refresh')),
       ),
       msg ? React.createElement('div', { style: { opacity: .75 } }, msg) : null,
+      resultData ? React.createElement('div', { className: 'dsh-mem-box dsh-mem-maintenance-result' },
+        React.createElement('div', { className: 'dsh-mem-title' }, t('result')),
+        resultData.status === 'no_candidates'
+          ? React.createElement('div', { className: 'dsh-mem-content' }, t('noConsolidationCandidates'))
+          : resultData.status === 'completed'
+            ? React.createElement('div', { className: 'dsh-mem-content' }, t('consolidationDone'))
+            : null,
+        resultData.merged !== undefined ? React.createElement('div', { className: 'dsh-mem-meta' },
+          React.createElement('span', { className: 'dsh-mem-badge' }, (lang === 'en' ? 'Merged ' : '合并 ') + resultData.merged),
+          React.createElement('span', { className: 'dsh-mem-badge' }, (lang === 'en' ? 'Groups ' : '分组 ') + (resultData.groups || 0)),
+          resultData.mode ? React.createElement('span', { className: 'dsh-mem-badge' }, t('consolidationMode') + ': ' + resultData.mode) : null,
+        ) : React.createElement('pre', { className: 'dsh-mem-srcpre' }, JSON.stringify(resultData, null, 2)),
+        resultData.status === 'no_candidates' ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+          (lang === 'en' ? 'Eligibility: age ≥ ' : '候选条件：年龄 ≥ ') + resultData.min_age_days +
+          (lang === 'en' ? ' days, importance ≤ ' : ' 天，重要性 ≤ ') + resultData.max_importance +
+          (lang === 'en' ? ', similarity ≥ ' : '，相似度 ≥ ') + resultData.threshold,
+        ) : null,
+      ) : null,
       React.createElement('div', { className: 'dsh-mem-box' },
         React.createElement('div', { className: 'dsh-mem-title' }, t('backups')),
         React.createElement('div', { className: 'dsh-mem-form' },
@@ -600,7 +643,7 @@ export function apply(ctx) {
         React.createElement('div', { className: 'dsh-mem-form' },
           React.createElement('button', { className: 'dsh-mem-btn', onClick: doRebuild }, t('rebuild')),
           React.createElement('input', { className: 'dsh-mem-input', style: { maxWidth: 90 }, value: sim, title: t('similarity'), onChange: function (e) { setSim(e.target.value) } }),
-          React.createElement('button', { className: 'dsh-mem-btn', onClick: doConsolidate }, t('consolidate')),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: doConsolidate, disabled: busy }, busy ? t('loading') : t('consolidate')),
           React.createElement('button', { className: 'dsh-mem-btn', onClick: doDecay }, t('decayRun')),
         ),
       ),
@@ -653,8 +696,8 @@ export function apply(ctx) {
 
     function fieldDefault(spec) {
       if (spec && spec.default !== undefined) return spec.default
-      if (spec && spec.type === 'bool') return false
-      if (spec && (spec.type === 'int' || spec.type === 'float')) return 0
+      if (spec && (spec.type === 'bool' || spec.type === 'boolean')) return false
+      if (spec && (spec.type === 'int' || spec.type === 'float' || spec.type === 'number' || spec.type === 'integer')) return 0
       return ''
     }
 
@@ -667,7 +710,7 @@ export function apply(ctx) {
           onChange: function (e) { setValue(key, e.target.value) },
         }, spec.options.map(function (o) { return React.createElement('option', { key: o, value: o }, o) }))
       }
-      if (spec.type === 'bool') {
+      if (spec.type === 'bool' || spec.type === 'boolean') {
         return React.createElement('select', {
           className: 'dsh-mem-select', style: { width: '100%' },
           value: val ? 'true' : 'false',
@@ -686,10 +729,10 @@ export function apply(ctx) {
       }
       return React.createElement('input', {
         className: 'dsh-mem-input', style: { width: '100%' },
-        type: (spec.type === 'int' || spec.type === 'float') ? 'number' : 'text',
-        step: spec.type === 'float' ? 'any' : undefined,
+        type: (spec.type === 'int' || spec.type === 'float' || spec.type === 'number' || spec.type === 'integer') ? 'number' : 'text',
+        step: (spec.type === 'float' || spec.type === 'number') ? 'any' : undefined,
         value: String(val),
-        onChange: function (e) { setValue(key, (spec.type === 'int' || spec.type === 'float') ? Number(e.target.value) : e.target.value) },
+        onChange: function (e) { setValue(key, (spec.type === 'int' || spec.type === 'float' || spec.type === 'number' || spec.type === 'integer') ? Number(e.target.value) : e.target.value) },
       })
     }
 
@@ -961,11 +1004,15 @@ export function apply(ctx) {
 
   function MemoryPanel(props) {
     const [view, setView] = React.useState('main')
+    const [initialLoaded, setInitialLoaded] = React.useState(false)
+    const panelRef = React.useRef(null)
     const [lang, setLang] = React.useState('zh')
     const [memories, setMemories] = React.useState([])
     const [card, setCard] = React.useState(null)
     const [cardVersion, setCardVersion] = React.useState(0)
     const [revisions, setRevisions] = React.useState([])
+    const [revisionsOpen, setRevisionsOpen] = React.useState(false)
+    const [showAllRevisions, setShowAllRevisions] = React.useState(false)
     const [stats, setStats] = React.useState(null)
     const [enabled, setEnabled] = React.useState(true)
     const [query, setQuery] = React.useState('')
@@ -978,6 +1025,7 @@ export function apply(ctx) {
     const [src, setSrc] = React.useState(null)
     const [cardEdit, setCardEdit] = React.useState(false)
     const [cardDraft, setCardDraft] = React.useState(null)
+    const [cardInitializing, setCardInitializing] = React.useState(false)
 
     const sid = props && props.sessionId ? String(props.sessionId) : ''
     const sessionsState = typeof props.useSessions === 'function'
@@ -1035,10 +1083,25 @@ export function apply(ctx) {
       // legacy workspace_cards are migration-only; session cards are authoritative.
       if (res && typeof res.documents === 'number') setStats({ documents: res.documents, archived: res.archived, atoms: res.atoms })
       if (res && typeof res.session_enabled === 'boolean') setEnabled(res.session_enabled)
+      setInitialLoaded(true)
       setBusy(false)
     }
 
     React.useEffect(function () { refresh() }, [])
+
+    React.useEffect(function () {
+      if (view !== 'main' || !initialLoaded || !panelRef.current) return
+      let node = panelRef.current
+      while (node.parentElement) {
+        const parent = node.parentElement
+        if (parent.scrollHeight > parent.clientHeight + 1) {
+          parent.scrollTop = 0
+          return
+        }
+        node = parent
+      }
+      panelRef.current.scrollIntoView({ block: 'start' })
+    }, [view, initialLoaded])
 
     async function doSearch() {
       if (!query.trim()) { refresh(); return }
@@ -1195,6 +1258,19 @@ export function apply(ctx) {
       refresh()
     }
 
+    async function initializeCard() {
+      if (!sid || cardInitializing) return
+      setCardInitializing(true)
+      const res = await api('POST', '/v1/cards/initialize', { session_id: sid, kind: cardKind })
+      setCardInitializing(false)
+      if (res && res.error === 'HTTP 404') { setMsg(t('cardHostReload')); return }
+      if (res && res.error) { setMsg(t('cfgFail') + res.error); return }
+      if (res && res.status === 'no_messages') { setMsg(t('cardNoMessages')); return }
+      if (res && res.status === 'no_state') { setMsg(t('cardNoState')); return }
+      setMsg(t('saved'))
+      refresh()
+    }
+
     const globalMems = memories.filter(function (m) { return m && m.scope === 'global' })
     const localMems = memories.filter(function (m) { return m && m.scope !== 'global' })
 
@@ -1210,7 +1286,42 @@ export function apply(ctx) {
       )
     }
 
-    return React.createElement('div', { className: 'dsh-mem-panel' },
+    function revisionCard(revision) {
+      const changed = Object.keys(revision.patch || {})
+      let stamp = String(revision.created_at || '')
+      try { if (stamp) stamp = new Date(stamp).toLocaleString(lang === 'en' ? 'en-US' : 'zh-CN') } catch {}
+      function valueText(value) {
+        if (value === undefined || value === null || value === '') return t('revisionEmpty')
+        if (Array.isArray(value)) return value.length ? value.join('\n') : t('revisionEmpty')
+        if (typeof value === 'object') return JSON.stringify(value, null, 2)
+        return String(value)
+      }
+      return React.createElement('details', { key: String(revision.id || revision.version), className: 'dsh-mem-box dsh-mem-revision-card' },
+        React.createElement('summary', { className: 'dsh-mem-revision-summary' },
+          React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, 'v' + String(revision.version || '?')),
+          revision.actor ? React.createElement('span', { className: 'dsh-mem-badge' }, String(revision.actor)) : null,
+          stamp ? React.createElement('span', { className: 'dsh-mem-imp' }, stamp) : null,
+          React.createElement('span', { className: 'dsh-mem-imp' }, t('revisionExpand') + ' ▾'),
+        ),
+        changed.length ? React.createElement('div', { className: 'dsh-mem-content' }, t('revisionChanged') + ': ' + changed.join(', ')) : null,
+        revision.reason ? React.createElement('div', { className: 'dsh-mem-cfg-hint' }, t('revisionReason') + ': ' + String(revision.reason)) : null,
+        changed.length ? React.createElement('div', { className: 'dsh-mem-revision-diff' },
+          React.createElement('span', { className: 'dsh-mem-revision-diff-label' }, ''),
+          React.createElement('span', { className: 'dsh-mem-revision-diff-label' }, t('revisionBefore')),
+          React.createElement('span', { className: 'dsh-mem-revision-diff-label' }, t('revisionAfter')),
+          changed.flatMap(function (field) {
+            const change = revision.patch[field] || {}
+            return [
+              React.createElement('strong', { key: field + '-label', className: 'dsh-mem-revision-value' }, field),
+              React.createElement('span', { key: field + '-before', className: 'dsh-mem-revision-value' }, valueText(change.before)),
+              React.createElement('span', { key: field + '-after', className: 'dsh-mem-revision-value' }, valueText(change.after)),
+            ]
+          }),
+        ) : null,
+      )
+    }
+
+    return React.createElement('div', { ref: panelRef, className: 'dsh-mem-panel' },
       React.createElement('div', { className: 'dsh-mem-actions' },
         React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('panelTitle')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('graph') } }, t('graph')),
@@ -1234,6 +1345,7 @@ export function apply(ctx) {
         : React.createElement('div', { className: 'dsh-mem-box' },
           React.createElement('div', { className: 'dsh-mem-actions' },
             React.createElement('div', { className: 'dsh-mem-title', style: { flex: 1 } }, t('stateCard')),
+            !card ? React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: initializeCard, disabled: cardInitializing }, cardInitializing ? t('cardInitializing') : t('cardInitialize')) : null,
             React.createElement('button', { className: 'dsh-mem-btn', onClick: startCardEdit }, t('cardEdit')),
           ),
           cardLines.length ? cardLines.map(function (l) {
@@ -1242,8 +1354,15 @@ export function apply(ctx) {
               React.createElement('span', { className: 'dsh-mem-content' }, l.v),
             )
           }) : React.createElement('div', { style: { opacity: .6 } }, t('noCard')),
-          revisions.length ? React.createElement('div', { className: 'dsh-mem-meta' }, t('cardRevisions') + ': ' + revisions.length) : null,
         ),
+      revisions.length ? React.createElement(React.Fragment, null,
+        React.createElement('div', { className: 'dsh-mem-revision-head' },
+          React.createElement('div', { className: 'dsh-mem-title', style: { flex: 1 } }, t('cardRevisions') + ' · ' + revisions.length),
+          React.createElement('button', { className: 'dsh-mem-btn dsh-mem-revisions-toggle', onClick: function () { setRevisionsOpen(!revisionsOpen) } }, revisionsOpen ? t('collapse') : t('revisionExpand')),
+          revisionsOpen && revisions.length > 3 ? React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setShowAllRevisions(!showAllRevisions) } }, showAllRevisions ? t('collapse') : t('showAll')) : null,
+        ),
+        revisionsOpen ? (showAllRevisions ? revisions : revisions.slice(0, 3)).map(revisionCard) : null,
+      ) : null,
       React.createElement('div', { className: 'dsh-mem-box' },
         React.createElement('div', { className: 'dsh-mem-title' }, t('manual')),
         React.createElement('div', { className: 'dsh-mem-form' },

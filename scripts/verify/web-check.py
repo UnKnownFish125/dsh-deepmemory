@@ -115,9 +115,27 @@ with sync_playwright() as p:
     text = panel.inner_text()
     if len(text) < 20:
         raise AssertionError("面板内容过短: " + repr(text[:80]))
+    at_top = page.evaluate("""() => {
+        const panel = document.querySelector('.dsh-mem-panel');
+        if (!panel) return false;
+        let node = panel;
+        while (node.parentElement) {
+            const parent = node.parentElement;
+            if (parent.scrollHeight > parent.clientHeight + 1) {
+                return parent.scrollTop <= 8;
+            }
+            node = parent;
+        }
+        const rect = panel.getBoundingClientRect();
+        return rect.top >= -8;
+    }""")
+    if not at_top:
+        raise AssertionError("打开记忆面板后未默认保持顶部")
     print("3. 记忆面板渲染 OK,", len(text), "字符; 首行:", text.splitlines()[0][:60])
 
     # 会话状态卡必须按当前 session 创建、编辑和保存。
+    if panel.get_by_text("初始化", exact=True).count() != 1:
+        raise AssertionError("无状态卡时缺少初始化按钮")
     panel.get_by_text("编辑", exact=True).first.click()
     card_editor = panel.locator(".dsh-mem-box").filter(has_text="会话状态卡 · 编辑").first
     card_editor.wait_for(state="visible", timeout=10000)
@@ -125,7 +143,32 @@ with sync_playwright() as p:
     goal_input.fill("web-check-session-card")
     card_editor.get_by_text("保存", exact=True).first.click()
     panel.get_by_text("web-check-session-card", exact=True).wait_for(state="visible", timeout=10000)
+    revisions_toggle = panel.locator(".dsh-mem-revisions-toggle").first
+    revisions_toggle.wait_for(state="visible", timeout=10000)
+    if panel.locator(".dsh-mem-revision-card").count() != 0:
+        raise AssertionError("修订历史默认未收起")
+    revisions_toggle.click()
+    revision_card = panel.locator(".dsh-mem-revision-card").first
+    revision_card.wait_for(state="visible", timeout=10000)
+    revision_card.locator("summary").click()
+    revision_card.locator(".dsh-mem-revision-diff").wait_for(state="visible", timeout=10000)
+    if "修改前" not in revision_card.inner_text() or "修改后" not in revision_card.inner_text():
+        raise AssertionError("修订详情缺少修改前/修改后差异")
+    state_card_box = panel.locator(".dsh-mem-box").filter(has_text="会话状态卡").first
+    if state_card_box.locator(".dsh-mem-revision-card").count() != 0:
+        raise AssertionError("修订历史仍嵌套在会话状态卡内")
     print("3. 会话状态卡保存链路 OK")
+
+    # 修订历史必须是状态卡之外的独立卡片；维护整合必须给出可见结构化结果。
+    panel.get_by_text("维护", exact=True).first.click()
+    maintain_panel = page.locator(".dsh-mem-panel:visible").first
+    maintain_panel.get_by_text("记忆整合", exact=True).first.click()
+    maintain_panel.locator(".dsh-mem-maintenance-result").wait_for(state="visible", timeout=30000)
+    if not any(text in maintain_panel.inner_text() for text in ("暂无符合条件的记忆组", "整合完成")):
+        raise AssertionError("记忆整合没有可见结果反馈")
+    maintain_panel.get_by_text("返回", exact=True).first.click()
+    panel = page.locator(".dsh-mem-panel:visible").first
+    print("3. 修订独立卡片 + 整合反馈 OK")
 
     # 普通记忆必须保留内容编辑入口，并走通真实 PUT 保存链路。
     fixture = "web-check-memory-edit-fixture"
@@ -202,6 +245,8 @@ with sync_playwright() as p:
     page.wait_for_timeout(1200)
     if "基础连接" not in page.inner_text("body"):
         raise AssertionError("点击卡片头后配置组未出现")
+    if "自动生成状态卡" not in page.inner_text("body"):
+        raise AssertionError("配置页缺少自动生成状态卡开关")
     # 再点收起
     card_header.click()
     page.wait_for_timeout(1200)

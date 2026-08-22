@@ -13,7 +13,8 @@ DIST="dist"
 PKG="deepmemory-v${VERSION}"
 TARBALL="${DIST}/${PKG}.tar.gz"
 
-rm -rf "${DIST}" "${PKG}"
+rm -rf "${PKG}"
+rm -f "${TARBALL}"
 mkdir -p "${DIST}" "${PKG}"
 
 # 发布物: 安装脚本 + 三组件 + 文档（不含 data/.git/__pycache__）
@@ -24,6 +25,8 @@ rm -rf "${PKG}/memory-server/data" "${PKG}/memory-server/models" "${PKG}/memory-
 cp -r web-plugin "${PKG}/web-plugin"
 cp -r agent-preset "${PKG}/agent-preset"
 find "${PKG}/agent-preset" -name '*.bak*' -delete 2>/dev/null || true
+find "${PKG}" -type d -name '__pycache__' -prune -exec rm -rf {} +
+find "${PKG}" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 cp README.md "${PKG}/README.md"
 chmod +x "${PKG}/scripts/install.sh" "${PKG}/scripts/package.sh" 2>/dev/null || true
 

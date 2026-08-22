@@ -5,8 +5,8 @@
 // which owns SQLite + FAISS + BM25 + graph storage.
 //
 // Capabilities (P2):
-//  - agent/pre-step: recall injection (workspace card + top memories),
-//    query expanded with recent-turn context slices
+//  - system-prompt/assemble: one-time session cache hydration; later calls read only
+//  - agent/turn-stopping: refresh session context after durable memory changes
 //  - agent/turn-stopping: cheap-LLM extraction — rich fields, atoms, entities,
 //    relations, source retention, card update
 //  - tools: memory_recall / memory_save / memory_briefing (persona-aware)
@@ -19,17 +19,31 @@ import { defineTool } from '/usr/local/node/lib/node_modules/@deepseek-ai/dsh/no
 
 export const name = 'deepmemory'
 
-export const inject = ['tools', 'timer']
+export const inject = ['tools']
 
 export function apply(ctx, config = {}) {
-  const state = { injectCount: 0, extractCount: 0, memText: '', lastConfigLoad: 0, recent: [] }
+  const state = { injectCount: 0, extractCount: 0, lastConfigLoad: 0 }
   const CARD_KIND = config.preset_mode === 'daily' ? 'daily' : 'task'
   const buckets = new Map()
   const enabledCache = new Map()
+  const memoryCache = new Map()
+  const recentBySession = new Map()
+  const initializedSessions = new Set()
+  const refreshes = new Map()
   let SERVER = 'http://localhost:6230'
-  const TOKEN_FILE = process.env.MEMORY_API_TOKEN_FILE || `${process.env.DSH_HOME || process.env.HOME}/.dsh-memory-api-token`
+  const TOKEN_FILES = [
+    process.env.MEMORY_API_TOKEN_FILE,
+    process.env.DSH_HOME ? `${process.env.DSH_HOME}/.dsh-memory-api-token` : '',
+    process.env.HOME ? `${process.env.HOME}/.dsh-memory-api-token` : '',
+  ].filter((path, index, paths) => path && paths.indexOf(path) === index)
   function readToken() {
-    try { return fs.readFileSync(TOKEN_FILE, 'utf8').trim() } catch { return '' }
+    for (const path of TOKEN_FILES) {
+      try {
+        const token = fs.readFileSync(path, 'utf8').trim()
+        if (token) return token
+      } catch {}
+    }
+    return ''
   }
   let WORKSPACE = 'deepseek-hardness'
   let EXTRACT_THRESHOLD = 4
@@ -50,11 +64,12 @@ export function apply(ctx, config = {}) {
     '4. atoms：把每条记忆拆成独立事实单元（可 0-3 条），每单元含 atom_type（factual 事实/preference 偏好/decision 决定/episodic 事件/planned 计划/relational 关系）、content（独立自包含一句话）、ttl_days（factual=180, preference=60, decision=30, episodic=7, planned=2, relational=90）、decay_type（exponential/linear/step）、importance。',
     '5. entities：抽取记忆中的实体名词列表（人名/项目/工具/概念），每项 {name, kind: person|project|tool|concept|other}。',
     '6. relations：实体之间的关系边列表（可 0-3 条），每项 {source, relation, target}，source/target 必须是 entities 里出现过的实体名，relation 用短动词短语（如 "使用"、"依赖"、"属于"、"负责"）。',
-    '7. card：增量更新工作区状态卡（goal/current_plan 各一句话；key_decisions 追加新决定≤3条；in_progress/next_steps 各≤4条；无需变化时 card 为 null）。',
+    '7. card：增量更新当前会话状态卡（goal/current_plan 各一句话；key_decisions 追加新决定≤3条；in_progress/next_steps 各≤4条；无需变化时 card 为 null）。',
     '8. 严格只输出一个 JSON 对象（不要 markdown 代码块）：',
     '{"memories":[{"content":"...","key_facts":"词1;词2","persona_summary":"...或空","type":"fact","domain":"work","scope":"workspace","importance":0.7,"atoms":[{"atom_type":"factual","content":"...","ttl_days":180,"decay_type":"exponential","importance":0.6}],"entities":[{"name":"...","kind":"project"}],"relations":[{"source":"...","relation":"...","target":"..."}]}],"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]}}',
     '没有值得记忆的内容时 memories 为 []。',
   ].join('\n')
+
 
   async function http(method, path, body) {
     try {
@@ -142,54 +157,25 @@ export function apply(ctx, config = {}) {
     await http('POST', '/v1/settings/set', { key: 'session_enabled:' + sessionId, value: value })
   }
 
-  function textOf(content) {
-    if (!Array.isArray(content)) return ''
-    let s = ''
-    for (const b of content) {
-      if (b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string') s += b.text
-    }
-    return s
-  }
-
-  function findLatestUserText(messages) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      if (m && m.role === 'user') {
-        const t = textOf(m.content)
-        if (t && t.trim()) return { index: i, text: t }
-      }
-    }
-    return null
-  }
-
   function formatMemories(results) {
     if (!results || !results.length) return ''
     const lines = results.slice(0, RECALL_K).map((r) => '- [' + (r.type || 'fact') + '/' + (r.scope || '?') + '] ' + String(r.content || '').slice(0, 240))
     return '[长期记忆召回]\n' + lines.join('\n') + '\n[/长期记忆]\n'
   }
 
-  async function pickCheapModel(llm) {
-    try {
-      const models = await llm.listModels('deepseek-official')
-      const names = (models || []).map((m) => (m && (m.id || m.name)) || '').filter(Boolean)
-      const cheap = names.find((n) => /chat/i.test(n) && !/reasoner/i.test(n)) || names[0]
-      if (cheap) return cheap
-    } catch (e) {
-      console.error('[deepmemory] listModels failed', String(e))
-    }
-    return null
+  function pickCheapModel() {
+    return { provider: 'uuapi', model: 'deepseek-v4-flash' }
   }
 
   async function extract(dialog, signal) {
     const llm = ctx.get('llm')
     if (!llm) return null
-    const model = await pickCheapModel(llm)
-    if (!model) return null
+    const route = pickCheapModel()
     let out = ''
     try {
       const stream = llm.stream({
-        provider: 'deepseek-official',
-        model: model,
+        provider: route.provider,
+        model: route.model,
         system: EXTRACT_SYSTEM,
         messages: [{ role: 'user', content: [{ type: 'text', text: dialog.slice(0, 8000) }] }],
         temperature: 0.2,
@@ -214,63 +200,100 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  // 记忆注入：systemPrompt section（同步读缓存），不进消息序列
+  function recentQuery(sessionId, seed) {
+    const recent = recentBySession.get(sessionId) || []
+    const suffix = recent.length ? '\n最近上下文: ' + recent.join(' | ') : ''
+    return (String(seed || '').slice(0, 300) + suffix).slice(0, 700)
+  }
+
+  function cardText(card) {
+    if (!card) return ''
+    const payload = card.payload || {}
+    const lines = []
+    if (payload.goal) lines.push('目标: ' + String(payload.goal).slice(0, 120))
+    if (payload.current_plan) lines.push('当前方案: ' + String(payload.current_plan).slice(0, 200))
+    if (payload.next_steps && payload.next_steps.length) lines.push('下一步: ' + payload.next_steps.slice(0, 3).join('；'))
+    return lines.length ? '[会话状态]\n' + lines.join('\n') + '\n[/会话状态]\n' : ''
+  }
+
+  async function refreshMemoryCache(sessionId, query) {
+    if (!sessionId) return false
+    if (refreshes.has(sessionId)) return refreshes.get(sessionId)
+    const refresh = (async () => {
+      const sres = await http('POST', '/v1/memories/search', {
+        query: query || '当前会话目标、计划、决定、偏好和相关工作上下文',
+        k: RECALL_K,
+        session_id: sessionId,
+        workspace_id: WORKSPACE,
+      })
+      if (!sres.ok) return false
+      let nextCardText = ''
+      if (INJECT_CARD) {
+        const cres = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sessionId))
+        if (!cres.ok) return false
+        nextCardText = cardText(cres.data && cres.data.card)
+      }
+      const nextText = nextCardText + formatMemories((sres.data && sres.data.results) || [])
+      const previous = memoryCache.get(sessionId) || ''
+      initializedSessions.add(sessionId)
+      if (nextText === previous) return true
+      memoryCache.set(sessionId, nextText)
+      state.injectCount += 1
+      console.log('[deepmemory] session memory cache updated (total ' + state.injectCount + ')')
+      return true
+    })().finally(() => refreshes.delete(sessionId))
+    refreshes.set(sessionId, refresh)
+    return refresh
+  }
+
+  // 记忆注入：按 agent scope 同步读取会话缓存，不进入消息序列。
   const systemPrompt = ctx.get('systemPrompt')
   if (systemPrompt) {
     ctx.effect(() => systemPrompt.section({
       name: 'deepmemory',
       order: INJECT_ORDER,
-      text: () => state.memText || '',
+      text: (context) => {
+        const agent = context && context.agent
+        const sessionId = agent && agent.id ? String(agent.id) : ''
+        return sessionId ? (memoryCache.get(sessionId) || '') : ''
+      },
     }))
   } else {
     console.error('[deepmemory] systemPrompt unavailable')
   }
 
-  ctx.on('agent/pre-step', async (payload, next) => {
-    if (payload.step !== 1) return next()
-    let decision
-    try { decision = await next() } catch (e) { throw e }
-    const agentId = payload.agent && payload.agent.id ? String(payload.agent.id) : ''
+  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const assembled = await next()
+    const agent = context && context.agent
+    const sessionId = agent && agent.id ? String(agent.id) : ''
+    if (!sessionId) return assembled
     try {
       if (Date.now() - state.lastConfigLoad > 60000) await loadConfig()
-      if (!INJECT_ENABLED || !(await isEnabled(agentId))) { state.memText = ''; return decision }
-      if (!decision || decision.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
-      const found = findLatestUserText(decision.messages)
-      if (!found) return decision
-      // 跨轮次上下文扩展：最新消息 + 最近几轮消息片段
-      const recent = state.recent.length ? '\n最近上下文: ' + state.recent.join(' | ') : ''
-      const query = (found.text.slice(0, 300) + recent).slice(0, 700)
-      const sres = await http('POST', '/v1/memories/search', { query: query, k: RECALL_K, session_id: agentId, workspace_id: WORKSPACE })
-      let cardText = ''
-      if (INJECT_CARD) {
-        const cres = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(agentId))
-        if (cres.ok && cres.data && cres.data.card) {
-          const c = cres.data.card.payload || {}
-          const lines = []
-          if (c.goal) lines.push('目标: ' + String(c.goal).slice(0, 120))
-          if (c.current_plan) lines.push('当前方案: ' + String(c.current_plan).slice(0, 200))
-          if (c.next_steps && c.next_steps.length) lines.push('下一步: ' + c.next_steps.slice(0, 3).join('；'))
-          if (lines.length) cardText = '[会话状态]\n' + lines.join('\n') + '\n[/会话状态]\n'
-        }
+      if (!INJECT_ENABLED || !(await isEnabled(sessionId))) {
+        memoryCache.delete(sessionId)
+        initializedSessions.delete(sessionId)
+      } else if (!initializedSessions.has(sessionId)) {
+        await refreshMemoryCache(sessionId, recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文'))
       }
-      const memText = cardText + formatMemories(sres.ok ? (sres.data && sres.data.results) || [] : [])
-      if (memText.trim()) {
-        state.memText = memText
-        state.injectCount += 1
-        console.log('[deepmemory] memory cached for system prompt (turn ' + payload.turn + ', total ' + state.injectCount + ')')
-      }
-      return decision
     } catch (e) {
-      console.error('[deepmemory] pre-step cache failed', String(e))
-      return decision
+      console.error('[deepmemory] prompt cache refresh failed', String(e))
+    }
+    const text = memoryCache.get(sessionId) || ''
+    return {
+      ...assembled,
+      sections: assembled.sections.map((section) => section.name === 'deepmemory' ? { ...section, text: text } : section),
     }
   })
 
   ctx.on('session/event', (session, event) => {
     try {
       const t = event && event.type
-      if (t !== 'user/message' && t !== 'assistant/message') return
       const sid = sessionIdOf(session)
+      if (t === 'compaction/summary') {
+        if (sid) initializedSessions.delete(sid)
+        return
+      }
+      if (t !== 'user/message' && t !== 'assistant/message') return
       if (!sid || enabledCache.get(sid) === false) return
       const data = event.data || {}
       const msg = t === 'user/message' ? data : (data.message || {})
@@ -287,8 +310,10 @@ export function apply(ctx, config = {}) {
         if (!bucket) { bucket = []; buckets.set(sid, bucket) }
         bucket.push({ role: (t === 'user/message' ? 'user' : 'assistant'), text: text.slice(0, 800) })
         if (bucket.length > 40) bucket.shift()
-        state.recent.push((t === 'user/message' ? '用户: ' : '助手: ') + text.slice(0, 120))
-        if (state.recent.length > 6) state.recent.shift()
+        let recent = recentBySession.get(sid)
+        if (!recent) { recent = []; recentBySession.set(sid, recent) }
+        recent.push((t === 'user/message' ? '用户: ' : '助手: ') + text.slice(0, 120))
+        if (recent.length > 6) recent.shift()
       }
     } catch (e) {}
   })
@@ -304,6 +329,7 @@ export function apply(ctx, config = {}) {
     console.log('[deepmemory] extracting from ' + bucket.length + ' messages...')
     const result = await extract(dialog, payload.signal)
     if (!result) return
+    let memoryChanged = false
     if (result.memories && result.memories.length) {
       const items = result.memories.filter((m) => m && m.content).map((m) => ({
         content: String(m.content).slice(0, 500),
@@ -322,33 +348,15 @@ export function apply(ctx, config = {}) {
       }))
       if (items.length) {
         const res = await http('POST', '/v1/memories/add_batch', { items: items })
-        state.extractCount += items.length
-        console.log('[deepmemory] extracted ' + items.length + ' memories (total ' + state.extractCount + '): ' + JSON.stringify((res.data && res.data.added) || []).slice(0, 400))
+        if (res.ok) {
+          memoryChanged = true
+          state.extractCount += items.length
+          console.log('[deepmemory] extracted ' + items.length + ' memories (total ' + state.extractCount + '): ' + JSON.stringify((res.data && res.data.added) || []).slice(0, 400))
+        }
       }
     }
-    if (result.card) {
-      const existing = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid))
-      const cres = await http('PUT', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid), {
-        expected_version: existing.ok && existing.data && existing.data.card ? Number(existing.data.card.version || 0) : 0,
-        payload: {
-          goal: String(result.card.goal || ''),
-          current_plan: String(result.card.current_plan || ''),
-          key_decisions: Array.isArray(result.card.key_decisions) ? result.card.key_decisions : [],
-          in_progress: Array.isArray(result.card.in_progress) ? result.card.in_progress : [],
-          next_steps: Array.isArray(result.card.next_steps) ? result.card.next_steps : [],
-        },
-        actor: 'main_agent', reason: 'turn-stopping session card update',
-      })
-      if (cres.ok) console.log('[deepmemory] card updated v' + (cres.data && cres.data.version))
-    }
+    if (memoryChanged) await refreshMemoryCache(sid, recentQuery(sid, dialog.slice(-300)))
   })
-
-  ctx.interval(async () => {
-    try {
-      const res = await http('POST', '/v1/maintenance/decay', { decay_rate: DECAY_RATE })
-      if (res.ok && res.data && !res.data.skipped) console.log('[deepmemory] decay: ' + JSON.stringify(res.data))
-    } catch (e) {}
-  }, 6 * 3600 * 1000)
 
   const commands = ctx.get('commands')
   if (commands) {
@@ -361,11 +369,14 @@ export function apply(ctx, config = {}) {
         const arg = (invocation.rawInput || '').trim().toLowerCase()
         if (arg === 'on' || arg === 'enable') {
           await setEnabled(sid, true)
+          initializedSessions.delete(sid)
           return { kind: 'success', text: '记忆已开启（本会话）。注入、捕获、抽取全部生效。' }
         }
         if (arg === 'off' || arg === 'disable') {
           await setEnabled(sid, false)
           if (buckets.has(sid)) buckets.delete(sid)
+          memoryCache.delete(sid)
+          initializedSessions.add(sid)
           return { kind: 'success', text: '记忆已关闭（本会话）。不再注入、捕获、抽取；可用 /memory on 重新开启。' }
         }
         if (arg === 'clean') {

@@ -56,6 +56,9 @@ fi
 chmod 600 "${TOKEN_FILE}"
 mkdir -p "${DSH_HOME}"
 install -m 600 "${TOKEN_FILE}" "${CLIENT_TOKEN_FILE}"
+if [ -n "${HOME:-}" ] && [ "${HOME}/.dsh-memory-api-token" != "${CLIENT_TOKEN_FILE}" ]; then
+  install -m 600 "${TOKEN_FILE}" "${HOME}/.dsh-memory-api-token"
+fi
 
 say "   安装 systemd unit"
 cat > "${UNIT_FILE}" <<UNIT

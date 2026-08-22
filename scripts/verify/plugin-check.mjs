@@ -1,13 +1,31 @@
 // Preset plugin contract + HTTP transport verification.
+import fs from 'node:fs'
+import os from 'node:os'
+import pathModule from 'node:path'
+
 const path = process.env.PLUGIN_PATH
+const tokenHome = fs.mkdtempSync(pathModule.join(os.tmpdir(), 'deepmemory-token-'))
+const originalDshHome = process.env.DSH_HOME
+const originalHome = process.env.HOME
+delete process.env.DSH_HOME
+process.env.HOME = tokenHome
+fs.writeFileSync(pathModule.join(tokenHome, '.dsh-memory-api-token'), 'verify-memory-token\n', { mode: 0o600 })
 const requests = []
+const llmCalls = []
+let promptSection
 globalThis.fetch = async (url, options = {}) => {
-  requests.push({ url: String(url), method: options.method || 'GET', body: options.body })
+  requests.push({ url: String(url), method: options.method || 'GET', headers: options.headers, body: options.body })
   const pathname = new URL(url).pathname
   let data = { value: null }
   if (pathname.endsWith('/memories/add')) data = { id: 1 }
-  if (pathname.endsWith('/memories/search')) data = { count: 0, results: [] }
+  if (pathname.endsWith('/memories/search')) {
+    const payload = options.body ? JSON.parse(options.body) : {}
+    const sessionId = payload.session_id || 'tool'
+    data = { count: 1, results: [{ content: 'memory-for-' + sessionId, type: 'fact', scope: 'session' }] }
+  }
   if (pathname.endsWith('/briefing')) data = { count: 0, briefing: '' }
+  if (pathname.endsWith('/config/session')) data = { config: { 'state_card.auto_generate': false } }
+  if (pathname.includes('/v2/cards/')) data = { card: null }
   return { ok: true, status: 200, json: async () => data }
 }
 
@@ -16,11 +34,21 @@ if (typeof plugin.apply !== 'function') throw new Error('apply 不是函数')
 if (plugin.name !== 'deepmemory') throw new Error('插件 name 异常: ' + plugin.name)
 
 const registered = new Map()
+const eventHandlers = new Map()
 const ctx = {
-  get: () => undefined,
+  get: (name) => {
+    if (name === 'systemPrompt') return { section: (section) => { promptSection = section; return () => {} } }
+    if (name === 'llm') return {
+      stream: async function* (options) {
+        llmCalls.push(options)
+        yield { type: 'text-delta', text: '{"memories":[],"card":{"goal":"must-not-write","current_plan":"","key_decisions":[],"in_progress":[],"next_steps":[]}}' }
+      },
+    }
+    return undefined
+  },
   tools: { register: (tool) => { registered.set(tool.name, tool); return () => {} } },
   effect: (fn) => fn(),
-  on: () => {},
+  on: (name, handler) => { eventHandlers.set(name, handler); return () => {} },
   interval: () => {},
 }
 plugin.apply(ctx)
@@ -36,7 +64,54 @@ if (!write) throw new Error('memory_save 未发起 HTTP 请求')
 if (write.method !== 'POST') throw new Error('memory_save 请求方法异常: ' + write.method)
 const payload = JSON.parse(write.body)
 if (payload.content !== marker) throw new Error('memory_save JSON body 损坏')
+if (!write.headers || write.headers.Authorization !== 'Bearer verify-memory-token') {
+  throw new Error('HOME token fallback 未写入 Authorization header')
+}
 if (requests.some((item) => !item.url.startsWith('http://localhost:6230/'))) {
   throw new Error('默认请求越出本地 memory-server 边界')
 }
+
+const eventHandler = eventHandlers.get('session/event')
+const assembleHandler = eventHandlers.get('system-prompt/assemble')
+const stoppingHandler = eventHandlers.get('agent/turn-stopping')
+if (!eventHandler || !assembleHandler || !stoppingHandler) throw new Error('记忆事件处理器未注册')
+const session = { header: { id: 'verify-session' } }
+const agent = { id: 'verify-session' }
+async function assembleFor(targetAgent) {
+  const assembly = {
+    sections: [{ name: 'deepmemory', text: promptSection.text({ agent: targetAgent, scope: targetAgent }) }],
+    contexts: [], tools: [], variables: {},
+  }
+  return assembleHandler(assembly, { agent: targetAgent, scope: targetAgent }, async () => assembly)
+}
+const firstAssembly = await assembleFor(agent)
+const firstSearchCount = requests.filter((item) => item.url.endsWith('/v1/memories/search')).length
+await assembleFor(agent)
+const secondSearchCount = requests.filter((item) => item.url.endsWith('/v1/memories/search')).length
+if (firstSearchCount !== secondSearchCount) throw new Error('稳定缓存仍在每次 prompt 组装时重建')
+if (!promptSection || typeof promptSection.text !== 'function') throw new Error('system prompt 记忆段未注册')
+if (!firstAssembly.sections[0].text.includes('memory-for-verify-session')) throw new Error('首个请求未渲染当前会话缓存')
+const otherAgent = { id: 'verify-session-2' }
+const otherAssembly = await assembleFor(otherAgent)
+if (!otherAssembly.sections[0].text.includes('memory-for-verify-session-2')) throw new Error('第二会话缓存渲染异常')
+if (promptSection.text({ agent, scope: agent }).includes('memory-for-verify-session-2')) throw new Error('system prompt 记忆缓存发生跨会话污染')
+for (let i = 0; i < 4; i++) {
+  await eventHandler(session, {
+    type: 'user/message',
+    data: { content: [{ type: 'text', text: '抽取路由验证 ' + i }] },
+  })
+}
+await stoppingHandler({ agent: { id: 'verify-session' } })
+if (llmCalls.length !== 1) throw new Error('记忆抽取未调用一次 LLM')
+if (llmCalls[0].provider !== 'uuapi' || llmCalls[0].model !== 'deepseek-v4-flash') {
+  throw new Error('记忆抽取模型路由异常: ' + JSON.stringify({ provider: llmCalls[0].provider, model: llmCalls[0].model }))
+}
+if (requests.some((item) => item.method === 'PUT' && item.url.includes('/v1/v2/cards/'))) {
+  throw new Error('关闭 state_card.auto_generate 后仍写入状态卡')
+}
+fs.rmSync(tokenHome, { recursive: true, force: true })
+if (originalDshHome === undefined) delete process.env.DSH_HOME
+else process.env.DSH_HOME = originalDshHome
+if (originalHome === undefined) delete process.env.HOME
+else process.env.HOME = originalHome
 console.log('plugin apply + native fetch ok, tools:', expected.join(', '))

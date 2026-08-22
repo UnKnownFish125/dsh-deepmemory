@@ -224,15 +224,39 @@
       }
     }
   },
+  "state_card": {
+    "description": "会话状态卡",
+    "type": "object",
+    "items": {
+      "auto_generate": {
+        "description": "自动生成状态卡",
+        "hint": "开启后，未自带 deepmemory 的会话（如 cordis）也会在对话达到阈值后自动生成 daily 会话卡；可按会话覆盖",
+        "type": "boolean",
+        "default": true
+      },
+      "sync_turns": {
+        "description": "状态卡与压缩同步轮数",
+        "hint": "每完成多少个对话轮次，同步一次状态卡并压缩最近 3 轮之前的历史",
+        "type": "integer",
+        "default": 5
+      }
+    }
+  },
   "importance_decay": {
     "description": "重要性衰减",
     "type": "object",
     "items": {
       "decay_rate": {
-        "description": "每日衰减率",
-        "hint": "记忆重要性每日衰减系数；被召回的记忆衰减更慢（访问强化）",
+        "description": "衰减率",
+        "hint": "按天计算的记忆重要性衰减系数；被召回的记忆衰减更慢（访问强化）",
         "type": "float",
         "default": 0.01
+      },
+      "interval_hours": {
+        "description": "自动衰减间隔（小时）",
+        "hint": "默认 24 小时（每天一次）；改为 6 即每 6 小时执行一次，必须大于 0",
+        "type": "float",
+        "default": 24
       },
       "protected_importance_threshold": {
         "description": "重要记忆保护阈值",
@@ -440,13 +464,13 @@
         "description": "整合模型 Provider",
         "hint": "LLM 整合摘要调用的模型提供商",
         "type": "string",
-        "default": "deepseek-official"
+        "default": "uuapi"
       },
       "llm_model": {
         "description": "整合模型名称",
-        "hint": "留空则自动选择最便宜的 chat 模型",
+        "hint": "留空则使用 UUAPI deepseek-v4-flash",
         "type": "string",
-        "default": ""
+        "default": "deepseek-v4-flash"
       }
     }
   }

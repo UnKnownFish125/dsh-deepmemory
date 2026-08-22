@@ -11,6 +11,13 @@ from sensitive import redact_text
 
 class SensitiveMemoryTests(unittest.TestCase):
     def setUp(self):
+        self.originals = {
+            "DATA_DIR": server.DATA_DIR,
+            "DB_PATH": server.DB_PATH,
+            "INDEX_PATH": server.INDEX_PATH,
+            "BACKUP_DIR": server.BACKUP_DIR,
+            "embed_texts": server.embed_texts,
+        }
         self.root = tempfile.mkdtemp(prefix="memory-sensitive-")
         server.DATA_DIR = self.root
         server.DB_PATH = os.path.join(self.root, "memory.db")
@@ -27,6 +34,12 @@ class SensitiveMemoryTests(unittest.TestCase):
     def tearDown(self):
         import shutil
 
+        for name, value in self.originals.items():
+            setattr(server, name, value)
+        server._index = None
+        server._search_cache.clear()
+        server._bm25.docs = {}
+        server._bm25.df = {}
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_redacts_writes_and_requires_three_use_approval(self):
