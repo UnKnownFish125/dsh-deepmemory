@@ -21,8 +21,9 @@ export const name = 'deepmemory'
 
 export const inject = ['tools', 'timer']
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
   const state = { injectCount: 0, extractCount: 0, memText: '', lastConfigLoad: 0, recent: [] }
+  const CARD_KIND = config.preset_mode === 'daily' ? 'daily' : 'task'
   const buckets = new Map()
   const enabledCache = new Map()
   let SERVER = 'http://localhost:6230'
@@ -242,14 +243,14 @@ export function apply(ctx) {
       const sres = await http('POST', '/v1/memories/search', { query: query, k: RECALL_K, session_id: agentId, workspace_id: WORKSPACE })
       let cardText = ''
       if (INJECT_CARD) {
-        const cres = await http('GET', '/v1/cards/' + WORKSPACE)
+        const cres = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(agentId))
         if (cres.ok && cres.data && cres.data.card) {
-          const c = cres.data.card
+          const c = cres.data.card.payload || {}
           const lines = []
           if (c.goal) lines.push('目标: ' + String(c.goal).slice(0, 120))
           if (c.current_plan) lines.push('当前方案: ' + String(c.current_plan).slice(0, 200))
           if (c.next_steps && c.next_steps.length) lines.push('下一步: ' + c.next_steps.slice(0, 3).join('；'))
-          if (lines.length) cardText = '[工作区状态]\n' + lines.join('\n') + '\n[/工作区状态]\n'
+          if (lines.length) cardText = '[会话状态]\n' + lines.join('\n') + '\n[/会话状态]\n'
         }
       }
       const memText = cardText + formatMemories(sres.ok ? (sres.data && sres.data.results) || [] : [])
@@ -272,7 +273,7 @@ export function apply(ctx) {
       const sid = sessionIdOf(session)
       if (!sid || enabledCache.get(sid) === false) return
       const data = event.data || {}
-      const msg = data.message || {}
+      const msg = t === 'user/message' ? data : (data.message || {})
       let text = ''
       if (Array.isArray(msg.content)) {
         for (const b of msg.content) {
@@ -326,13 +327,17 @@ export function apply(ctx) {
       }
     }
     if (result.card) {
-      const cres = await http('POST', '/v1/cards/upsert', {
-        workspace_id: WORKSPACE,
-        goal: String(result.card.goal || ''),
-        current_plan: String(result.card.current_plan || ''),
-        key_decisions: Array.isArray(result.card.key_decisions) ? result.card.key_decisions : [],
-        in_progress: Array.isArray(result.card.in_progress) ? result.card.in_progress : [],
-        next_steps: Array.isArray(result.card.next_steps) ? result.card.next_steps : [],
+      const existing = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid))
+      const cres = await http('PUT', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid), {
+        expected_version: existing.ok && existing.data && existing.data.card ? Number(existing.data.card.version || 0) : 0,
+        payload: {
+          goal: String(result.card.goal || ''),
+          current_plan: String(result.card.current_plan || ''),
+          key_decisions: Array.isArray(result.card.key_decisions) ? result.card.key_decisions : [],
+          in_progress: Array.isArray(result.card.in_progress) ? result.card.in_progress : [],
+          next_steps: Array.isArray(result.card.next_steps) ? result.card.next_steps : [],
+        },
+        actor: 'main_agent', reason: 'turn-stopping session card update',
       })
       if (cres.ok) console.log('[deepmemory] card updated v' + (cres.data && cres.data.version))
     }

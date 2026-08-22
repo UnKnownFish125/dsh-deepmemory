@@ -5,7 +5,8 @@ import fs from 'fs'
 import vm from 'vm'
 
 const path = process.env.CLIENT_JS
-const require = createRequire('/www/dsh/home/profiles/web/package.json')
+const profileRequire = createRequire('/www/dsh/home/profiles/web/package.json')
+const require = createRequire(profileRequire.resolve('react-dom/server'))
 const React = require('react')
 const ReactDOMServer = require('react-dom/server')
 
@@ -14,7 +15,10 @@ let renderFn = null
 let loaderId = null
 const fakeSlots = {
   inject: (key, cb) => { cb() },
-  register: (config, fn) => { renderFn = fn; return () => {} },
+  register: (config, fn) => {
+    if (config.name === 'conversation.view' && config.id === 'memory') renderFn = fn
+    return () => {}
+  },
 }
 const fakeCtx = {
   get: (k) => (k === 'slots' ? fakeSlots : undefined),

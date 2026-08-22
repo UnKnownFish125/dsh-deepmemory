@@ -14,7 +14,7 @@ const I18N = {
   zh: {
     panelTitle: 'deepmemory 记忆控制', config: '配置', graph: '图谱', archive: '归档', maintain: '维护',
     back: '返回', refresh: '刷新', loading: '加载中…', search: '搜索', save: '保存', saved: '已保存',
-    on: '已开启', off: '已关闭', memories: '记忆', stateCard: '工作区状态卡', noCard: '（无状态卡）',
+    on: '已开启', off: '已关闭', memories: '记忆', stateCard: '会话状态卡', noCard: '（无状态卡）',
     manual: '手动写入', newPlaceholder: '新的记忆内容…', retrieval: '检索', searchPlaceholder: '语义检索记忆…',
     globalSection: '公用记忆（全局）', localSection: '工作区 / 会话记忆', empty: '（暂无）', count: '条',
     importance: '重要性', delete: '删除', scopeTitle: '调整作用域', domainTitle: '调整域',
@@ -43,7 +43,7 @@ const I18N = {
   en: {
     panelTitle: 'deepmemory Memory', config: 'Config', graph: 'Graph', archive: 'Archive', maintain: 'Maintain',
     back: 'Back', refresh: 'Refresh', loading: 'Loading…', search: 'Search', save: 'Save', saved: 'Saved',
-    on: 'Enabled', off: 'Disabled', memories: 'memories', stateCard: 'Workspace Card', noCard: '(no card)',
+    on: 'Enabled', off: 'Disabled', memories: 'memories', stateCard: 'Conversation Card', noCard: '(no card)',
     manual: 'Manual Write', newPlaceholder: 'New memory…', retrieval: 'Retrieval', searchPlaceholder: 'Semantic search…',
     globalSection: 'Shared (global)', localSection: 'Workspace / Session', empty: '(empty)', count: 'items',
     importance: 'imp', delete: 'Delete', scopeTitle: 'Adjust scope', domainTitle: 'Adjust domain',
@@ -168,6 +168,7 @@ async function api(method, path, body) {
 export function apply(ctx) {
   const slots = ctx.get('slots')
   if (slots === undefined) return
+  const sessionService = ctx.get('sessions')
 
   const styleEl = document.createElement('style')
   styleEl.dataset.plugin = 'deepmemory'
@@ -860,16 +861,23 @@ export function apply(ctx) {
     const [newDesc, setNewDesc] = React.useState('')
     const [newColor, setNewColor] = React.useState('neutral')
     const [msg, setMsg] = React.useState('')
+    const workspaceId = props.workspaceId || ''
+    const sessionId = props.sessionId || ''
+    const sessionOptions = props.sessionOptions || []
     const colors = { neutral: '#8a8f98', red: '#d94f4f', orange: '#e58a32', yellow: '#c6a52b', green: '#3e9b68', blue: '#4c83c3' }
     const colorNames = { neutral: '默认', red: '红', orange: '橙', yellow: '黄', green: '绿', blue: '蓝' }
     async function load() {
-      const res = await api('GET', '/v1/v2/tasks?limit=100')
+      if (!workspaceId) { setTasks([]); setMsg(lang === 'en' ? 'No workspace for this conversation' : '当前会话未绑定工作区'); return }
+      const res = await api('GET', '/v1/v2/tasks?workspace_id=' + encodeURIComponent(workspaceId) + '&limit=100')
       if (res && Array.isArray(res.tasks)) setTasks(res.tasks)
     }
     React.useEffect(function () { load() }, [])
     async function createTask() {
       if (!newTitle.trim()) return
-      const res = await api('POST', '/v1/v2/tasks', { title: newTitle.trim(), description: newDesc.trim(), task_color: newColor, status: 'planned' })
+      const res = await api('POST', '/v1/v2/tasks', {
+        title: newTitle.trim(), description: newDesc.trim(), task_color: newColor,
+        status: 'planned', workspace_id: workspaceId, session_id: sessionId,
+      })
       if (res && res.task) { setNewTitle(''); setNewDesc(''); setNewColor('neutral'); setCreating(false); load(); setMsg(t('saved')) }
       else setMsg(t('cfgFail') + (res.error || ''))
     }
@@ -884,6 +892,13 @@ export function apply(ctx) {
     async function setColor(task, color) {
       if (color === (task.task_color || 'neutral')) return
       const res = await api('POST', '/v1/v2/tasks/' + task.id + '/color', { task_color: color, expected_version: task.version })
+      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
+    }
+    async function setBinding(task, nextSessionId) {
+      if (!nextSessionId || nextSessionId === task.session_id) return
+      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/binding', {
+        workspace_id: workspaceId, session_id: nextSessionId, expected_version: task.version,
+      })
       if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
     }
     const statusMap = { planned: t('planned'), todo: t('todo'), in_progress: t('inProgress'), completed: t('completed'), failed: t('failed') }
@@ -920,8 +935,18 @@ export function apply(ctx) {
                 React.createElement('div', { className: 'dsh-mem-task-detail' },
                   task.description ? React.createElement('div', { className: 'dsh-mem-task-description' }, task.description) : null,
                   task.blocked ? React.createElement('div', { className: 'dsh-mem-task-blocked' }, t('taskBlocked')) : null,
+                  React.createElement('label', { className: 'dsh-mem-task-color-label' }, lang === 'en' ? 'Conversation ' : '对话 ',
+                    React.createElement('select', {
+                      value: task.session_id || '',
+                      onChange: function (e) { setBinding(task, e.target.value) },
+                    },
+                      !task.session_id ? React.createElement('option', { value: '' }, lang === 'en' ? 'Unbound' : '未绑定') : null,
+                      sessionOptions.map(function (item) { return React.createElement('option', { key: item.id, value: item.id }, item.title) }),
+                    ),
+                  ),
                   React.createElement('label', { className: 'dsh-mem-task-color-label' }, '颜色 ', React.createElement('select', { value: color, onChange: function (e) { setColor(task, e.target.value) } }, Object.keys(colors).map(function (c) { return React.createElement('option', { key: c, value: c }, colorNames[c]) }))),
                   React.createElement('div', { className: 'dsh-mem-task-controls' },
+                    task.session_id && props.onOpenSession ? React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { props.onOpenSession(task.session_id) } }, lang === 'en' ? 'Open conversation' : '打开对话') : null,
                     status === 'in_progress' ? React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-warn', onClick: function () { toggleBlocked(task) } }, task.blocked ? t('taskUnblock') : t('taskBlocked')) : null,
                     (canTransition[status] || []).map(function (st) { return React.createElement('button', { key: st, className: 'dsh-mem-btn', onClick: function () { transition(task, st) } }, statusMap[st]) }),
                   ),
@@ -939,6 +964,7 @@ export function apply(ctx) {
     const [lang, setLang] = React.useState('zh')
     const [memories, setMemories] = React.useState([])
     const [card, setCard] = React.useState(null)
+    const [cardVersion, setCardVersion] = React.useState(0)
     const [revisions, setRevisions] = React.useState([])
     const [stats, setStats] = React.useState(null)
     const [enabled, setEnabled] = React.useState(true)
@@ -954,6 +980,20 @@ export function apply(ctx) {
     const [cardDraft, setCardDraft] = React.useState(null)
 
     const sid = props && props.sessionId ? String(props.sessionId) : ''
+    const sessionsState = typeof props.useSessions === 'function'
+      ? props.useSessions(function (state) { return state })
+      : { byId: {} }
+    const workspaces = typeof props.useWorkspaces === 'function'
+      ? props.useWorkspaces(function (state) { return state.items || [] })
+      : []
+    const sessionSummary = sessionsState.byId[sid] || null
+    const currentWorkspace = workspaces.find(function (item) { return (item.sessionIds || []).indexOf(sid) >= 0 }) || null
+    const workspaceId = currentWorkspace ? String(currentWorkspace.workspaceId) : ''
+    const workspaceSessions = ((currentWorkspace && currentWorkspace.sessionIds) || []).map(function (id) {
+      const item = sessionsState.byId[id]
+      return { id: String(id), title: item ? item.displayTitle : String(id) }
+    })
+    const cardKind = sessionSummary && String(sessionSummary.agentPreset || '').indexOf('task') >= 0 ? 'task' : 'daily'
     const dict = I18N[lang] || I18N.zh
     function t(key) { return dict[key] !== undefined ? dict[key] : key }
 
@@ -981,18 +1021,18 @@ export function apply(ctx) {
 
     async function refresh() {
       setBusy(true)
-      const res = await api('GET', '/v1/overview?workspace_id=' + encodeURIComponent(WORKSPACE_DEFAULT) + '&session_id=' + encodeURIComponent(sid))
+      const res = await api('GET', '/v1/overview?workspace_id=' + encodeURIComponent(workspaceId || WORKSPACE_DEFAULT) + '&session_id=' + encodeURIComponent(sid))
       // Fetch session state card from v2 API
       if (sid) {
-        const kind = props && props.cardKind === 'task' ? 'task' : 'daily'
-        const cardRes = await api('GET', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sid))
-        if (cardRes && cardRes.card) setCard(cardRes.card.payload)
-        const revRes = await api('GET', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sid) + '/revisions')
+        const cardRes = await api('GET', '/v1/v2/cards/' + cardKind + '/' + encodeURIComponent(sid))
+        if (cardRes && cardRes.card) { setCard(cardRes.card.payload); setCardVersion(Number(cardRes.card.version || 0)) }
+        else { setCard(null); setCardVersion(0) }
+        const revRes = await api('GET', '/v1/v2/cards/' + cardKind + '/' + encodeURIComponent(sid) + '/revisions')
         if (revRes && Array.isArray(revRes.revisions)) setRevisions(revRes.revisions)
       }
       if (res && Array.isArray(res.memories)) setMemories(res.memories)
       else if (res && res.error) setMsg(t('loadFail') + res.error)
-      if (res && res.card) setCard(res.card)
+      // legacy workspace_cards are migration-only; session cards are authoritative.
       if (res && typeof res.documents === 'number') setStats({ documents: res.documents, archived: res.archived, atoms: res.atoms })
       if (res && typeof res.session_enabled === 'boolean') setEnabled(res.session_enabled)
       setBusy(false)
@@ -1003,7 +1043,7 @@ export function apply(ctx) {
     async function doSearch() {
       if (!query.trim()) { refresh(); return }
       setBusy(true)
-      const res = await api('POST', '/v1/memories/search', { query: query.trim(), k: 15, workspace_id: WORKSPACE_DEFAULT })
+      const res = await api('POST', '/v1/memories/search', { query: query.trim(), k: 15, workspace_id: workspaceId || WORKSPACE_DEFAULT })
       if (res && Array.isArray(res.results)) setMemories(res.results)
       else if (res && res.error) setMsg(t('searchFail') + res.error)
       setBusy(false)
@@ -1012,7 +1052,7 @@ export function apply(ctx) {
     async function doAdd() {
       if (!newContent.trim()) return
       const res = await api('POST', '/v1/memories/add', {
-        content: newContent.trim(), type: newType, scope: newScope, domain: newDomain, workspace_id: WORKSPACE_DEFAULT, session_id: sid,
+        content: newContent.trim(), type: newType, scope: newScope, domain: newDomain, workspace_id: workspaceId || WORKSPACE_DEFAULT, session_id: sid,
       })
       if (res && res.error) { setMsg(t('cfgFail') + res.error) } else { setNewContent(''); setMsg(t('saved')); refresh() }
     }
@@ -1038,7 +1078,12 @@ export function apply(ctx) {
     }
 
     function subProps() {
-      return { t: t, lang: lang, onBack: function () { setView('main'); refresh() } }
+      return {
+        t: t, lang: lang, workspaceId: workspaceId, sessionId: sid,
+        sessionOptions: workspaceSessions,
+        onOpenSession: sessionService ? function (id) { sessionService.open(id) } : null,
+        onBack: function () { setView('main'); refresh() },
+      }
     }
     if (view === 'graph') return React.createElement(GraphView, subProps())
     if (view === 'archive') return React.createElement(ArchiveView, subProps())
@@ -1132,13 +1177,16 @@ export function apply(ctx) {
     async function saveCard() {
       setBusy(true)
       const d = cardDraft
-      const res = await api('POST', '/v1/cards/upsert', {
-        workspace_id: WORKSPACE_DEFAULT,
-        goal: d.goal,
-        current_plan: d.current_plan,
-        key_decisions: d.key_decisions.filter(function (x) { return String(x).trim() }),
-        in_progress: d.in_progress.filter(function (x) { return String(x).trim() }),
-        next_steps: d.next_steps.filter(function (x) { return String(x).trim() }),
+      const res = await api('PUT', '/v1/v2/cards/' + cardKind + '/' + encodeURIComponent(sid), {
+        expected_version: cardVersion,
+        payload: {
+          goal: d.goal,
+          current_plan: d.current_plan,
+          key_decisions: d.key_decisions.filter(function (x) { return String(x).trim() }),
+          in_progress: d.in_progress.filter(function (x) { return String(x).trim() }),
+          next_steps: d.next_steps.filter(function (x) { return String(x).trim() }),
+        },
+        actor: 'user', reason: 'manual session card edit',
       })
       setBusy(false)
       if (res && res.error) { setMsg(t('cfgFail') + res.error); return }
@@ -1179,7 +1227,7 @@ export function apply(ctx) {
         React.createElement('span', null, t('memories') + ' ' + (stats ? stats.documents : '?') + ' ' + t('count')),
         stats ? React.createElement('span', null, t('atoms') + ' ' + stats.atoms) : null,
         stats ? React.createElement('span', null, t('archived') + ' ' + stats.archived) : null,
-        card ? React.createElement('span', null, t('stateV') + card.version) : null,
+        card ? React.createElement('span', null, t('stateV') + cardVersion) : null,
       ),
       cardEdit
         ? renderCardEditor()

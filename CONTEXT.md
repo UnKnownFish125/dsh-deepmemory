@@ -13,11 +13,11 @@ A bounded piece of a Main Task executed by the primary agent or delegated to a s
 _Avoid_: Temporary session, separate conversation card
 
 **Conversation Card**:
-The current, compact state of one conversation working on a Main Task or a daily topic; it is versioned once per assistant turn.
+The current, compact state of exactly one conversation working on a Main Task or a daily topic; its ownership key is the Session id and it is versioned once per assistant turn.
 _Avoid_: Workspace card, complete task history
 
 **Task Board**:
-The durable lifecycle view of a Main Task and its Subtasks across planned, ready, in-progress, completed, and failed states.
+The durable lifecycle view owned by one Workspace. Every Task carries the Session id of the conversation that owns or advances it, and may be rebound only to another conversation in the same Workspace.
 _Avoid_: Conversation Card, execution log
 
 **Planning Intention**:

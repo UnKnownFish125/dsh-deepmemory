@@ -91,9 +91,13 @@ class V2HttpTest(unittest.TestCase):
         self.assertEqual(1, nodes["alpha"]["edge_count"])
 
     def test_task_status_history_and_conflicts(self):
-        code, created = self.request("POST", "/v1/v2/tasks", {"title": "ship", "status": "todo"})
+        code, created = self.request("POST", "/v1/v2/tasks", {"title": "ship", "status": "todo", "workspace_id": "ws-1", "session_id": "session-1"})
         self.assertEqual(200, code)
         task = created["task"]
+
+        code, listed = self.request("GET", "/v1/v2/tasks?workspace_id=ws-1")
+        self.assertEqual(200, code)
+        self.assertEqual([task["id"]], [item["id"] for item in listed["tasks"]])
         self.assertTrue(task["created_at"].endswith("+08:00"))
         code, moved = self.request(
             "POST", f"/v1/v2/tasks/{task['id']}/transition",
@@ -116,7 +120,7 @@ class V2HttpTest(unittest.TestCase):
 
     def test_task_color_create_and_update(self):
         code, created = self.request(
-            "POST", "/v1/v2/tasks", {"title": "color", "status": "planned", "task_color": "orange"}
+            "POST", "/v1/v2/tasks", {"title": "color", "status": "planned", "task_color": "orange", "workspace_id": "ws-1", "session_id": "session-1"}
         )
         self.assertEqual(200, code)
         task = created["task"]
@@ -133,25 +137,42 @@ class V2HttpTest(unittest.TestCase):
         )
         self.assertEqual(400, code)
 
-    def test_state_card_revisions_restore_and_conflict(self):
-        code, first = self.request("PUT", "/v1/v2/cards/daily/session-1", {"payload": {"goal": "a"}})
+    def test_task_binding_endpoint_and_workspace_requirement(self):
+        code, response = self.request("POST", "/v1/v2/tasks", {"title": "missing binding"})
+        self.assertEqual(400, code)
+        code, created = self.request("POST", "/v1/v2/tasks", {
+            "title": "bound", "workspace_id": "ws-1", "session_id": "session-1",
+        })
         self.assertEqual(200, code)
+        task = created["task"]
+        code, rebound = self.request(
+            "POST", f"/v1/v2/tasks/{task['id']}/binding",
+            {"workspace_id": "ws-1", "session_id": "session-2", "expected_version": task["version"]},
+        )
+        self.assertEqual(200, code)
+        self.assertEqual("session-2", rebound["task"]["session_id"])
+
+    def test_state_card_revisions_restore_and_conflict(self):
+        code, first = self.request("PUT", "/v1/v2/cards/task/session-1", {"payload": {"goal": "a"}})
+        self.assertEqual(200, code)
+        self.assertEqual("session-1", first["card"]["session_id"])
+        self.assertIsNone(first["card"]["task_id"])
         code, second = self.request(
-            "PUT", "/v1/v2/cards/daily/session-1",
+            "PUT", "/v1/v2/cards/task/session-1",
             {"payload": {"goal": "b"}, "expected_version": first["card"]["version"]},
         )
         self.assertEqual(200, code)
         code, _ = self.request(
-            "PUT", "/v1/v2/cards/daily/session-1",
+            "PUT", "/v1/v2/cards/task/session-1",
             {"payload": {"goal": "overwrite"}, "expected_version": 1},
         )
         self.assertEqual(409, code)
-        code, revisions = self.request("GET", "/v1/v2/cards/daily/session-1/revisions")
+        code, revisions = self.request("GET", "/v1/v2/cards/task/session-1/revisions")
         self.assertEqual(200, code)
         self.assertEqual(2, len(revisions["revisions"]))
         revision_id = revisions["revisions"][-1]["id"]
         code, restored = self.request(
-            "POST", "/v1/v2/cards/daily/session-1/restore",
+            "POST", "/v1/v2/cards/task/session-1/restore",
             {"revision_id": revision_id, "expected_version": second["card"]["version"]},
         )
         self.assertEqual(200, code)

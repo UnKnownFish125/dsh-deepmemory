@@ -2,6 +2,13 @@
 
 All notable changes to dsh-deepmemory are documented here.
 
+## [v0.2.2] - 2026-08-18
+
+### Changed
+- 任务看板改为按 Workspace 隔离；创建任务必须绑定当前 Session，任务卡支持打开或改绑同工作区对话
+- 状态卡改为按 Session 独立，不再依赖 Workspace 或 task_id；旧 v3 CHECK 约束自动重建迁移
+- preset 插件停止读写 legacy workspace_cards，统一使用 `/v1/v2/cards/<kind>/<session_id>`
+
 ## [v0.2.1] - 2026-08-17
 
 ### Added

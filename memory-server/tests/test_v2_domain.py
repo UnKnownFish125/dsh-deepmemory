@@ -66,8 +66,8 @@ class V2DomainTest(unittest.TestCase):
         self.assertEqual(("legacy", "kept", "active", "semantic"), row)
 
     def test_task_constraints_blocking_and_subtasks(self):
-        parent = self.store.create_task("parent")
-        child = self.store.create_task("child", parent_task_id=parent["id"], status="todo")
+        parent = self.store.create_task("parent", workspace_id="ws-1", session_id="session-1")
+        child = self.store.create_task("child", parent_task_id=parent["id"], status="todo", workspace_id="ws-1", session_id="session-1")
         self.assertEqual(parent["id"], child["parent_task_id"])
         with self.assertRaises(InvalidTransition):
             self.store.set_task_blocked(child["id"], True, child["version"], "waiting")
@@ -85,7 +85,7 @@ class V2DomainTest(unittest.TestCase):
                 )
 
     def test_task_color_is_persistent_validated_and_versioned(self):
-        task = self.store.create_task("colored", task_color="blue")
+        task = self.store.create_task("colored", task_color="blue", workspace_id="ws-1", session_id="session-1")
         self.assertEqual("blue", task["task_color"])
         task = self.store.set_task_color(task["id"], "red", task["version"])
         self.assertEqual("red", task["task_color"])
@@ -94,8 +94,24 @@ class V2DomainTest(unittest.TestCase):
         with self.assertRaises(InvalidTransition):
             self.store.set_task_color(task["id"], "purple", task["version"])
 
+    def test_task_board_is_workspace_scoped_and_task_rebinds_conversation(self):
+        first = self.store.create_task(
+            "workspace one", workspace_id="ws-1", session_id="session-1"
+        )
+        self.store.create_task(
+            "workspace two", workspace_id="ws-2", session_id="session-2"
+        )
+        self.assertEqual([first["id"]], [item["id"] for item in self.store.list_tasks("ws-1")])
+        rebound = self.store.rebind_task(first["id"], "ws-1", "session-3", first["version"])
+        self.assertEqual("ws-1", rebound["workspace_id"])
+        self.assertEqual("session-3", rebound["session_id"])
+        with self.assertRaises(ConflictError):
+            self.store.rebind_task(first["id"], "ws-1", "session-4", first["version"])
+        with self.assertRaises(InvalidTransition):
+            self.store.rebind_task(first["id"], "ws-2", "session-4", rebound["version"])
+
     def test_failure_and_reopen_history_is_append_only(self):
-        task = self.store.create_task("retry", status="todo")
+        task = self.store.create_task("retry", status="todo", workspace_id="ws-1", session_id="session-1")
         task = self.store.transition_task(task["id"], "in_progress", task["version"])
         task = self.store.transition_task(
             task["id"], "failed", task["version"], reason="test failed", evidence="trace-1"
@@ -113,7 +129,7 @@ class V2DomainTest(unittest.TestCase):
                 conn.execute("DELETE FROM task_events WHERE id=?", (events[2]["id"],))
 
     def test_task_and_daily_card_revisions_detect_conflicts(self):
-        task = self.store.create_task("card owner")
+        task = self.store.create_task("card owner", workspace_id="ws-1", session_id="session-1")
         card = self.store.put_state_card(
             "session-1", "task", {"goal": "ship"}, task_id=task["id"], source_message_id="m1"
         )
@@ -140,6 +156,16 @@ class V2DomainTest(unittest.TestCase):
             self.assertNotEqual(revisions[1]["before_hash"], revisions[1]["after_hash"])
             with self.assertRaises(sqlite3.IntegrityError):
                 conn.execute("UPDATE state_card_revisions SET reason='changed' WHERE id=?", (revisions[0]["id"],))
+
+    def test_task_state_card_is_session_bound_without_task_dependency(self):
+        card = self.store.put_state_card("session-only", "task", {"goal": "ship"})
+        self.assertEqual("session-only", card["session_id"])
+        self.assertIsNone(card["task_id"])
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT card_key,session_id FROM state_cards WHERE id=?", (card["id"],)
+            ).fetchone()
+        self.assertEqual(("session-only", "session-only"), row)
 
     def test_invalid_and_candidate_adoption_require_authority(self):
         with self.assertRaises(PermissionDenied):
@@ -198,6 +224,37 @@ class EmptyMigrationTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'"
             ).fetchone()[0]
         self.assertEqual(1, count)
+
+    def test_v3_task_card_constraint_is_rebuilt_for_session_cards(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db_path = os.path.join(tmp.name, "memory.db")
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(LEGACY_SCHEMA)
+                conn.executescript(
+                    """
+                    CREATE TABLE state_cards (
+                      id TEXT PRIMARY KEY, card_key TEXT NOT NULL,
+                      kind TEXT NOT NULL, task_id TEXT REFERENCES tasks(id),
+                      payload TEXT NOT NULL DEFAULT '{}', version INTEGER NOT NULL DEFAULT 1,
+                      current_revision_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                      UNIQUE(card_key,kind), CHECK(kind != 'task' OR task_id IS NOT NULL)
+                    );
+                    CREATE TABLE state_card_revisions (
+                      id TEXT PRIMARY KEY, card_id TEXT, parent_revision_id TEXT, version INTEGER,
+                      patch TEXT, before_payload TEXT, after_payload TEXT, actor TEXT, reason TEXT,
+                      source_message_id TEXT, tool_trace_id TEXT, subagent_trace_id TEXT,
+                      before_hash TEXT, after_hash TEXT, created_at REAL
+                    );
+                    """
+                )
+            store = V2Store(db_path)
+            store.migrate()
+            card = store.put_state_card("session-v4", "task", {"goal": "migrated"})
+            self.assertEqual("session-v4", card["session_id"])
+            self.assertIsNone(card["task_id"])
+        finally:
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

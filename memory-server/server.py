@@ -2024,8 +2024,10 @@ class Handler(BaseHTTPRequestHandler):
         parts = [unquote(part) for part in path.strip("/").split("/")]
         if path == "/v1/v2/tasks":
             return self._v2_call(lambda: {"tasks": self._v2_store().list_tasks(
+                workspace_id=qs.get("workspace_id", [None])[0],
                 status=qs.get("status", [None])[0],
                 parent_task_id=qs.get("parent_task_id", [None])[0],
+                session_id=qs.get("session_id", [None])[0],
                 limit=qs.get("limit", [100])[0],
             )})
         if len(parts) >= 4 and parts[2] == "tasks":
@@ -2253,7 +2255,7 @@ class Handler(BaseHTTPRequestHandler):
                         parent_task_id=body.get("parent_task_id"), **{
                             key: body[key] for key in (
                                 "description", "task_color", "blocked", "block_reason", "missing_conditions",
-                                "completion_criteria", "source_message_id", "trace_id",
+                                "completion_criteria", "source_message_id", "trace_id", "workspace_id", "session_id",
                             ) if key in body
                         })})
                 if len(parts) >= 5 and parts[2] == "tasks":
@@ -2274,6 +2276,11 @@ class Handler(BaseHTTPRequestHandler):
                     if parts[4] == "color":
                         return self._v2_call(lambda: {"task": store.set_task_color(
                             task_id, body.get("task_color", "neutral"), int(body["expected_version"]),
+                        )})
+                    if parts[4] == "binding":
+                        return self._v2_call(lambda: {"task": store.rebind_task(
+                            task_id, body.get("workspace_id"), body.get("session_id"),
+                            int(body["expected_version"]),
                         )})
                 if len(parts) >= 5 and parts[2] == "cards" and parts[5:] == ["restore"]:
                     return self._v2_call(lambda: {"card": store.restore_state_card(

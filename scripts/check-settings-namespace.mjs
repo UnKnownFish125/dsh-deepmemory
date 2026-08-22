@@ -1,4 +1,4 @@
-const baseUrl = process.env.DSH_URL || 'http://127.0.0.1:3091'
+const baseUrl = process.env.DSH_URL || 'http://localhost:3091'
 const target = new URL('/api/settings.describe', baseUrl)
 const response = await fetch(target, {
   method: 'POST',

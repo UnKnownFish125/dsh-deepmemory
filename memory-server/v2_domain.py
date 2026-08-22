@@ -12,7 +12,7 @@ import time
 import uuid
 
 
-V2_SCHEMA_VERSION = 3
+V2_SCHEMA_VERSION = 4
 
 TASK_STATUSES = ("planned", "todo", "in_progress", "completed", "failed")
 TASK_COLORS = ("neutral", "red", "orange", "yellow", "green", "blue")
@@ -84,6 +84,8 @@ V2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   parent_task_id TEXT REFERENCES tasks(id),
+  workspace_id TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   task_color TEXT NOT NULL DEFAULT 'neutral',
@@ -124,6 +126,7 @@ CREATE TABLE IF NOT EXISTS task_events (
 CREATE TABLE IF NOT EXISTS state_cards (
   id TEXT PRIMARY KEY,
   card_key TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL CHECK(kind IN ('task','daily')),
   task_id TEXT REFERENCES tasks(id),
   payload TEXT NOT NULL DEFAULT '{}',
@@ -131,8 +134,7 @@ CREATE TABLE IF NOT EXISTS state_cards (
   current_revision_id TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
-  UNIQUE(card_key, kind),
-  CHECK(kind != 'task' OR task_id IS NOT NULL)
+  UNIQUE(card_key, kind)
 );
 
 CREATE TABLE IF NOT EXISTS state_card_revisions (
@@ -300,6 +302,42 @@ def install_v2_schema(conn):
     """Install or repair the P1 schema without replacing legacy objects."""
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(V2_SCHEMA)
+    state_cards_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='state_cards'"
+    ).fetchone()
+    if state_cards_sql and "kind != 'task' OR task_id IS NOT NULL" in (state_cards_sql[0] or ""):
+        # v3 required task cards to point at a task. v4 makes every card
+        # conversation-owned, so task_id becomes optional metadata. SQLite
+        # cannot drop CHECK constraints in place; rebuild the small parent table.
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.executescript(
+            """
+            CREATE TABLE state_cards_v4 (
+              id TEXT PRIMARY KEY,
+              card_key TEXT NOT NULL,
+              session_id TEXT NOT NULL DEFAULT '',
+              kind TEXT NOT NULL CHECK(kind IN ('task','daily')),
+              task_id TEXT REFERENCES tasks(id),
+              payload TEXT NOT NULL DEFAULT '{}',
+              version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+              current_revision_id TEXT,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              UNIQUE(card_key, kind)
+            );
+            INSERT INTO state_cards_v4
+              (id,card_key,session_id,kind,task_id,payload,version,current_revision_id,created_at,updated_at)
+            SELECT id,card_key,card_key,kind,task_id,payload,version,current_revision_id,created_at,updated_at
+            FROM state_cards;
+            DROP TABLE state_cards;
+            ALTER TABLE state_cards_v4 RENAME TO state_cards;
+            CREATE INDEX IF NOT EXISTS idx_cards_task ON state_cards(task_id);
+            CREATE INDEX IF NOT EXISTS idx_cards_session ON state_cards(session_id,kind);
+            """
+        )
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
     if "documents" in {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }:
@@ -319,7 +357,26 @@ def install_v2_schema(conn):
     if "tasks" in {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }:
-        _ensure_columns(conn, "tasks", (("task_color", "TEXT NOT NULL DEFAULT 'neutral'"),))
+        _ensure_columns(conn, "tasks", (
+            ("task_color", "TEXT NOT NULL DEFAULT 'neutral'"),
+            ("workspace_id", "TEXT NOT NULL DEFAULT ''"),
+            ("session_id", "TEXT NOT NULL DEFAULT ''"),
+        ))
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_workspace "
+            "ON tasks(workspace_id,status,updated_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id,updated_at)"
+        )
+    if "state_cards" in {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }:
+        _ensure_columns(conn, "state_cards", (("session_id", "TEXT NOT NULL DEFAULT ''"),))
+        conn.execute("UPDATE state_cards SET session_id=card_key WHERE session_id='' OR session_id IS NULL")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cards_session ON state_cards(session_id,kind)"
+        )
 
 
 class V2Store:
@@ -349,14 +406,22 @@ class V2Store:
             raise InvalidTransition(f"unknown task color: {task_color}")
         if blocked and status != "in_progress":
             raise InvalidTransition("only in_progress tasks may be blocked")
+        workspace_id = str(fields.get("workspace_id") or "").strip()
+        session_id = str(fields.get("session_id") or "").strip()
+        if not workspace_id:
+            raise DomainError("tasks require workspace_id")
+        if not session_id:
+            raise DomainError("tasks require session_id")
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO tasks (id,parent_task_id,title,description,task_color,status,blocked,"
-                "block_reason,missing_conditions,completion_criteria,source_message_id,"
-                "trace_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO tasks (id,parent_task_id,workspace_id,session_id,title,description,"
+                "task_color,status,blocked,block_reason,missing_conditions,completion_criteria,"
+                "source_message_id,trace_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task_id,
                     parent_task_id,
+                    workspace_id,
+                    session_id,
                     title,
                     fields.get("description", ""),
                     task_color,
@@ -533,9 +598,12 @@ class V2Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_tasks(self, status=None, parent_task_id=None, limit=100):
+    def list_tasks(self, workspace_id, status=None, parent_task_id=None, session_id=None, limit=100):
         """Return a bounded task-board view without exposing raw sqlite rows."""
-        clauses, args = [], []
+        workspace_id = str(workspace_id or "").strip()
+        if not workspace_id:
+            raise DomainError("workspace_id is required")
+        clauses, args = ["workspace_id=?"], [workspace_id]
         if status:
             if status not in TASK_STATUSES:
                 raise DomainError(f"unknown task status: {status}")
@@ -544,6 +612,9 @@ class V2Store:
         if parent_task_id is not None:
             clauses.append("parent_task_id=?")
             args.append(parent_task_id)
+        if session_id is not None:
+            clauses.append("session_id=?")
+            args.append(str(session_id))
         limit = max(1, min(int(limit), 500))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._connect() as conn:
@@ -557,6 +628,26 @@ class V2Store:
             item["missing_conditions"] = json.loads(item["missing_conditions"] or "[]")
             result.append(item)
         return result
+
+    def rebind_task(self, task_id, workspace_id, session_id, expected_version):
+        """Rebind one task to a conversation inside its owning workspace."""
+        workspace_id = str(workspace_id or "").strip()
+        session_id = str(session_id or "").strip()
+        if not workspace_id or not session_id:
+            raise DomainError("workspace_id and session_id are required")
+        with self._connect() as conn:
+            row = conn.execute("SELECT version,workspace_id FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"task not found: {task_id}")
+            if row["version"] != expected_version:
+                raise ConflictError("task version conflict")
+            if row["workspace_id"] and row["workspace_id"] != workspace_id:
+                raise InvalidTransition("task workspace cannot be changed; only its conversation may be rebound")
+            conn.execute(
+                "UPDATE tasks SET workspace_id=?,session_id=?,version=version+1,updated_at=? WHERE id=?",
+                (workspace_id, session_id, time.time(), task_id),
+            )
+        return self.get_task(task_id)
 
     def put_state_card(
         self,
@@ -575,12 +666,13 @@ class V2Store:
             raise DomainError(f"unknown card kind: {kind}")
         if actor not in CARD_ACTORS:
             raise PermissionDenied("sub-agent/model paths cannot mutate state cards")
-        if kind == "task" and not task_id:
-            raise DomainError("task cards require task_id")
+        session_id = str(card_key or "").strip()
+        if not session_id:
+            raise DomainError("state cards require session_id")
         now = time.time()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM state_cards WHERE card_key=? AND kind=?", (card_key, kind)
+                "SELECT * FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
             ).fetchone()
             before = json.loads(row["payload"]) if row else {}
             if row:
@@ -600,9 +692,9 @@ class V2Store:
                 version = 1
                 parent_revision_id = None
                 conn.execute(
-                    "INSERT INTO state_cards (id,card_key,kind,task_id,payload,version,"
-                    "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (card_id, card_key, kind, task_id, _json(payload), version, now, now),
+                    "INSERT INTO state_cards (id,card_key,session_id,kind,task_id,payload,version,"
+                    "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (card_id, session_id, session_id, kind, task_id, _json(payload), version, now, now),
                 )
             patch = {
                 key: {"before": before.get(key), "after": payload.get(key)}
@@ -641,9 +733,10 @@ class V2Store:
         return self.get_state_card(card_key, kind)
 
     def get_state_card(self, card_key, kind):
+        session_id = str(card_key or "").strip()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM state_cards WHERE card_key=? AND kind=?", (card_key, kind)
+                "SELECT * FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
             ).fetchone()
         if row is None:
             raise NotFoundError(f"state card not found: {kind}/{card_key}")
@@ -652,17 +745,18 @@ class V2Store:
         return result
 
     def state_card_revisions(self, card_key, kind, limit=100):
+        session_id = str(card_key or "").strip()
         with self._connect() as conn:
             card = conn.execute(
-                "SELECT 1 FROM state_cards WHERE card_key=? AND kind=?", (card_key, kind)
+                "SELECT 1 FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
             ).fetchone()
             if card is None:
                 raise NotFoundError(f"state card not found: {kind}/{card_key}")
             rows = conn.execute(
                 "SELECT r.* FROM state_card_revisions r "
                 "JOIN state_cards c ON c.id=r.card_id "
-                "WHERE c.card_key=? AND c.kind=? ORDER BY r.version DESC LIMIT ?",
-                (card_key, kind, max(1, min(int(limit), 500))),
+                "WHERE c.session_id=? AND c.kind=? ORDER BY r.version DESC LIMIT ?",
+                (session_id, kind, max(1, min(int(limit), 500))),
             ).fetchall()
         result = []
         for row in rows:
@@ -673,15 +767,16 @@ class V2Store:
         return result
 
     def restore_state_card(self, card_key, kind, revision_id, expected_version, **audit):
+        session_id = str(card_key or "").strip()
         with self._connect() as conn:
             revision = conn.execute(
                 "SELECT r.after_payload FROM state_card_revisions r "
                 "JOIN state_cards c ON c.id=r.card_id "
-                "WHERE r.id=? AND c.card_key=? AND c.kind=?",
-                (revision_id, card_key, kind),
+                "WHERE r.id=? AND c.session_id=? AND c.kind=?",
+                (revision_id, session_id, kind),
             ).fetchone()
             card = conn.execute(
-                "SELECT task_id FROM state_cards WHERE card_key=? AND kind=?", (card_key, kind)
+                "SELECT task_id FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
             ).fetchone()
         if revision is None or card is None:
             raise NotFoundError("state card revision not found")

@@ -109,6 +109,8 @@ step "preset 契约验证 (task/daily/blank)"
 # ---------------- 4. 浏览器模拟（临时 DSH_HOME + 随机端口 + 无头 Chromium） ----------------
 step "浏览器模拟 (临时实例+无头Chromium)"
 WEBPY="${WEBPY:-/opt/AstrBot/venv/bin/python3}"
+[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ] && [ -d "/opt/AstrBot/data/plugin_data/astrbot_plugin_browser/browsers" ] && \
+  export PLAYWRIGHT_BROWSERS_PATH="/opt/AstrBot/data/plugin_data/astrbot_plugin_browser/browsers"
 BROWSER_OK=0
 if [ -x "$WEBPY" ] && "$WEBPY" -c "import playwright" >/dev/null 2>&1; then
   # 真实启动一次无头浏览器来探测可用性（browsers 路径可能经 PLAYWRIGHT_BROWSERS_PATH 定制）
@@ -167,9 +169,73 @@ PY
   # 工作区注册表（供 New Session 使用），sessions 保持为空（新建空会话，不碰生产对话数据）
   mkdir -p "$VHOME/storages"
   [ -f "$REAL_HOME/storages/workspace.json" ] && cp "$REAL_HOME/storages/workspace.json" "$VHOME/storages/"
+  VERIFY_WORKSPACE_TITLE=$($VENV_PY - "$VHOME/storages/workspace.json" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    ids = data.get("global", {}).get("workspaceIds", [])
+    rows = data.get("tables", {}).get("workspaces", {})
+    print(rows.get(ids[0], {}).get("title", "") if ids else "")
+except Exception:
+    print("")
+PY
+  )
+  mapfile -t VERIFY_SESSION_FIXTURE < <($VENV_PY - "$REAL_HOME" "$VHOME/storages/workspace.json" <<'PY'
+import glob, json, os, sys
+import zstandard as zstd
+home, workspace_file = sys.argv[1:]
+try:
+    data = json.load(open(workspace_file, encoding="utf-8"))
+    ids = data.get("global", {}).get("workspaceIds", [])
+    rows = data.get("tables", {}).get("workspaces", {})
+    session_ids = rows.get(ids[0], {}).get("sessionIds", []) if ids else []
+    candidates = []
+    for session_id in session_ids:
+        matches = glob.glob(os.path.join(home, "sessions", "*", session_id, "session.jsonl.zstd"))
+        if not matches:
+            continue
+        path = matches[0]
+        title = ""
+        with open(path, "rb") as fh:
+            text = zstd.ZstdDecompressor().stream_reader(fh).read().decode("utf-8")
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("type") == "session/title":
+                title = str((event.get("data") or {}).get("title") or "")
+                break
+        if title:
+            candidates.append((os.path.getsize(path), session_id, title, os.path.dirname(path)))
+    if candidates:
+        _, session_id, title, directory = min(candidates)
+        print(session_id)
+        print(title)
+        print(directory)
+except Exception:
+    pass
+PY
+  )
+  VERIFY_SESSION_ID="${VERIFY_SESSION_FIXTURE[0]:-}"
+  VERIFY_SESSION_TITLE="${VERIFY_SESSION_FIXTURE[1]:-}"
+  VERIFY_SESSION_DIR="${VERIFY_SESSION_FIXTURE[2]:-}"
+  if [ -n "$VERIFY_SESSION_DIR" ]; then
+    session_parent=$(basename "$(dirname "$VERIFY_SESSION_DIR")")
+    mkdir -p "$VHOME/sessions/$session_parent"
+    cp -a "$VERIFY_SESSION_DIR" "$VHOME/sessions/$session_parent/"
+  fi
   [ -f "$REAL_HOME/settings.yaml" ] && cp "$REAL_HOME/settings.yaml" "$VHOME/"
   # 凭证：让验证会话能真实发一条消息（临时复制，验证完随 VHOME 删除）
   [ -f "$REAL_HOME/.credentials.yaml" ] && cp "$REAL_HOME/.credentials.yaml" "$VHOME/"
+  # 与 install.sh 一致地安装三套 preset 与共享插件，确保默认 task preset 可创建会话。
+  mkdir -p "$VHOME/.agent-presets/harness-memory-task" \
+    "$VHOME/.agent-presets/harness-memory-daily" \
+    "$VHOME/.agent-presets/harness-memory-blank" \
+    "$VHOME/.agent-presets/_memory-plugin"
+  cp -a "$ROOT/agent-preset/task/." "$VHOME/.agent-presets/harness-memory-task/"
+  cp -a "$ROOT/agent-preset/daily/." "$VHOME/.agent-presets/harness-memory-daily/"
+  cp -a "$ROOT/agent-preset/blank-template/." "$VHOME/.agent-presets/harness-memory-blank/"
+  cp -a "$ROOT/agent-preset/memory-plugin/." "$VHOME/.agent-presets/_memory-plugin/"
   # /mem-api 代理目标：起隔离 memory-server（临时 data + 随机端口）。
   # 不生成 api-token（API_TOKEN_FILE 不存在 → server 不要求鉴权），
   # 避免依赖外部 6230 实例——加固鉴权后外部实例会拒绝无 token 的 verify 请求。
@@ -198,13 +264,19 @@ PY
   if [ "$WUP" != "1" ]; then
     bad; tail -8 "$VHOME/web.log"
   else
-    VERIFY_BASE_URL="http://localhost:$WPORT" VERIFY_SHOT="$VHOME/shot.png" "$WEBPY" "$HERE/verify/web-check.py" && ok || bad
+      VERIFY_BASE_URL="http://localhost:$WPORT" VERIFY_SHOT="$VHOME/shot.png" \
+      VERIFY_WORKSPACE_TITLE="$VERIFY_WORKSPACE_TITLE" VERIFY_SESSION_TITLE="$VERIFY_SESSION_TITLE" \
+      "$WEBPY" "$HERE/verify/web-check.py" && ok || bad
   fi
   kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
   fi
   kill "$MSPID" 2>/dev/null; wait "$MSPID" 2>/dev/null
-  rm -rf "$MTMP"
-  rm -rf "$VHOME"
+  if [ "${KEEP_VERIFY:-0}" = "1" ]; then
+    echo "[verify] 保留调试现场: VHOME=$VHOME MTMP=$MTMP"
+  else
+    rm -rf "$MTMP"
+    rm -rf "$VHOME"
+  fi
 fi
 
 # ---------------- 汇总 ----------------

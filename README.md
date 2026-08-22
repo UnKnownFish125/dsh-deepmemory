@@ -16,6 +16,7 @@ Give your DeepSeek Harness agents **cross-session memory** and a **near-infinite
 - **Dual domains** — work / life memory separated at write and query time
 - **Mode presets** — two production presets (task / daily) plus an extension template
 - **WebUI** — memory panel, entity graph, archive, maintenance, per-session config, task board (kanban)
+- **Explicit ownership** — task boards are Workspace-scoped, every task links to a Session, and state cards are independently versioned per Session
 
 ## Memory Model (brief)
 
@@ -73,8 +74,8 @@ Switching providers (e.g. `local` → `api`) is safe: the FAISS index is rebuilt
 ## Usage
 
 1. **Choose a preset** — start a new session and select `任务工作模式` (task) or `日常问答模式` (daily). Memory plugin loads automatically; no dynamic `define+run` needed.
-2. **WebUI** — open the「记忆」tab in the conversation view: manage memories (scope/domain/labels), explore the entity graph, archive, maintenance (backup / rebuild / consolidate / decay), per-session config override, and the task kanban.
-3. **API** — HTTP backend on `:6230`: `POST /v1/memories/add`, `/v1/memories/search`, v2 business API under `/v1/v2/` (tasks, recall, lifecycle), state cards `/v1/cards/upsert`, session config `/v1/config/session/set|reset`, sensitivity audit `/v1/sensitive/audit`.
+2. **WebUI** — open the「记忆」tab in the conversation view: manage memories, inspect the entity graph, edit the current conversation card, and use the current Workspace task kanban. Every task can open or rebind its linked conversation.
+3. **API** — HTTP backend on `:6230`: v2 task boards at `/v1/v2/tasks?workspace_id=...`, session cards at `/v1/v2/cards/<kind>/<session_id>`, recall/lifecycle under `/v1/v2/`, session config at `/v1/config/session/*`, and sensitivity audit at `/v1/sensitive/audit`.
 
 ## Extending
 

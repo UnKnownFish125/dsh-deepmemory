@@ -13,6 +13,8 @@ import sys
 from playwright.sync_api import sync_playwright
 
 BASE = os.environ.get("VERIFY_BASE_URL", "")
+WORKSPACE_TITLE = os.environ.get("VERIFY_WORKSPACE_TITLE", "")
+SESSION_TITLE = os.environ.get("VERIFY_SESSION_TITLE", "")
 if not BASE:
     print("VERIFY_BASE_URL 未设置"); sys.exit(1)
 
@@ -40,21 +42,55 @@ with sync_playwright() as p:
         later.first.click()
         page.wait_for_timeout(2000)
 
-    # 3. 新建会话（workspace.json 已带入，注册表有工作区）
-    new_btn = page.get_by_text("New Session", exact=True)
-    new_btn.first.wait_for(state="visible", timeout=30000)
-    # 遮罩兜底：Escape 关闭任何残留 modal
-    try:
-        new_btn.first.click(timeout=8000)
-    except Exception:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(1000)
-        new_btn.first.click()
-    page.wait_for_timeout(6000)
+    # Prefer a copied nonblank session so session-scoped tabs can be verified
+    # without consuming model tokens or relying on New Session state.
+    if SESSION_TITLE:
+        sessions = page.get_by_text(SESSION_TITLE, exact=True)
+        for index in range(sessions.count()):
+            if sessions.nth(index).is_visible():
+                sessions.nth(index).click()
+                page.wait_for_timeout(2500)
+                break
+
+    # 3. 仅在没有复制会话可打开时走 New Session 兜底。
+    if page.locator('textarea, [contenteditable="true"], [role="textbox"]').count() == 0:
+        new_btn = page.get_by_text("New Session", exact=True)
+        new_btn.first.wait_for(state="visible", timeout=30000)
+        try:
+            new_btn.first.click(timeout=8000)
+        except Exception:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(1000)
+            new_btn.first.click()
+        page.wait_for_timeout(6000)
+
+    # Fresh DSH homes may remain on the workspace chooser. Select the copied
+    # registry workspace explicitly, then start/reuse its blank conversation.
+    if page.locator('textarea, [contenteditable="true"], [role="textbox"]').count() == 0 and WORKSPACE_TITLE:
+        chooser = page.get_by_role("button", name="Choose workspace")
+        if chooser.count() > 0 and chooser.first.is_visible():
+            chooser.first.click()
+            page.wait_for_timeout(800)
+        candidates = page.get_by_text(WORKSPACE_TITLE, exact=True)
+        for index in reversed(range(candidates.count())):
+            if candidates.nth(index).is_visible():
+                candidates.nth(index).click()
+                page.wait_for_timeout(2000)
+                break
+        if page.locator('textarea, [contenteditable="true"], [role="textbox"]').count() == 0:
+            scoped_new = page.locator('button[aria-label^="New session in"]')
+            if scoped_new.count() > 0 and scoped_new.first.is_visible():
+                scoped_new.first.click()
+                page.wait_for_timeout(4000)
+            else:
+                new_btn = page.get_by_text("New Session", exact=True)
+                if new_btn.count() > 0 and new_btn.last.is_visible():
+                    new_btn.last.click()
+                page.wait_for_timeout(4000)
 
     # 3b. blank 会话隐藏 header/tab 条：发送一条消息解除（首条消息后 tab 环出现）
     box = page.locator('textarea, [contenteditable="true"], [role="textbox"]').first
-    if box.count() > 0:
+    if page.get_by_text("记忆", exact=True).count() == 0 and box.count() > 0:
         box.click()
         page.wait_for_timeout(800)
         box.type("hi")
@@ -65,7 +101,12 @@ with sync_playwright() as p:
 
     # 4. 对话页出现后点击「记忆」tab
     tab = page.get_by_text("记忆", exact=True).first
-    tab.wait_for(state="visible", timeout=30000)
+    try:
+        tab.wait_for(state="visible", timeout=30000)
+    except Exception:
+        print("CLIENT ERRORS:", errors[:10], file=sys.stderr)
+        print("BODY:", page.inner_text("body")[:1200], file=sys.stderr)
+        raise
     tab.click()
 
     # 5. 记忆面板渲染出内容
@@ -75,6 +116,16 @@ with sync_playwright() as p:
     if len(text) < 20:
         raise AssertionError("面板内容过短: " + repr(text[:80]))
     print("3. 记忆面板渲染 OK,", len(text), "字符; 首行:", text.splitlines()[0][:60])
+
+    # 会话状态卡必须按当前 session 创建、编辑和保存。
+    panel.get_by_text("编辑", exact=True).first.click()
+    card_editor = panel.locator(".dsh-mem-box").filter(has_text="会话状态卡 · 编辑").first
+    card_editor.wait_for(state="visible", timeout=10000)
+    goal_input = card_editor.locator(".dsh-mem-cfg-item").filter(has_text="目标").first.locator("input")
+    goal_input.fill("web-check-session-card")
+    card_editor.get_by_text("保存", exact=True).first.click()
+    panel.get_by_text("web-check-session-card", exact=True).wait_for(state="visible", timeout=10000)
+    print("3. 会话状态卡保存链路 OK")
 
     # 普通记忆必须保留内容编辑入口，并走通真实 PUT 保存链路。
     fixture = "web-check-memory-edit-fixture"
@@ -190,7 +241,21 @@ with sync_playwright() as p:
         raise AssertionError("6. 待办与进行中没有独立列")
     if board.locator(".dsh-mem-task-priority").count() == 0 and board.locator(".dsh-mem-task-card").count() > 0:
         raise AssertionError("6. 任务卡缺少 B 版颜色识别条")
-    print("6. B 版任务看板固定五列 OK")
+    # 从 UI 新建任务；server 会强制要求 workspace_id + session_id，成功即证明归属链路生效。
+    panel.get_by_text("+ 创建任务", exact=True).first.click()
+    create_box = panel.locator(".dsh-mem-box").first
+    create_box.locator("input").first.fill("web-check-workspace-task")
+    create_box.get_by_text("保存", exact=True).first.click()
+    task_card = board.get_by_text("web-check-workspace-task", exact=True)
+    task_card.wait_for(state="visible", timeout=10000)
+    task_card.click()
+    page.wait_for_timeout(500)
+    details = board.locator(".dsh-mem-task-card").filter(has_text="web-check-workspace-task").first
+    if details.locator("select").count() < 2:
+        raise AssertionError("6. 任务卡缺少会话绑定选择器")
+    if details.get_by_text("打开对话", exact=True).count() != 1:
+        raise AssertionError("6. 任务卡缺少打开关联对话按钮")
+    print("6. 工作区任务板 + 会话绑定链路 OK")
     panel.locator("button:visible").filter(has_text="返回").first.click()
     page.wait_for_timeout(700)
 
