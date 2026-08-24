@@ -2118,6 +2118,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._v2_call(lambda: {"card": store.get_state_card(card_key, kind)})
         if len(parts) == 4 and parts[2] == "memories":
             return self._v2_call(lambda: {"memory": self._v2_store().get_memory(int(parts[3]))})
+        if len(parts) >= 4 and parts[2] == "session-keys":
+            # GET /v1/v2/session-keys/<session_id>?workspace_id=
+            # 返回描述符（prefix），全 key 通过 POST create/rotate 获得。
+            store = self._v2_store()
+            session_id = unquote(parts[3])
+            workspace_id = qs.get("workspace_id", [""])[0] or ""
+            descriptor = store.get_session_key(workspace_id, session_id, issue=False)
+            if descriptor is None:
+                return self._v2_call(lambda: {"key": None, "error": "no session key yet"})
+            return self._v2_call(lambda: {"key": {
+                "prefix": descriptor["key_prefix"],
+                "session_id": descriptor["session_id"],
+                "workspace_id": descriptor["workspace_id"],
+                "has_full": False,
+            }})
+        if len(parts) >= 4 and parts[2] == "sessions" and len(parts) >= 6 and parts[4] == "memories" and parts[5] == "export":
+            # GET /v1/v2/sessions/<session_id>/memories/export?key=...&include_sensitive=
+            session_id = unquote(parts[3])
+            key = qs.get("key", [""])[0] or ""
+            include_sensitive = qs.get("include_sensitive", ["0"])[0] in ("1", "true")
+            store = self._v2_store()
+            workspace_id = ""
+            if key:
+                try:
+                    workspace_id, resolved_sid = store.resolve_session_key(key)
+                except Exception as exc:
+                    return self._send(403, {"error": str(exc)})
+                if resolved_sid != session_id:
+                    return self._send(403, {"error": "key does not own this session"})
+            else:
+                workspace_id = qs.get("workspace_id", [""])[0] or ""
+            return self._v2_call(lambda: store.export_session(workspace_id, session_id, include_sensitive))
         if path == "/v1/v2/recall":
             return self._send(405, {"error": "recall requires POST"})
         return None
@@ -2321,6 +2353,37 @@ class Handler(BaseHTTPRequestHandler):
                                                       actor=body.get("actor", "main_agent"),
                                                       reason=body.get("reason", "v2 memory created"))
                     return self._v2_call(lambda: {"memory": store.get_memory(memory_id)})
+                if path == "/v1/v2/session-keys":
+                    # POST /v1/v2/session-keys {workspace_id, session_id} → 创建（返回全 key 一次）
+                    workspace_id = str(body.get("workspace_id") or "").strip()
+                    session_id = str(body.get("session_id") or "").strip()
+                    if not workspace_id or not session_id:
+                        return self._send(400, {"error": "workspace_id and session_id are required"})
+                    created = store.get_session_key(workspace_id, session_id)
+                    return self._v2_call(lambda: {"key": created})
+                if len(parts) >= 5 and parts[2] == "session-keys" and parts[4] == "rotate":
+                    # POST /v1/v2/session-keys/<session_id>/rotate
+                    session_id = unquote(parts[3])
+                    workspace_id = str(body.get("workspace_id") or "").strip()
+                    if not workspace_id:
+                        return self._send(400, {"error": "workspace_id is required"})
+                    rotated = store.rotate_session_key(workspace_id, session_id)
+                    return self._v2_call(lambda: {"key": rotated})
+                if len(parts) >= 6 and parts[2] == "sessions" and parts[4] == "memories" and parts[5] == "import":
+                    # POST /v1/v2/sessions/<session_id>/memories/import
+                    # body: {key?, payload, mode?: merge|replace, target_session_id?}
+                    session_id = unquote(parts[3])
+                    target = str(body.get("target_session_id") or session_id).strip()
+                    mode = str(body.get("mode") or "merge").strip()
+                    if mode not in ("merge", "replace"):
+                        return self._send(400, {"error": "mode must be merge or replace"})
+                    result = store.import_session_memories(target, body.get("payload") or {}, mode=mode)
+                    return self._v2_call(lambda: result)
+                if len(parts) >= 5 and parts[2] == "sessions" and parts[4] == "purge":
+                    # POST /v1/v2/sessions/<session_id>/purge {hard?}
+                    session_id = unquote(parts[3])
+                    hard = bool(body.get("hard"))
+                    return self._v2_call(lambda: store.purge_session(session_id, hard))
                 if path == "/v1/v2/tasks":
                     if not body.get("title"):
                         return self._send(400, {"error": "title is required"})

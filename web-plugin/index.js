@@ -101,30 +101,51 @@ async function summarizeGroup(llm, route, group) {
 }
 
 async function extractSessionCard(llm, dialog, existingCard) {
-  let output = ''
-  const stream = llm.stream({
-    provider: 'uuapi',
-    model: 'deepseek-v4-flash',
-    system: [
-      '你是会话状态卡提取器。根据对话片段提取当前会话状态。',
-      '只输出一个 JSON 对象，不要 markdown：',
-      '{"card":null} 或 {"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]}}',
-      '输出必须是合并现有状态与新增对话后的完整卡；goal/current_plan 各一句；数组各最多 4 条；没有明确任务、主题或状态变化时 card 为 null。',
-    ].join('\n'),
-    messages: [{ role: 'user', content: [{ type: 'text', text: (
-      '现有状态卡：\n' + JSON.stringify(existingCard || {}) + '\n\n新增对话：\n' + dialog
-    ).slice(0, 12000) }] }],
-    temperature: 0.1,
-    maxTokens: 1600,
-  })
-  for await (const chunk of stream) {
-    if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') output += chunk.text
-    if (chunk && (chunk.type === 'error' || chunk.type === 'aborted')) throw new Error('state card extraction stream failed')
+  let lastError = ''
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let output = ''
+    try {
+      const stream = llm.stream({
+        provider: 'uuapi',
+        model: 'deepseek-v4-flash',
+        system: [
+          '你是会话状态卡提取器。根据对话片段提取当前会话状态。',
+          '只输出一个 JSON 对象，不要 markdown：',
+          '{"card":null} 或 {"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]}}',
+          '输出必须是合并现有状态与新增对话后的完整卡；goal/current_plan 各一句；数组各最多 4 条；没有明确任务、主题或状态变化时 card 为 null。',
+        ].join('\n'),
+        messages: [{ role: 'user', content: [{ type: 'text', text: (
+          '现有状态卡：\n' + JSON.stringify(existingCard || {}) + '\n\n新增对话：\n' + dialog
+        ).slice(0, 12000) }] }],
+        temperature: 0.1,
+        maxTokens: 1600,
+      })
+      for await (const chunk of stream) {
+        if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') output += chunk.text
+        if (chunk && (chunk.type === 'error' || chunk.type === 'aborted')) throw new Error('state card extraction stream failed: ' + String(chunk.error || chunk.reason || 'aborted'))
+      }
+    } catch (error) {
+      lastError = 'llm_stream:' + String((error && error.message) || error)
+      if (attempt === 1) break
+      continue
+    }
+    const start = output.indexOf('{')
+    const end = output.lastIndexOf('}')
+    if (start < 0 || end <= start) {
+      lastError = 'no_json(len=' + output.length + ')'
+      if (attempt === 1) break
+      continue
+    }
+    try {
+      const parsed = JSON.parse(output.slice(start, end + 1))
+      return parsed.card || null
+    } catch (error) {
+      lastError = 'parse:' + String((error && error.message) || error)
+      if (attempt === 1) break
+      continue
+    }
   }
-  const start = output.indexOf('{')
-  const end = output.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('state card extraction returned no JSON')
-  return JSON.parse(output.slice(start, end + 1)).card || null
+  throw new Error('state card extraction failed: ' + lastError)
 }
 
 function eventText(event) {
@@ -568,8 +589,12 @@ export function apply(ctx) {
           res.end(JSON.stringify(result))
         })
         .catch((error) => {
-          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: String((error && error.message) || error) }))
+          const message = String((error && error.message) || error)
+          // 抽取/LLM 失败属于暂时不可用（可重试），不是客户端/服务器错误 → 503。
+          // HTTP 500 只保留给真正的内部异常。
+          const status = message.includes('state card extraction') || message.includes('llm_stream') ? 503 : 500
+          res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ status: status === 503 ? 'extract_failed' : 'error', error: message }))
         })
     },
   })

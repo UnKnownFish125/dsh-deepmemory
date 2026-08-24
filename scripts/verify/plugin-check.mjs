@@ -19,6 +19,7 @@ globalThis.fetch = async (url, options = {}) => {
   const pathname = new URL(url).pathname
   let data = { value: null }
   if (pathname.endsWith('/memories/add')) data = { id: 1 }
+  if (pathname.endsWith('/memories/add_batch')) data = { added: [1] }
   if (pathname.endsWith('/memories/search')) {
     const payload = options.body ? JSON.parse(options.body) : {}
     const sessionId = payload.session_id || 'tool'
@@ -26,7 +27,9 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (pathname.endsWith('/briefing')) data = { count: 0, briefing: '' }
   if (pathname.endsWith('/config/session')) data = { config: { 'state_card.auto_generate': false, 'context_automation.enabled': contextAutomationEnabled, 'context_automation.memory_completion_k': 5 } }
-  if (pathname.includes('/v2/cards/')) data = { card: null }
+  if (pathname.includes('/v2/cards/') && (options.method || 'GET') === 'GET') data = { card: null }
+  if (pathname.includes('/v2/cards/') && options.method === 'PUT') data = { card: { version: 1 } }
+  if (pathname.endsWith('/v2/tasks') && options.method === 'POST') data = { task: { id: 'task-1' } }
   return { ok: true, status: 200, json: async () => data }
 }
 
@@ -112,9 +115,14 @@ if (llmCalls.length !== 1) throw new Error('记忆抽取未调用一次 LLM')
 if (llmCalls[0].provider !== 'uuapi' || llmCalls[0].model !== 'deepseek-v4-flash') {
   throw new Error('记忆抽取模型路由异常: ' + JSON.stringify({ provider: llmCalls[0].provider, model: llmCalls[0].model }))
 }
-if (requests.some((item) => item.method === 'PUT' && item.url.includes('/v1/v2/cards/'))) {
-  throw new Error('关闭 state_card.auto_generate 后仍写入状态卡')
-}
+// AI 状态卡写回：抽取到 card 后应调用 PUT（§3.5 新契约，不再"丢弃 result.card"）
+const cardWrites = requests.filter((item) => item.method === 'PUT' && item.url.includes('/v1/v2/cards/'))
+if (cardWrites.length !== 1) throw new Error('AI 状态卡写回未按契约调用一次 PUT /v1/v2/cards/')
+const cardBody = JSON.parse(cardWrites[0].body || '{}')
+if (cardBody.actor !== 'main_agent') throw new Error('AI 状态卡写回 actor 异常: ' + cardBody.actor)
+// AI 任务板写入：LLM 无明确任务时不应创建任务
+const taskWrites = requests.filter((item) => item.method === 'POST' && item.url.endsWith('/v1/v2/tasks'))
+if (taskWrites.length !== 0) throw new Error('无明确任务时不应创建 tasks')
 fs.rmSync(tokenHome, { recursive: true, force: true })
 if (originalDshHome === undefined) delete process.env.DSH_HOME
 else process.env.DSH_HOME = originalDshHome

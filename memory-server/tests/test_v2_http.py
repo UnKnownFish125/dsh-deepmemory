@@ -262,5 +262,85 @@ class V2HttpTest(unittest.TestCase):
         self.assertEqual(400, code)
 
 
+class SessionKeyMigrationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = self.tmp.name
+        server.DB_PATH = os.path.join(root, "memory.db")
+        server.INDEX_PATH = os.path.join(root, "memory.faiss")
+        server.BACKUP_DIR = os.path.join(root, "backups")
+        self.original_api_token_file = server.API_TOKEN_FILE
+        server.API_TOKEN_FILE = os.path.join(root, "api-token")
+        os.makedirs(server.BACKUP_DIR)
+        server._index = None
+        server._search_cache.clear()
+        server.init_db()
+        self.httpd = server.ThreadingHTTPServer(("localhost", 0), server.Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever)
+        self.thread.start()
+        self.base = f"http://localhost:{self.httpd.server_port}"
+
+    def tearDown(self):
+        server.API_TOKEN_FILE = self.original_api_token_file
+        self.httpd.shutdown()
+        self.thread.join(timeout=5)
+        self.httpd.server_close()
+        self.tmp.cleanup()
+
+    def request(self, method, path, payload=None, headers=None):
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request_headers = {"Content-Type": "application/json"}
+        request_headers.update(headers or {})
+        req = urllib.request.Request(self.base + path, data=data, method=method, headers=request_headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.load(exc)
+
+    def test_session_key_create_rotate_revoke(self):
+        sid = "session-key-test"
+        code, created = self.request("POST", "/v1/v2/session-keys", {"workspace_id": "ws1", "session_id": sid})
+        self.assertEqual(200, code)
+        full = created["key"]["key"]
+        self.assertTrue(full.startswith("dmk."))
+        self.assertTrue(created["key"]["prefix"].startswith("dmk."))
+        # descriptor 不泄露全 key
+        code, desc = self.request("GET", f"/v1/v2/session-keys/{sid}?workspace_id=ws1")
+        self.assertEqual(200, code)
+        self.assertNotIn("key", desc["key"])
+        # rotate 后旧 key 失效、新 key 可用
+        code, rotated = self.request("POST", f"/v1/v2/session-keys/{sid}/rotate", {"workspace_id": "ws1"})
+        self.assertEqual(200, code)
+        new_full = rotated["key"]["key"]
+        self.assertNotEqual(full, new_full)
+        code, blocked = self.request("GET", f"/v1/v2/sessions/{sid}/memories/export?key={full}")
+        self.assertEqual(403, code)
+
+    def test_session_export_import_purge(self):
+        source, target = "session-export-src", "session-import-dst"
+        code, _ = self.request("POST", "/v1/memories/add", {
+            "content": "待迁移事实", "type": "fact", "domain": "work",
+            "scope": "session", "session_id": source, "workspace_id": "ws1",
+        })
+        self.assertEqual(200, code)
+        code, exp = self.request("GET", f"/v1/v2/sessions/{source}/memories/export")
+        self.assertEqual(200, code)
+        self.assertEqual(1, len(exp["memories"]))
+        self.assertEqual("待迁移事实", exp["memories"][0]["content"])
+        code, imported = self.request("POST", f"/v1/v2/sessions/{target}/memories/import", {"payload": exp, "mode": "merge"})
+        self.assertEqual(200, code)
+        self.assertEqual(1, imported["inserted"])
+        with sqlite3.connect(server.DB_PATH) as conn:
+            n = conn.execute("SELECT COUNT(*) FROM documents WHERE session_id=? AND status='active'", (target,)).fetchone()[0]
+        self.assertEqual(1, n)
+        code, purged = self.request("POST", f"/v1/v2/sessions/{target}/purge", {})
+        self.assertEqual(200, code)
+        self.assertEqual(1, purged["documents"])
+        with sqlite3.connect(server.DB_PATH) as conn:
+            archived = conn.execute("SELECT COUNT(*) FROM documents WHERE session_id=? AND status='archived'", (target,)).fetchone()[0]
+        self.assertEqual(1, archived)
+
+
 if __name__ == "__main__":
     unittest.main()

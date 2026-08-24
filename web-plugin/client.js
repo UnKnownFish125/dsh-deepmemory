@@ -15,6 +15,11 @@ const I18N = {
     panelTitle: 'deepmemory 记忆控制', config: '配置', graph: '图谱', archive: '归档', maintain: '维护',
     back: '返回', refresh: '刷新', loading: '加载中…', search: '搜索', save: '保存', saved: '已保存',
     on: '已开启', off: '已关闭', memories: '记忆', stateCard: '会话状态卡', noCard: '（无状态卡）',
+    sessionMaintain: '会话维护', sessionKey: '记忆库 key', noKey: '未创建',
+    sessionKeyCreate: '创建 key', sessionKeyRotate: '轮换', sessionExport: '导出记忆', sessionPurge: '归档清理',
+    sessionKeyCreated: 'key 已创建。请立即复制保存；轮换后旧 key 失效。',
+    sessionKeyRotated: 'key 已轮换，旧 key 立即失效。',
+    exported: '已导出记忆（不含敏感原文）。', purged: '已归档清理：', confirmPurge: '确定归档该会话的全部记忆/状态卡/任务？（保留溯源，可恢复）',
     manual: '手动写入', newPlaceholder: '新的记忆内容…', retrieval: '检索', searchPlaceholder: '语义检索记忆…',
     globalSection: '公用记忆（全局）', localSection: '工作区 / 会话记忆', empty: '（暂无）', count: '条',
     importance: '重要性', delete: '删除', scopeTitle: '调整作用域', domainTitle: '调整域',
@@ -49,6 +54,11 @@ const I18N = {
     panelTitle: 'deepmemory Memory', config: 'Config', graph: 'Graph', archive: 'Archive', maintain: 'Maintain',
     back: 'Back', refresh: 'Refresh', loading: 'Loading…', search: 'Search', save: 'Save', saved: 'Saved',
     on: 'Enabled', off: 'Disabled', memories: 'memories', stateCard: 'Conversation Card', noCard: '(no card)',
+    sessionMaintain: 'Session Maintenance', sessionKey: 'Memory key', noKey: 'not created',
+    sessionKeyCreate: 'Create key', sessionKeyRotate: 'Rotate', sessionExport: 'Export', sessionPurge: 'Purge',
+    sessionKeyCreated: 'Key created. Copy it now; after rotation the old key stops working.',
+    sessionKeyRotated: 'Key rotated; old key is now invalid.',
+    exported: 'Session exported (sensitive content withheld).', purged: 'Purged: ', confirmPurge: 'Archive all memories/cards/tasks of this session? (recoverable)',
     manual: 'Manual Write', newPlaceholder: 'New memory…', retrieval: 'Retrieval', searchPlaceholder: 'Semantic search…',
     globalSection: 'Shared (global)', localSection: 'Workspace / Session', empty: '(empty)', count: 'items',
     importance: 'imp', delete: 'Delete', scopeTitle: 'Adjust scope', domainTitle: 'Adjust domain',
@@ -98,6 +108,8 @@ const PANEL_CSS = `
 .dsh-mem-btn { border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.45)); background:var(--dsw-alias-bg-layer-1, transparent); color:var(--dsw-alias-label-primary, inherit); border-radius:6px; padding:4px 12px; cursor:pointer; font:inherit; white-space:nowrap; }
 .dsh-mem-btn:hover { background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,.16)); }
 .dsh-mem-btn-primary { border-color:var(--dsw-alias-brand-primary, #4c8dff); color:var(--dsw-alias-brand-primary, #4c8dff); }
+.dsh-mem-btn-danger { border-color:#d34848; color:#f87171; }
+.dsh-mem-btn-danger:hover { background:rgba(211,72,72,.14); }
 .dsh-mem-del { color:#e05858; border:none; background:transparent; cursor:pointer; font-size:13px; padding:2px 4px; }
 .dsh-mem-del:hover { text-decoration:underline; }
 .dsh-mem-srcpre { margin:6px 0 0; padding:8px; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.08)); border:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.2)); border-radius:6px; font-size:11px; line-height:1.5; white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; opacity:.85; }
@@ -1026,6 +1038,10 @@ export function apply(ctx) {
     const [cardEdit, setCardEdit] = React.useState(false)
     const [cardDraft, setCardDraft] = React.useState(null)
     const [cardInitializing, setCardInitializing] = React.useState(false)
+    const [keyPrefix, setKeyPrefix] = React.useState('')
+    const [keyFull, setKeyFull] = React.useState('')
+    const [keyRevealing, setKeyRevealing] = React.useState(false)
+    const [sessionOpsBusy, setSessionOpsBusy] = React.useState(false)
 
     const sid = props && props.sessionId ? String(props.sessionId) : ''
     const sessionsState = typeof props.useSessions === 'function'
@@ -1271,6 +1287,62 @@ export function apply(ctx) {
       refresh()
     }
 
+    // ── 会话维护：记忆库 key + 导出 / 导入 / 归档清理 ─────────────────────
+    async function loadSessionKey() {
+      if (!sid) return
+      const res = await api('GET', '/v1/v2/session-keys/' + encodeURIComponent(sid) + '?workspace_id=' + encodeURIComponent(workspaceId))
+      if (res && res.key && res.key.prefix) setKeyPrefix(String(res.key.prefix))
+      else if (res && res.key && res.key.error) setKeyPrefix('')
+      else if (res && res.error) { setMsg(t('cfgFail') + res.error) }
+    }
+    async function issueSessionKey() {
+      if (!sid || sessionOpsBusy) return
+      setSessionOpsBusy(true)
+      const res = await api('POST', '/v1/v2/session-keys', { workspace_id: workspaceId, session_id: sid })
+      setSessionOpsBusy(false)
+      if (res && res.key && res.key.key) { setKeyPrefix(String(res.key.prefix)); setKeyFull(String(res.key.key)); setMsg(t('sessionKeyCreated')) }
+      else setMsg(t('cfgFail') + ((res && res.error) || ''))
+      await loadSessionKey()
+    }
+    async function rotateSessionKey() {
+      if (!sid || sessionOpsBusy) return
+      setSessionOpsBusy(true)
+      const res = await api('POST', '/v1/v2/session-keys/' + encodeURIComponent(sid) + '/rotate', { workspace_id: workspaceId })
+      setSessionOpsBusy(false)
+      if (res && res.key && res.key.key) { setKeyFull(String(res.key.key)); setKeyPrefix(String(res.key.prefix)); setMsg(t('sessionKeyRotated')) }
+      else setMsg(t('cfgFail') + ((res && res.error) || ''))
+    }
+    function exportSessionMemories() {
+      if (!sid) return
+      // 若 key 未拿到则先 issue（通常已由维护区创建）
+      const doExport = function () {
+        fetch('/mem-api/v1/v2/sessions/' + encodeURIComponent(sid) + '/memories/export')
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)) })
+          .then(function (data) {
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = 'memory-' + sid.slice(0, 8) + '.json'
+            a.click()
+            setTimeout(function () { URL.revokeObjectURL(url) }, 3000)
+            setMsg(t('exported'))
+          })
+          .catch(function (e) { setMsg(t('cfgFail') + String(e && e.message || e)) })
+      }
+      if (!keyPrefix) issueSessionKey().then(doExport)  // 若刚创建则导出
+      else doExport()
+    }
+    async function purgeSession() {
+      if (!sid || sessionOpsBusy) return
+      if (!window.confirm(t('confirmPurge'))) return
+      setSessionOpsBusy(true)
+      const res = await api('POST', '/v1/v2/sessions/' + encodeURIComponent(sid) + '/purge', {})
+      setSessionOpsBusy(false)
+      if (res && res.session_id) { setMsg(t('purged') + ' ' + res.documents + ' · ' + res.tasks); refresh() }
+      else setMsg(t('cfgFail') + ((res && res.error) || ''))
+    }
+
     const globalMems = memories.filter(function (m) { return m && m.scope === 'global' })
     const localMems = memories.filter(function (m) { return m && m.scope !== 'global' })
 
@@ -1355,6 +1427,19 @@ export function apply(ctx) {
             )
           }) : React.createElement('div', { style: { opacity: .6 } }, t('noCard')),
         ),
+      React.createElement('div', { className: 'dsh-mem-box' },
+        React.createElement('div', { className: 'dsh-mem-section-head' },
+          React.createElement('span', { className: 'dsh-mem-title' }, t('sessionMaintain')),
+        ),
+        React.createElement('div', { className: 'dsh-mem-form' },
+          React.createElement('span', { className: 'dsh-mem-imp' }, t('sessionKey') + ': ' + (keyPrefix || t('noKey'))),
+          keyFull ? React.createElement('span', { className: 'dsh-mem-imp', style: { wordBreak: 'break-all' } }, keyFull) : null,
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: issueSessionKey, disabled: sessionOpsBusy }, t('sessionKeyCreate')),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: rotateSessionKey, disabled: sessionOpsBusy }, t('sessionKeyRotate')),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: exportSessionMemories, disabled: sessionOpsBusy }, t('sessionExport')),
+          React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-danger', onClick: purgeSession, disabled: sessionOpsBusy }, t('sessionPurge')),
+        ),
+      ),
       revisions.length ? React.createElement(React.Fragment, null,
         React.createElement('div', { className: 'dsh-mem-revision-head' },
           React.createElement('div', { className: 'dsh-mem-title', style: { flex: 1 } }, t('cardRevisions') + ' · ' + revisions.length),

@@ -65,8 +65,9 @@ export function apply(ctx, config = {}) {
     '5. entities：抽取记忆中的实体名词列表（人名/项目/工具/概念），每项 {name, kind: person|project|tool|concept|other}。',
     '6. relations：实体之间的关系边列表（可 0-3 条），每项 {source, relation, target}，source/target 必须是 entities 里出现过的实体名，relation 用短动词短语（如 "使用"、"依赖"、"属于"、"负责"）。',
     '7. card：增量更新当前会话状态卡（goal/current_plan 各一句话；key_decisions 追加新决定≤3条；in_progress/next_steps 各≤4条；无需变化时 card 为 null）。',
+    '8. tasks：仅当对话中出现明确任务/子任务时才输出数组（title + status∈planned|todo|in_progress|completed|failed + 可选 parent/blocked/reason）；无明确任务时 tasks 为 []。',
     '8. 严格只输出一个 JSON 对象（不要 markdown 代码块）：',
-    '{"memories":[{"content":"...","key_facts":"词1;词2","persona_summary":"...或空","type":"fact","domain":"work","scope":"workspace","importance":0.7,"atoms":[{"atom_type":"factual","content":"...","ttl_days":180,"decay_type":"exponential","importance":0.6}],"entities":[{"name":"...","kind":"project"}],"relations":[{"source":"...","relation":"...","target":"..."}]}],"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]}}',
+    '{"memories":[{"content":"...","key_facts":"词1;词2","persona_summary":"...或空","type":"fact","domain":"work","scope":"workspace","importance":0.7,"atoms":[{"atom_type":"factual","content":"...","ttl_days":180,"decay_type":"exponential","importance":0.6}],"entities":[{"name":"...","kind":"project"}],"relations":[{"source":"...","relation":"...","target":"..."}]}],"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]},"tasks":[{"title":"...","status":"todo"}]}',
     '没有值得记忆的内容时 memories 为 []。',
   ].join('\n')
 
@@ -191,11 +192,14 @@ export function apply(ctx, config = {}) {
     }
     const start = out.indexOf('{')
     const end = out.lastIndexOf('}')
-    if (start < 0 || end <= start) return null
+    if (start < 0 || end <= start) {
+      console.error('[deepmemory] extract no JSON in LLM output (len=' + out.length + '): ' + out.slice(0, 300).replace(/\s+/g, ' '))
+      return null
+    }
     try {
       return JSON.parse(out.slice(start, end + 1))
     } catch (e) {
-      console.error('[deepmemory] extract parse failed: ' + out.slice(0, 200))
+      console.error('[deepmemory] extract parse failed: ' + out.slice(0, 240).replace(/\s+/g, ' '))
       return null
     }
   }
@@ -360,6 +364,59 @@ export function apply(ctx, config = {}) {
           state.extractCount += items.length
           console.log('[deepmemory] extracted ' + items.length + ' memories (total ' + state.extractCount + '): ' + JSON.stringify((res.data && res.data.added) || []).slice(0, 400))
         }
+      }
+    }
+    // AI 驱动状态卡更新：抽取到 card 即写回 v2 卡（增量修订，expected_version 防止覆盖）
+    if (INJECT_CARD && result.card && typeof result.card === 'object') {
+      try {
+        const cur = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid))
+        const existing = cur.ok && cur.data && cur.data.card ? cur.data.card : null
+        const put = await http('PUT', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid), {
+          expected_version: existing ? Number(existing.version || 0) : 0,
+          payload: {
+            goal: String(result.card.goal || ''),
+            current_plan: String(result.card.current_plan || ''),
+            key_decisions: Array.isArray(result.card.key_decisions) ? result.card.key_decisions.slice(0, 4) : [],
+            in_progress: Array.isArray(result.card.in_progress) ? result.card.in_progress.slice(0, 4) : [],
+            next_steps: Array.isArray(result.card.next_steps) ? result.card.next_steps.slice(0, 4) : [],
+          },
+          actor: 'main_agent',
+          reason: 'AI turn-stopping state card sync',
+        })
+        if (put.ok) {
+          memoryChanged = true
+          console.log('[deepmemory] AI updated state card v' + ((put.data && put.data.card && put.data.card.version) || '?') + ' session ' + sid.slice(0, 12))
+        } else {
+          console.log('[deepmemory] AI card write skipped: ' + (put.error || 'unknown'))
+        }
+      } catch (e) {
+        console.log('[deepmemory] AI card write failed: ' + String(e))
+      }
+    }
+    // AI 任务板更新：仅明确的 tasks 输出才落盘
+    if (result.tasks && Array.isArray(result.tasks) && result.tasks.length) {
+      try {
+        for (const t of result.tasks.slice(0, 5)) {
+          const title = String(t && t.title || '').trim().slice(0, 120)
+          if (!title) continue
+          const status = ['planned', 'todo', 'in_progress', 'completed', 'failed'].includes(t.status) ? t.status : 'todo'
+          const created = await http('POST', '/v1/v2/tasks', {
+            title: title,
+            status: status,
+            workspace_id: WORKSPACE,
+            session_id: sid,
+            description: String(t.description || '').slice(0, 500),
+            blocked: status === 'in_progress' ? Boolean(t.blocked) : false,
+            block_reason: String(t.reason || t.block_reason || ''),
+          })
+          if (created.ok) {
+            console.log('[deepmemory] AI task created: ' + title + ' [' + status + ']')
+          } else {
+            console.log('[deepmemory] AI task create failed: ' + (created.error || 'unknown'))
+          }
+        }
+      } catch (e) {
+        console.log('[deepmemory] AI tasks write failed: ' + String(e))
       }
     }
     if (memoryChanged) await refreshMemoryCache(sid, recentQuery(sid, dialog.slice(-300)))

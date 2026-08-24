@@ -186,6 +186,19 @@ CREATE TABLE IF NOT EXISTS memory_archives (
   CHECK(period_end IS NULL OR period_start IS NULL OR period_end >= period_start)
 );
 
+CREATE TABLE IF NOT EXISTS session_keys (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
+  key_hash TEXT NOT NULL UNIQUE,
+  key_prefix TEXT NOT NULL DEFAULT '',
+  created_at REAL NOT NULL,
+  rotated_at REAL,
+  revoked_at REAL,
+  updated_at REAL,
+  UNIQUE(workspace_id, session_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, blocked);
 CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, created_at);
@@ -377,6 +390,14 @@ def install_v2_schema(conn):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cards_session ON state_cards(session_id,kind)"
         )
+    if "session_keys" in {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }:
+        _ensure_columns(conn, "session_keys", (
+            ("updated_at", "REAL"),
+            ("rotated_at", "REAL"),
+            ("revoked_at", "REAL"),
+        ))
 
 
 class V2Store:
@@ -648,6 +669,308 @@ class V2Store:
                 (workspace_id, session_id, time.time(), task_id),
             )
         return self.get_task(task_id)
+
+    # ---------------------------------------------------------------- session keys
+
+    @staticmethod
+    def _new_session_key(workspace_id, session_id):
+        """Generate an opaque, URL-safe session key with a stable prefix.
+
+        The full key is only ever exposed once (creation / rotate response);
+        storage keeps only its SHA-256 together with the display prefix.
+        """
+        raw = uuid.uuid4().hex + uuid.uuid4().hex
+        prefix = "dmk." + hashlib.sha256((workspace_id + "/" + session_id).encode("utf-8")).hexdigest()[:10]
+        return prefix + "." + raw, prefix
+
+    @staticmethod
+    def _key_hash(key):
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    def get_session_key(self, workspace_id, session_id, issue=True):
+        """Return the existing (or newly created) opaque key for one session memory store.
+
+        The key itself is returned once at creation; callers normally receive the
+        public descriptor (prefix) and only get the full key from creation/rotate
+        responses or memory maintenance UI after authorized access.
+        """
+        workspace_id = str(workspace_id or "").strip()
+        session_id = str(session_id or "").strip()
+        if not workspace_id or not session_id:
+            raise DomainError("workspace_id and session_id are required")
+        now = time.time()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_keys WHERE workspace_id=? AND session_id=?",
+                (workspace_id, session_id),
+            ).fetchone()
+            if row is not None and row["revoked_at"] is None:
+                return dict(row)
+            if not issue:
+                return None
+            # 同一 (workspace_id, session_id) 永远单行：有 revoked 行则就地替换 key。
+            key, prefix = self._new_session_key(workspace_id, session_id)
+            if row is not None:
+                conn.execute(
+                    "UPDATE session_keys SET key_hash=?,key_prefix=?,rotated_at=?,revoked_at=NULL,updated_at=? "
+                    "WHERE id=?",
+                    (self._key_hash(key), prefix, now, now, row["id"]),
+                )
+                row_id = str(row["id"])
+            else:
+                row_id = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO session_keys (id,workspace_id,session_id,key_hash,key_prefix,created_at,rotated_at,revoked_at) "
+                    "VALUES (?,?,?,?,?,?,NULL,NULL)",
+                    (row_id, workspace_id, session_id, self._key_hash(key), prefix, now),
+                )
+            return {"id": row_id, "workspace_id": workspace_id, "session_id": session_id, "key": key, "prefix": prefix, "created_at": now}
+
+    def rotate_session_key(self, workspace_id, session_id):
+        """Rotate the session key: revoke the old record and issue a fresh one."""
+        workspace_id = str(workspace_id or "").strip()
+        session_id = str(session_id or "").strip()
+        if not workspace_id or not session_id:
+            raise DomainError("workspace_id and session_id are required")
+        now = time.time()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_keys WHERE workspace_id=? AND session_id=?",
+                (workspace_id, session_id),
+            ).fetchone()
+        if row is None:
+            return self.get_session_key(workspace_id, session_id)
+        key, prefix = self._new_session_key(workspace_id, session_id)
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE session_keys SET key_hash=?,key_prefix=?,rotated_at=?,revoked_at=NULL,updated_at=? "
+                "WHERE id=?",
+                (self._key_hash(key), prefix, now, now, row["id"]),
+            )
+        return {"id": str(row["id"]), "workspace_id": workspace_id, "session_id": session_id, "key": key, "prefix": prefix, "created_at": now, "rotated": True}
+
+    def resolve_session_key(self, key):
+        """Resolve an opaque key to (workspace_id, session_id) or raise NotFoundError."""
+        key = str(key or "").strip()
+        if not key:
+            raise DomainError("session key is required")
+        digest = self._key_hash(key)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT workspace_id,session_id FROM session_keys WHERE key_hash=? AND revoked_at IS NULL",
+                (digest,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("session key is invalid or rotated")
+        return str(row["workspace_id"]), str(row["session_id"])
+
+    # ---------------------------------------------------------------- session export / import / purge
+
+    def export_session(self, workspace_id, session_id, include_sensitive=False):
+        """Export one session's active memory store (memories + card) for migration.
+
+        Sensitive content is never exported in the clear unless explicitly
+        authorized at the HTTP layer; this domain method only carries the
+        sensitivity flags and redacted placeholders.
+        """
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            raise DomainError("session_id is required")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id,content,key_facts,persona_summary,canonical_summary,type,domain,scope,"
+                "importance,keywords,has_sensitive,sensitive_types,status,memory_class,created_at "
+                "FROM documents WHERE session_id=? AND status='active'",
+                (session_id,),
+            ).fetchall()
+            card = conn.execute(
+                "SELECT payload,version FROM state_cards WHERE session_id=? AND kind IN ('task','daily') "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        memories = []
+        for r in rows:
+            item = {
+                "content": str(r["content"] or ""),
+                "key_facts": str(r["key_facts"] or ""),
+                "type": str(r["type"] or "fact"),
+                "domain": str(r["domain"] or "work"),
+                "scope": str(r["scope"] or "session"),
+                "importance": float(r["importance"] or 0.5),
+                "keywords": str(r["keywords"] or ""),
+                "has_sensitive": bool(r["has_sensitive"]),
+                "sensitive_types": json.loads(r["sensitive_types"] or "[]"),
+            }
+            if include_sensitive:
+                item["persona_summary"] = str(r["persona_summary"] or "")
+                item["canonical_summary"] = str(r["canonical_summary"] or "")
+            memories.append(item)
+        return {
+            "format": "deepmemory-session-v1",
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "exported_at": time.time(),
+            "memories": memories,
+            "card": dict(card) if card else None,
+        }
+
+    def import_session_memories(self, target_session_id, payload, mode="merge"):
+        """Import an exported session memory bundle into another session store.
+
+        merge:  fingerprint-dedupe against existing active documents.
+        replace: archive existing active documents of the target session first.
+        Returns per-item decision counts.
+        """
+        target_session_id = str(target_session_id or "").strip()
+        if not target_session_id:
+            raise DomainError("target session_id is required")
+        memories = payload.get("memories") if isinstance(payload, dict) else None
+        if not isinstance(memories, list):
+            raise ValueError("payload.memories is required")
+        now = time.time()
+        inserted = 0
+        merged = 0
+        replaced = 0
+        with self._connect() as conn:
+            if mode == "replace":
+                cur = conn.execute(
+                    "UPDATE documents SET status='archived',updated_at=? WHERE session_id=? AND status='active'",
+                    (now, target_session_id),
+                )
+                replaced = cur.rowcount
+            for m in memories:
+                if not isinstance(m, dict) or not str(m.get("content") or "").strip():
+                    continue
+                content = str(m["content"]).strip()[:500]
+                if mode == "merge":
+                    dup = conn.execute(
+                        "SELECT id FROM documents WHERE session_id=? AND status='active' AND content=?",
+                        (target_session_id, content),
+                    ).fetchone()
+                    if dup is not None:
+                        merged += 1
+                        continue
+                conn.execute(
+                    "INSERT INTO documents (uuid,content,key_facts,persona_summary,type,domain,scope,"
+                    "workspace_id,session_id,importance,created_at,last_access_at,status,keywords,"
+                    "has_sensitive,sensitive_types,time_raw,time_precision,time_confidence,time_inferred,"
+                    "sensitivity_level,confirmation_status,source_quality,actionability,reject_penalty,"
+                    "source_ref,source_message_id,trace_id,revision_version,memory_class,storage_tier) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(uuid.uuid4()),
+                        content,
+                        str(m.get("key_facts") or ""),
+                        str(m.get("persona_summary") or ""),
+                        str(m.get("type") or "fact"),
+                        str(m.get("domain") or "work"),
+                        str(m.get("scope") or "session"),
+                        str(m.get("workspace_id") or ""),
+                        target_session_id,
+                        float(m.get("importance") or 0.5),
+                        now,
+                        now,
+                        "active",
+                        str(m.get("keywords") or ""),
+                        int(bool(m.get("has_sensitive"))),
+                        json.dumps(m.get("sensitive_types") or []),
+                        "",
+                        "unknown",
+                        0.0,
+                        1,
+                        "normal",
+                        "unconfirmed",
+                        0.5,
+                        0.0,
+                        0.0,
+                        "",
+                        "",
+                        "",
+                        0,
+                        "semantic",
+                        "active",
+                    ),
+                )
+                inserted += 1
+            if payload.get("card") and isinstance(payload["card"], dict):
+                card = payload["card"]
+                existing = conn.execute(
+                    "SELECT id,version FROM state_cards WHERE session_id=? AND kind=?",
+                    (target_session_id, "daily"),
+                ).fetchone()
+                now_ts = now
+                if existing is None:
+                    conn.execute(
+                        "INSERT INTO state_cards (id,card_key,session_id,kind,task_id,payload,version,"
+                        "created_at,updated_at) VALUES (?,?,?,?,NULL,?,1,?,?)",
+                        (
+                            str(uuid.uuid4()),
+                            "card-" + target_session_id[-8:],
+                            target_session_id,
+                            "daily",
+                            _json(card),
+                            now_ts,
+                            now_ts,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE state_cards SET payload=?,version=version+1,updated_at=? WHERE id=?",
+                        (_json(card), now_ts, existing["id"]),
+                    )
+        return {"inserted": inserted, "merged": merged, "replaced": replaced, "mode": mode}
+
+    def purge_session(self, session_id, hard=False):
+        """归档（或物理删除）一个会话的全部记忆/状态卡/任务，保留审计。
+
+        Default semantics: 软归档（status='archived'），可恢复；hard=True 物理删除
+        （审计记录保留）。返回各对象数量。
+        """
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            raise DomainError("session_id is required")
+        now = time.time()
+        with self._connect() as conn:
+            docs = conn.execute(
+                "SELECT COUNT(*) c FROM documents WHERE session_id=?", (session_id,)
+            ).fetchone()["c"]
+            cards = conn.execute(
+                "SELECT COUNT(*) c FROM state_cards WHERE session_id=?", (session_id,)
+            ).fetchone()["c"]
+            tasks = conn.execute(
+                "SELECT COUNT(*) c FROM tasks WHERE session_id=?", (session_id,)
+            ).fetchone()["c"]
+            if hard:
+                conn.execute(
+                    "DELETE FROM memory_revisions WHERE memory_id IN "
+                    "(SELECT id FROM documents WHERE session_id=?)",
+                    (session_id,),
+                )
+                conn.execute("DELETE FROM atoms WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)", (session_id,))
+                conn.execute(
+                    "DELETE FROM graph_edges WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
+                    (session_id,),
+                )
+                conn.execute("DELETE FROM documents WHERE session_id=?", (session_id,))
+                conn.execute("DELETE FROM state_card_revisions WHERE card_id IN (SELECT id FROM state_cards WHERE session_id=?)", (session_id,))
+                conn.execute("DELETE FROM state_cards WHERE session_id=?", (session_id,))
+                conn.execute("DELETE FROM task_events WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?)", (session_id,))
+                conn.execute("DELETE FROM tasks WHERE session_id=?", (session_id,))
+            else:
+                conn.execute(
+                    "UPDATE documents SET status='archived',updated_at=? WHERE session_id=? AND status='active'",
+                    (now, session_id),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status='archived',version=version+1,updated_at=? WHERE session_id=? AND status!='archived'",
+                    (now, session_id),
+                )
+            # 统一撤除会话 key（归档/删除后不再有迁移凭证）
+            conn.execute(
+                "UPDATE session_keys SET revoked_at=? WHERE session_id=? AND revoked_at IS NULL",
+                (now, session_id),
+            )
+        return {"session_id": session_id, "hard": hard, "documents": docs, "cards": cards, "tasks": tasks}
 
     def put_state_card(
         self,
