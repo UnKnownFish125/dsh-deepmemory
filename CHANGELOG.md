@@ -2,6 +2,16 @@
 
 All notable changes to dsh-deepmemory are documented here.
 
+## [v0.5.0] - 2026-08-24
+
+### Changed
+- 会话自动压缩与记忆补全改为所有会话可用的全局/会话级可选项（`context_automation.enabled` / `memory_completion_k`），压力压缩阈值调整为 0.45
+- Host 为 cordis 等无记忆 preset 的会话提供状态卡 + 记忆补全注入（`deepmemory:host-memory-completion` section），与 deepmemory preset 的注入互斥
+- 配置中心新增 `context_automation` 组（自动压缩与记忆补全开关、记忆补全条数）
+- 记忆插件支持 `MEMORY_SERVER_PORT` 环境变量覆盖后端端口；记忆补全条数支持会话级配置
+- 五轮状态卡/压缩节拍改由 `context_automation.enabled` 统一开关；记忆补全缓存按会话隔离
+- install.sh 幂等归一化旧 `dsh-memory-ui` / `dsh-longlongchat` bundle 注册，并清理残留插件目录
+
 ## [v0.4.2.14] - 2026-08-22
 
 ### Added

@@ -108,7 +108,7 @@ if [ -f "${ROOT}/scripts/fix-client-bundle.py" ]; then
   say "   client.js 已转换为 __ModuleLoader__ 格式"
 fi
 
-# bundles 幂等注册
+# bundles 幂等注册：统一旧 dsh-memory-ui / dsh-deepmemory 为单个 dsh-deepmemory
 PKG_JSON="${WEB_PROFILE}/package.json"
 if [ -f "${PKG_JSON}" ]; then
   "${VENV_PY}" - "${PKG_JSON}" <<'PY'
@@ -117,16 +117,32 @@ p = sys.argv[1]
 data = json.load(open(p, encoding='utf-8'))
 prof = data.setdefault('dsh', {}).setdefault('profile', {})
 bundles = prof.setdefault('bundles', [])
-if 'dsh-deepmemory' not in bundles:
-    bundles.append('dsh-deepmemory')
-    json.dump(data, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
-    print('   bundles 已加入 dsh-deepmemory')
-else:
-    print('   bundles 已含 dsh-deepmemory（跳过）')
+normalized = []
+for name in bundles:
+    candidate = 'dsh-deepmemory' if name in {'dsh-deepmemory', 'dsh-memory-ui', 'dsh-longlongchat'} else name
+    if candidate not in normalized:
+        normalized.append(candidate)
+if 'dsh-deepmemory' not in normalized:
+    normalized.append('dsh-deepmemory')
+prof['bundles'] = normalized
+json.dump(data, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+print('   bundles 已归一化为 dsh-deepmemory')
 PY
 else
   warn "   未找到 ${PKG_JSON}，跳过 bundles 注册"
 fi
+
+# 剔除生产残留的旧 Web 插件目录（dsh-memory-ui / dsh-longlongchat），避免旧版以相同 name 抢占注入
+LEGACY_PLUGIN_DIRS=(
+  "${WEB_PROFILE}/node_modules/dsh-memory-ui"
+  "${WEB_PROFILE}/node_modules/dsh-longlongchat"
+)
+for legacy in "${LEGACY_PLUGIN_DIRS[@]}"; do
+  if [ -d "${legacy}" ] && [ "${legacy}" != "${PLUGIN_DIR}" ]; then
+    rm -rf "${legacy}"
+    say "   已移除旧 Web 插件目录 $(basename "${legacy}")"
+  fi
+done
 
 # ---------- 3. agent preset ----------
 say "3/3 agent preset -> ${PRESET_DIR}"

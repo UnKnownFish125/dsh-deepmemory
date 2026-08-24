@@ -186,10 +186,10 @@ def check_preset(spec):
             None,
         )
         policy = compaction.get('config', {}) if compaction else {}
-        if policy.get('thresholdRatio') != 0.55 or policy.get('retainRatio') != 0.2:
-            fail('compaction policy must use thresholdRatio=0.55 and retainRatio=0.2')
+        if policy.get('thresholdRatio') != 0.45 or policy.get('retainRatio') != 0.2:
+            fail('compaction policy must use thresholdRatio=0.45 and retainRatio=0.2')
         else:
-            ok('compaction policy correct: 0.55 trigger / 0.2 retain')
+            ok('compaction policy correct: 0.45 trigger / 0.2 retain')
 
     # Check required capabilities with fuzzy matching
     # Capabilities can match: exact ID, part of ID, or in plugin name

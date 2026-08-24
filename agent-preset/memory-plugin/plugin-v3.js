@@ -30,7 +30,7 @@ export function apply(ctx, config = {}) {
   const recentBySession = new Map()
   const initializedSessions = new Set()
   const refreshes = new Map()
-  let SERVER = 'http://localhost:6230'
+  let SERVER = 'http://localhost:' + String(process.env.MEMORY_SERVER_PORT || '6230')
   const TOKEN_FILES = [
     process.env.MEMORY_API_TOKEN_FILE,
     process.env.DSH_HOME ? `${process.env.DSH_HOME}/.dsh-memory-api-token` : '',
@@ -157,9 +157,9 @@ export function apply(ctx, config = {}) {
     await http('POST', '/v1/settings/set', { key: 'session_enabled:' + sessionId, value: value })
   }
 
-  function formatMemories(results) {
+  function formatMemories(results, limit) {
     if (!results || !results.length) return ''
-    const lines = results.slice(0, RECALL_K).map((r) => '- [' + (r.type || 'fact') + '/' + (r.scope || '?') + '] ' + String(r.content || '').slice(0, 240))
+    const lines = results.slice(0, limit || RECALL_K).map((r) => '- [' + (r.type || 'fact') + '/' + (r.scope || '?') + '] ' + String(r.content || '').slice(0, 240))
     return '[长期记忆召回]\n' + lines.join('\n') + '\n[/长期记忆]\n'
   }
 
@@ -216,13 +216,13 @@ export function apply(ctx, config = {}) {
     return lines.length ? '[会话状态]\n' + lines.join('\n') + '\n[/会话状态]\n' : ''
   }
 
-  async function refreshMemoryCache(sessionId, query) {
+  async function refreshMemoryCache(sessionId, query, limit) {
     if (!sessionId) return false
     if (refreshes.has(sessionId)) return refreshes.get(sessionId)
     const refresh = (async () => {
       const sres = await http('POST', '/v1/memories/search', {
         query: query || '当前会话目标、计划、决定、偏好和相关工作上下文',
-        k: RECALL_K,
+        k: limit || RECALL_K,
         session_id: sessionId,
         workspace_id: WORKSPACE,
       })
@@ -233,7 +233,7 @@ export function apply(ctx, config = {}) {
         if (!cres.ok) return false
         nextCardText = cardText(cres.data && cres.data.card)
       }
-      const nextText = nextCardText + formatMemories((sres.data && sres.data.results) || [])
+      const nextText = nextCardText + formatMemories((sres.data && sres.data.results) || [], limit || RECALL_K)
       const previous = memoryCache.get(sessionId) || ''
       initializedSessions.add(sessionId)
       if (nextText === previous) return true
@@ -269,11 +269,18 @@ export function apply(ctx, config = {}) {
     if (!sessionId) return assembled
     try {
       if (Date.now() - state.lastConfigLoad > 60000) await loadConfig()
-      if (!INJECT_ENABLED || !(await isEnabled(sessionId))) {
+      const automation = await http('GET', '/v1/config/session?session_id=' + encodeURIComponent(sessionId))
+      const automationConfig = automation.ok && automation.data && automation.data.config ? automation.data.config : {}
+      const automationValue = automationConfig['context_automation.enabled']
+      const automationEnabled = automationValue === undefined || automationValue === null
+        ? true
+        : !(typeof automationValue === 'string' && ['false', '0', 'no', 'off', ''].includes(automationValue.trim().toLowerCase())) && Boolean(automationValue)
+      const completionLimit = Math.max(1, Math.min(20, Number(automationConfig['context_automation.memory_completion_k'] || RECALL_K)))
+      if (!INJECT_ENABLED || !automationEnabled || !(await isEnabled(sessionId))) {
         memoryCache.delete(sessionId)
         initializedSessions.delete(sessionId)
       } else if (!initializedSessions.has(sessionId)) {
-        await refreshMemoryCache(sessionId, recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文'))
+        await refreshMemoryCache(sessionId, recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文'), completionLimit)
       }
     } catch (e) {
       console.error('[deepmemory] prompt cache refresh failed', String(e))

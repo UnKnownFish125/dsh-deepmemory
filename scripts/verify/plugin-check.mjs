@@ -13,6 +13,7 @@ fs.writeFileSync(pathModule.join(tokenHome, '.dsh-memory-api-token'), 'verify-me
 const requests = []
 const llmCalls = []
 let promptSection
+let contextAutomationEnabled = true
 globalThis.fetch = async (url, options = {}) => {
   requests.push({ url: String(url), method: options.method || 'GET', headers: options.headers, body: options.body })
   const pathname = new URL(url).pathname
@@ -24,7 +25,7 @@ globalThis.fetch = async (url, options = {}) => {
     data = { count: 1, results: [{ content: 'memory-for-' + sessionId, type: 'fact', scope: 'session' }] }
   }
   if (pathname.endsWith('/briefing')) data = { count: 0, briefing: '' }
-  if (pathname.endsWith('/config/session')) data = { config: { 'state_card.auto_generate': false } }
+  if (pathname.endsWith('/config/session')) data = { config: { 'state_card.auto_generate': false, 'context_automation.enabled': contextAutomationEnabled, 'context_automation.memory_completion_k': 5 } }
   if (pathname.includes('/v2/cards/')) data = { card: null }
   return { ok: true, status: 200, json: async () => data }
 }
@@ -95,6 +96,11 @@ const otherAgent = { id: 'verify-session-2' }
 const otherAssembly = await assembleFor(otherAgent)
 if (!otherAssembly.sections[0].text.includes('memory-for-verify-session-2')) throw new Error('第二会话缓存渲染异常')
 if (promptSection.text({ agent, scope: agent }).includes('memory-for-verify-session-2')) throw new Error('system prompt 记忆缓存发生跨会话污染')
+contextAutomationEnabled = false
+const disabledAgent = { id: 'verify-session-disabled' }
+const disabledAssembly = await assembleFor(disabledAgent)
+if (disabledAssembly.sections[0].text !== '') throw new Error('关闭 context_automation.enabled 后仍注入记忆补全')
+contextAutomationEnabled = true
 for (let i = 0; i < 4; i++) {
   await eventHandler(session, {
     type: 'user/message',

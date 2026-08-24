@@ -57,6 +57,10 @@ fi
 step "server.py 语法"
 if "$VENV_PY" -m py_compile "$ROOT/memory-server/server.py" 2>/dev/null; then ok; else bad; fi
 
+step "memory-server 单元测试"
+if PYTHONPATH="$ROOT/memory-server" "$VENV_PY" -m unittest discover \
+  -s "$ROOT/memory-server/tests" -p 'test_*.py' >/dev/null 2>&1; then ok; else bad; fi
+
 step "隔离实例冒烟 (临时data+随机端口)"
 TMP=$(mktemp -d "$VERIFY_TMP_ROOT/server-XXXXXX")
 cp "$ROOT/memory-server/"*.py "$ROOT/memory-server/"*.json "$TMP/" 2>/dev/null
@@ -109,6 +113,8 @@ step "web Host 插件语法"
 step "五轮状态卡/压缩同步契约"
 if grep -q "state_card.sync_turns.*|| 5" "$ROOT/web-plugin/index.js" \
   && grep -q "five-turn state card and compaction cadence" "$ROOT/web-plugin/index.js" \
+  && grep -q "context_automation.enabled" "$ROOT/web-plugin/index.js" \
+  && grep -q "deepmemory:host-memory-completion" "$ROOT/web-plugin/index.js" \
   && grep -q "compaction.compactRegion" "$ROOT/web-plugin/index.js"; then ok; else bad; fi
 
 # ---------------- 3. preset plugin ----------------
@@ -157,8 +163,10 @@ else
   rm -f "$VHOME/profiles/web/node_modules/dsh-deepmemory"
   mkdir -p "$VHOME/profiles/web/node_modules/dsh-deepmemory"
   cp "$ROOT/web-plugin/"* "$VHOME/profiles/web/node_modules/dsh-deepmemory/" 2>/dev/null
-  # 剔除生产残留的旧版 dsh-memory-ui（name 同为 deepmemory，会以旧 CSS/面板抢占注入）
+  # 剔除生产残留的旧版 Web 记忆 bundle（dsh-memory-ui / dsh-longlongchat），
+  # 避免旧 CSS/面板以相同或冲突标识抢占注入。
   rm -f "$VHOME/profiles/web/node_modules/dsh-memory-ui"
+  rm -f "$VHOME/profiles/web/node_modules/dsh-longlongchat"
   # bundles 声明改为待验证插件。真实 profile 可能同时残留新旧包名，必须去重，
   # 否则两个 bundle 会注册同一个 memory-ui loader id，临时 DSH 无法启动。
   "$VENV_PY" - "$VHOME/profiles/web/package.json" <<'PY'
@@ -170,7 +178,7 @@ profile = data.setdefault("dsh", {}).setdefault("profile", {})
 bundles = profile.get("bundles", [])
 normalized = []
 for name in bundles:
-    name = "dsh-deepmemory" if name == "dsh-memory-ui" else name
+    name = "dsh-deepmemory" if name in {"dsh-memory-ui", "dsh-longlongchat"} else name
     if name not in normalized:
         normalized.append(name)
 profile["bundles"] = normalized

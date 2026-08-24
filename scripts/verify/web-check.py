@@ -247,6 +247,8 @@ with sync_playwright() as p:
         raise AssertionError("点击卡片头后配置组未出现")
     if "自动生成状态卡" not in page.inner_text("body"):
         raise AssertionError("配置页缺少自动生成状态卡开关")
+    if "自动压缩与记忆补全" not in page.inner_text("body"):
+        raise AssertionError("配置页缺少所有会话可选的自动压缩与记忆补全开关")
     # 再点收起
     card_header.click()
     page.wait_for_timeout(1200)

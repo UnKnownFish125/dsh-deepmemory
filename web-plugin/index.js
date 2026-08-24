@@ -144,6 +144,41 @@ function stateCardKind(agent) {
   return preset.includes('task') ? 'task' : 'daily'
 }
 
+function presetHasMemoryCompletion(agent) {
+  const preset = String((agent && agent.session && agent.session.header && agent.session.header.agentPreset) || '')
+  return preset.startsWith('harness-memory')
+}
+
+function memoryCompletionText(card, results, limit) {
+  const sections = []
+  const payload = card && card.payload ? card.payload : null
+  if (payload) {
+    const lines = []
+    if (payload.goal) lines.push('目标: ' + String(payload.goal).slice(0, 120))
+    if (payload.current_plan) lines.push('当前方案: ' + String(payload.current_plan).slice(0, 200))
+    if (Array.isArray(payload.next_steps) && payload.next_steps.length) lines.push('下一步: ' + payload.next_steps.slice(0, 3).join('；'))
+    if (lines.length) sections.push('[会话状态]\n' + lines.join('\n') + '\n[/会话状态]')
+  }
+  const memories = (results || []).slice(0, limit)
+  if (memories.length) {
+    sections.push('[长期记忆召回]\n' + memories.map((item) => {
+      return '- [' + String(item.type || 'fact') + '/' + String(item.scope || '?') + '] ' + String(item.content || '').slice(0, 240)
+    }).join('\n') + '\n[/长期记忆]')
+  }
+  return sections.join('\n')
+}
+
+function latestMemoryQuery(agent) {
+  const parts = []
+  const events = agent && agent.session && agent.session.events ? agent.session.events : []
+  for (let index = events.length - 1; index >= 0 && parts.length < 6; index--) {
+    const event = events[index]
+    const text = eventText(event).trim()
+    if (text) parts.unshift(text.slice(0, 160))
+  }
+  return parts.join(' | ').slice(0, 700) || '当前会话目标、计划、决定、偏好和相关工作上下文'
+}
+
 function cadenceCompactionRange(agent, cadenceTurn, retainTurns = 3) {
   const turnBySeq = new Map()
   let currentTurn = 0
@@ -318,6 +353,72 @@ export function apply(ctx) {
   const cardBuckets = new Map()
   const cardRuns = new Set()
   const cadenceRuns = new Map()
+  const hostMemoryCache = new Map()
+  const hostMemoryInitialized = new Set()
+  const hostMemoryRefreshes = new Map()
+
+  async function refreshHostMemory(agent, config) {
+    const sessionId = String(agent.session.id)
+    if (hostMemoryRefreshes.has(sessionId)) return hostMemoryRefreshes.get(sessionId)
+    const refresh = (async () => {
+      const limit = Math.max(1, Math.min(20, Number(config['context_automation.memory_completion_k'] || 5)))
+      const workspaceId = String(config.workspace || 'deepseek-hardness')
+      const search = await memoryRequest('POST', '/v1/memories/search', {
+        query: latestMemoryQuery(agent),
+        k: limit,
+        session_id: sessionId,
+        workspace_id: workspaceId,
+      })
+      const kind = stateCardKind(agent)
+      const card = await memoryRequest('GET', '/v1/v2/cards/' + kind + '/' + encodeURIComponent(sessionId)).catch((error) => {
+        if (String(error.message).includes('state card not found')) return { card: null }
+        throw error
+      })
+      const text = memoryCompletionText(card.card, search.results || [], limit)
+      if ((hostMemoryCache.get(sessionId) || '') !== text) hostMemoryCache.set(sessionId, text)
+      hostMemoryInitialized.add(sessionId)
+      return text
+    })().finally(() => hostMemoryRefreshes.delete(sessionId))
+    hostMemoryRefreshes.set(sessionId, refresh)
+    return refresh
+  }
+
+  const systemPrompt = ctx.get('systemPrompt')
+  if (systemPrompt) {
+    ctx.effect(() => systemPrompt.section({
+      name: 'deepmemory:host-memory-completion',
+      order: 50,
+      text: (context) => {
+        const agent = context && context.agent
+        if (!agent || presetHasMemoryCompletion(agent)) return ''
+        return hostMemoryCache.get(String(agent.session.id)) || ''
+      },
+    }))
+    ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+      const assembled = await next()
+      const agent = context && context.agent
+      if (!agent || presetHasMemoryCompletion(agent)) return assembled
+      const sessionId = String(agent.session.id)
+      try {
+        const response = await memoryRequest('GET', '/v1/config/session?session_id=' + encodeURIComponent(sessionId))
+        const config = response.config || {}
+        if (!boolValue(config['context_automation.enabled'], true)) {
+          hostMemoryCache.delete(sessionId)
+          hostMemoryInitialized.delete(sessionId)
+        } else if (!hostMemoryInitialized.has(sessionId)) {
+          await refreshHostMemory(agent, config)
+        }
+      } catch (error) {
+        ctx.logger.warn('memory completion failed for session %s: %s', sessionId, String((error && error.message) || error))
+      }
+      const text = hostMemoryCache.get(sessionId) || ''
+      return {
+        ...assembled,
+        sections: assembled.sections.map((section) => section.name === 'deepmemory:host-memory-completion' ? { ...section, text } : section),
+      }
+    })
+  }
+
   ctx.on('session/event', (session, event) => {
     const text = eventText(event).trim()
     if (!text || !session || !session.id) return
@@ -345,6 +446,7 @@ export function apply(ctx) {
     }
     const config = configResponse.config || {}
     const syncTurns = Math.max(1, Math.min(100, Number(config['state_card.sync_turns'] || 5)))
+    const contextAutomation = boolValue(config['context_automation.enabled'], true)
     let cadence = cadenceRuns.get(sessionId)
     if (!cadence) {
       if (!turn || turn % syncTurns !== 0) return
@@ -397,14 +499,19 @@ export function apply(ctx) {
         cadence.cardDone = true
       }
       const range = cadenceCompactionRange(agent, cadence.turn)
-      const compaction = agent.ctx.get('compaction')
-      if (range && compaction) {
-        const result = await compaction.compactRegion(range.start, range.end, agent, signal)
-        ctx.logger.info('five-turn compaction completed session %s turn %s id %s', sessionId, cadence.turn, result && result.compactionId)
-      } else if (range && !compaction) {
-        ctx.logger.warn('five-turn compaction unavailable for session %s', sessionId)
+      if (contextAutomation) {
+        const compaction = agent.ctx.get('compaction')
+        if (range && compaction) {
+          const result = await compaction.compactRegion(range.start, range.end, agent, signal)
+          ctx.logger.info('five-turn compaction completed session %s turn %s id %s', sessionId, cadence.turn, result && result.compactionId)
+        } else if (range && !compaction) {
+          ctx.logger.warn('five-turn compaction unavailable for session %s', sessionId)
+        } else {
+          ctx.logger.info('five-turn compaction had no eligible history for session %s turn %s', sessionId, cadence.turn)
+        }
+        if (!presetHasMemoryCompletion(agent)) hostMemoryInitialized.delete(sessionId)
       } else {
-        ctx.logger.info('five-turn compaction had no eligible history for session %s turn %s', sessionId, cadence.turn)
+        ctx.logger.info('five-turn compaction and memory completion disabled for session %s', sessionId)
       }
       cadenceRuns.delete(sessionId)
     } catch (error) {
