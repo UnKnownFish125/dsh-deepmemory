@@ -2,6 +2,18 @@
 
 All notable changes to dsh-deepmemory are documented here.
 
+## [v0.6.0] - 2026-08-25
+
+### Added
+- 会话记忆库独立迁移 key（`session_keys` 表 + create/rotate/resolve）
+- `export` / `import` / `purge` 会话级迁移与归档清理接口（`export` 默认脱敏，`purge` 默认软归档）
+- web 记忆面板新增「会话维护」区：key 创建/轮换、导出、归档清理
+
+### Changed
+- 记忆抽取与 Host 状态卡统一走 `resolveModelRoute`：优先手动配置，否则从 DSH 已配置模型列表自动选 flash/chat（新增 `/mem-api/v1/models` 目录接口）
+- 所有固定模型随发布移除（`extract_provider`/`extract_model`/`llm_provider`/`llm_model` 默认留空自动选择，配置 UI 支持已配置列表选择 + 自定义）
+- plugin-v3 增加 `redactSensitive`，覆盖抽取、记忆写回、状态卡、任务板、tools 输出；task preset persona 加入 credential rule，防止凭据进入 LLM 请求前缀与 cache
+
 ## [v0.5.0] - 2026-08-24
 
 ### Changed
