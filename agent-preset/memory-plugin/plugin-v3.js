@@ -54,6 +54,8 @@ export function apply(ctx, config = {}) {
   let EXTRACT_ENABLED = true
   let TOOLS_ENABLED = true
   let DECAY_RATE = 0.01
+  let EXTRACT_PROVIDER = ''
+  let EXTRACT_MODEL = ''
 
   const EXTRACT_SYSTEM = [
     '你是长期记忆抽取器。从对话片段中提取值得长期记住的内容，并做结构化解构。',
@@ -64,6 +66,7 @@ export function apply(ctx, config = {}) {
     '4. atoms：把每条记忆拆成独立事实单元（可 0-3 条），每单元含 atom_type（factual 事实/preference 偏好/decision 决定/episodic 事件/planned 计划/relational 关系）、content（独立自包含一句话）、ttl_days（factual=180, preference=60, decision=30, episodic=7, planned=2, relational=90）、decay_type（exponential/linear/step）、importance。',
     '5. entities：抽取记忆中的实体名词列表（人名/项目/工具/概念），每项 {name, kind: person|project|tool|concept|other}。',
     '6. relations：实体之间的关系边列表（可 0-3 条），每项 {source, relation, target}，source/target 必须是 entities 里出现过的实体名，relation 用短动词短语（如 "使用"、"依赖"、"属于"、"负责"）。',
+    '6b. credential-redaction：若对话内容包含密钥/令牌/口令/私钥，不要输出其字面值；能记忆就只记录引用名/env var，值为 REDACTED。',
     '7. card：增量更新当前会话状态卡（goal/current_plan 各一句话；key_decisions 追加新决定≤3条；in_progress/next_steps 各≤4条；无需变化时 card 为 null）。',
     '8. tasks：仅当对话中出现明确任务/子任务时才输出数组（title + status∈planned|todo|in_progress|completed|failed + 可选 parent/blocked/reason）；无明确任务时 tasks 为 []。',
     '8. 严格只输出一个 JSON 对象（不要 markdown 代码块）：',
@@ -71,6 +74,24 @@ export function apply(ctx, config = {}) {
     '没有值得记忆的内容时 memories 为 []。',
   ].join('\n')
 
+
+function redactSensitive(text) {
+  if (typeof text !== 'string' || !text) return text || ''
+  let out = text
+  const replacers = [
+    [/gh[pousr]_[A-Za-z0-9_]{20,}/g, '[REDACTED:git-token]'],
+    [/github_pat_[A-Za-z0-9_]{20,}/g, '[REDACTED:git-token]'],
+    [/sk-[A-Za-z0-9_-]{16,}/g, '[REDACTED:api-key]'],
+    [/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED:api-key]'],
+    [/AKIA[0-9A-Z]{16}/g, '[REDACTED:aws-key]'],
+    [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED:jwt]'],
+    [/((?:token|key|secret|password|passwd|pwd)\s*[:=]\s*)[^\s;,}\]]+/gi, '$1[REDACTED:<secret>]'],
+    [/\b(Bearer\s+)[A-Za-z0-9._~+\/=-]{12,}/gi, '$1[REDACTED:<token>]'],
+    [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED:private-key]'],
+  ]
+  for (const [re, replacement] of replacers) out = out.replace(re, replacement)
+  return out
+}
 
   async function http(method, path, body) {
     try {
@@ -123,6 +144,10 @@ export function apply(ctx, config = {}) {
       if (ic !== undefined) INJECT_CARD = Boolean(ic)
       const ee = await readKeyOr(['reflection_engine.extract_enabled', 'extract_enabled'])
       if (ee !== undefined) EXTRACT_ENABLED = Boolean(ee)
+      const ep = await readKeyOr(['reflection_engine.extract_provider', 'extract_provider'])
+      if (ep !== undefined && ep !== null && String(ep).trim()) EXTRACT_PROVIDER = String(ep).trim()
+      const em = await readKeyOr(['reflection_engine.extract_model', 'extract_model'])
+      if (em !== undefined && em !== null && String(em).trim()) EXTRACT_MODEL = String(em).trim()
       const te = await readKeyOr(['agent_tools.tools_enabled', 'tools_enabled'])
       if (te !== undefined) TOOLS_ENABLED = Boolean(te)
       const dr = await readKeyOr(['importance_decay.decay_rate', 'decay_rate'])
@@ -164,21 +189,43 @@ export function apply(ctx, config = {}) {
     return '[长期记忆召回]\n' + lines.join('\n') + '\n[/长期记忆]\n'
   }
 
-  function pickCheapModel() {
-    return { provider: 'uuapi', model: 'deepseek-v4-flash' }
+  async function resolveModelRoute(llm, preferredProvider, preferredModel) {
+    const provider = String(preferredProvider || EXTRACT_PROVIDER || '').trim()
+    const model = String(preferredModel || EXTRACT_MODEL || '').trim()
+    let preferred = { provider, model }
+    if (provider && model) return preferred
+    let providers = []
+    try {
+      providers = (await llm.listProviders()).map((p) => p.id || p.provider || p.name).filter(Boolean)
+    } catch {}
+    const candidates = []
+    if (provider) candidates.push(provider)
+    if (providers.includes('uuapi') && !candidates.includes('uuapi')) candidates.push('uuapi')
+    for (const p of providers) if (!candidates.includes(p)) candidates.push(p)
+    for (const p of candidates) {
+      try {
+        const models = await llm.listModels(p)
+        const pick = model
+          ? models.find((m) => String(m.id || m.name || '').includes(model))
+          : models.find((m) => /flash|v4|chat/i.test(String(m.id || m.name || '')))
+        const chosen = pick || models[0]
+        if (chosen) return { provider: p, model: chosen.id || chosen.name }
+      } catch {}
+    }
+    return { provider: provider || 'uuapi', model: model || 'deepseek-v4-flash' }
   }
 
   async function extract(dialog, signal) {
     const llm = ctx.get('llm')
     if (!llm) return null
-    const route = pickCheapModel()
+    const route = await resolveModelRoute(llm, null, null)
     let out = ''
     try {
       const stream = llm.stream({
         provider: route.provider,
         model: route.model,
         system: EXTRACT_SYSTEM,
-        messages: [{ role: 'user', content: [{ type: 'text', text: dialog.slice(0, 8000) }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: redactSensitive(dialog).slice(0, 8000) }] }],
         temperature: 0.2,
         signal: signal || undefined,
       })
@@ -342,21 +389,29 @@ export function apply(ctx, config = {}) {
     if (!result) return
     let memoryChanged = false
     if (result.memories && result.memories.length) {
-      const items = result.memories.filter((m) => m && m.content).map((m) => ({
-        content: String(m.content).slice(0, 500),
-        key_facts: String(m.key_facts || ''),
-        persona_summary: String(m.persona_summary || ''),
+      const items = result.memories.filter((m) => m && m.content).map((m) => {
+        const rawContent = redactSensitive(m.content)
+        const rawKeyFacts = redactSensitive(m.key_facts || '')
+        const rawPersona = redactSensitive(m.persona_summary || '')
+        const rawAtom = Array.isArray(m.atoms) ? m.atoms.map((a) => Object.assign({}, a, { content: redactSensitive(a.content || '') })) : []
+        const rawEntities = Array.isArray(m.entities) ? m.entities.map((e) => Object.assign({}, e, { name: redactSensitive(e.name || '') })) : []
+        const rawRelations = Array.isArray(m.relations) ? m.relations.map((r) => Object.assign({}, r, { source: redactSensitive(r.source || ''), target: redactSensitive(r.target || ''), relation: redactSensitive(r.relation || '') })) : []
+        return {
+        content: String(rawContent).slice(0, 500),
+        key_facts: String(rawKeyFacts).slice(0, 600),
+        persona_summary: String(rawPersona).slice(0, 500),
         type: m.type || 'fact',
         domain: m.domain || 'work',
         scope: m.scope || 'workspace',
         importance: typeof m.importance === 'number' ? m.importance : 0.5,
         workspace_id: WORKSPACE,
         session_id: sid,
-        atoms: Array.isArray(m.atoms) ? m.atoms : [],
-        entities: Array.isArray(m.entities) ? m.entities : [],
-        relations: Array.isArray(m.relations) ? m.relations : [],
-        source: dialog.slice(0, 2000),
-      }))
+        atoms: rawAtom,
+        entities: rawEntities,
+        relations: rawRelations,
+        source: redactSensitive(dialog).slice(0, 2000),
+        }
+      })
       if (items.length) {
         const res = await http('POST', '/v1/memories/add_batch', { items: items })
         if (res.ok) {
@@ -374,11 +429,11 @@ export function apply(ctx, config = {}) {
         const put = await http('PUT', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid), {
           expected_version: existing ? Number(existing.version || 0) : 0,
           payload: {
-            goal: String(result.card.goal || ''),
-            current_plan: String(result.card.current_plan || ''),
-            key_decisions: Array.isArray(result.card.key_decisions) ? result.card.key_decisions.slice(0, 4) : [],
-            in_progress: Array.isArray(result.card.in_progress) ? result.card.in_progress.slice(0, 4) : [],
-            next_steps: Array.isArray(result.card.next_steps) ? result.card.next_steps.slice(0, 4) : [],
+            goal: redactSensitive(String(result.card.goal || '')),
+            current_plan: redactSensitive(String(result.card.current_plan || '')),
+            key_decisions: Array.isArray(result.card.key_decisions) ? result.card.key_decisions.slice(0, 4).map((x)=>redactSensitive(String(x))) : [],
+            in_progress: Array.isArray(result.card.in_progress) ? result.card.in_progress.slice(0, 4).map((x)=>redactSensitive(String(x))) : [],
+            next_steps: Array.isArray(result.card.next_steps) ? result.card.next_steps.slice(0, 4).map((x)=>redactSensitive(String(x))) : [],
           },
           actor: 'main_agent',
           reason: 'AI turn-stopping state card sync',
@@ -397,7 +452,7 @@ export function apply(ctx, config = {}) {
     if (result.tasks && Array.isArray(result.tasks) && result.tasks.length) {
       try {
         for (const t of result.tasks.slice(0, 5)) {
-          const title = String(t && t.title || '').trim().slice(0, 120)
+          const title = redactSensitive(String(t && t.title || '')).trim().slice(0, 120)
           if (!title) continue
           const status = ['planned', 'todo', 'in_progress', 'completed', 'failed'].includes(t.status) ? t.status : 'todo'
           const created = await http('POST', '/v1/v2/tasks', {
@@ -405,9 +460,9 @@ export function apply(ctx, config = {}) {
             status: status,
             workspace_id: WORKSPACE,
             session_id: sid,
-            description: String(t.description || '').slice(0, 500),
+            description: redactSensitive(String(t.description || '')).slice(0, 500),
             blocked: status === 'in_progress' ? Boolean(t.blocked) : false,
-            block_reason: String(t.reason || t.block_reason || ''),
+            block_reason: redactSensitive(String(t.reason || t.block_reason || '')),
           })
           if (created.ok) {
             console.log('[deepmemory] AI task created: ' + title + ' [' + status + ']')
@@ -475,7 +530,7 @@ export function apply(ctx, config = {}) {
       if (!TOOLS_ENABLED) return { count: 0, results: [], error: 'deepmemory tools disabled' }
       const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: WORKSPACE, persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, results: [], error: res.error }
-      const items = (res.data.results || []).map((r) => ({ id: r.id, content: r.content, type: r.type, domain: r.domain, scope: r.scope, importance: r.importance, score: r.final_score }))
+      const items = (res.data.results || []).map((r) => ({ id: r.id, content: redactSensitive(r.content), type: r.type, domain: r.domain, scope: r.scope, importance: r.importance, score: r.final_score }))
       return { count: items.length, results: items }
     },
   })
@@ -495,7 +550,7 @@ export function apply(ctx, config = {}) {
     async execute(args) {
       if (!TOOLS_ENABLED) return { saved: false, error: 'deepmemory tools disabled' }
       const payload = {
-        content: String(args.content || ''),
+        content: redactSensitive(String(args.content || '')),
         type: args.type || 'fact',
         domain: args.domain || 'work',
         scope: args.scope || 'workspace',
@@ -522,7 +577,7 @@ export function apply(ctx, config = {}) {
       if (!TOOLS_ENABLED) return { count: 0, briefing: '', error: 'deepmemory tools disabled' }
       const res = await http('POST', '/v1/memories/search', { query: String(args.task || ''), k: args.k || 8, workspace_id: WORKSPACE, persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, briefing: '', error: res.error }
-      const lines = (res.data.results || []).map((r) => '- ' + String(r.content || ''))
+      const lines = (res.data.results || []).map((r) => '- ' + redactSensitive(String(r.content || '')))
       return { count: lines.length, briefing: lines.join('\n') }
     },
   })

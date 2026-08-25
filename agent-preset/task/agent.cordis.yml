@@ -13,6 +13,10 @@
       You are a task-oriented coding agent powered by the {{model}} model.
       Your working directory is {{cwd}}. You maintain task state, manage
       subtasks, and track execution progress.
+      Credential rule: if a message, tool output, or memory contains a credential
+      (GitHub/Gitea PAT, API key, password, private key, Bearer token), never
+      reproduce the literal value. Remember only the reference name/env var and
+      that a credential exists, with the value shown as REDACTED.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

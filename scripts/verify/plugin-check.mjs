@@ -45,7 +45,8 @@ const ctx = {
     if (name === 'llm') return {
       stream: async function* (options) {
         llmCalls.push(options)
-        yield { type: 'text-delta', text: '{"memories":[],"card":{"goal":"must-not-write","current_plan":"","key_decisions":[],"in_progress":[],"next_steps":[]}}' }
+        const fakeToken = 'ghp_' + 'VERIFYPAT_0123456789abcdefghijklmnopqrstuvwx'
+        yield { type: 'text-delta', text: JSON.stringify({ memories: [{ content: '用户本地 Gitea token ' + fakeToken, key_facts: 'token key', type: 'fact' }], card: { goal: 'target ' + fakeToken, current_plan: '', key_decisions: [], in_progress: [], next_steps: [] }, tasks: [] }) }
       },
     }
     return undefined
@@ -111,6 +112,12 @@ for (let i = 0; i < 4; i++) {
   })
 }
 await stoppingHandler({ agent: { id: 'verify-session' } })
+// credentials must never escape to LLM, memory, card, or task payloads
+  const rawToken = 'ghp_' + 'VERIFYPAT0123456789abcdefghijklmnopqrstuvwx'
+  const allBodies = requests.map((r) => String(r.body || '')).join('\n') + '\n' + (llmCalls[0] && llmCalls[0].messages ? llmCalls[0].messages.map((m)=>JSON.stringify(m)).join('\n') : '')
+  if (allBodies.includes(rawToken)) throw new Error('sensitive token leak: credential escaped into memory/tool/LLM call')
+  const batchItems = JSON.parse((requests.find((r) => r.url.endsWith('/v1/memories/add_batch')) || { body: '{"items":[]}' }).body || '{"items":[]}')
+  if ((batchItems.items || []).some((m) => JSON.stringify(m).includes(rawToken))) throw new Error('sensitive token leaked into add_batch')
 if (llmCalls.length !== 1) throw new Error('记忆抽取未调用一次 LLM')
 if (llmCalls[0].provider !== 'uuapi' || llmCalls[0].model !== 'deepseek-v4-flash') {
   throw new Error('记忆抽取模型路由异常: ' + JSON.stringify({ provider: llmCalls[0].provider, model: llmCalls[0].model }))

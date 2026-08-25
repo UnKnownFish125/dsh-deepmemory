@@ -218,7 +218,13 @@
       },
       "extract_model": {
         "description": "抽取模型名称",
-        "hint": "留空则自动选择最便宜的 chat 模型",
+        "hint": "从已配置模型列表中选择，或填写自定义模型名；留空则自动选择最便宜的 chat 模型",
+        "type": "string",
+        "default": ""
+      },
+      "extract_provider": {
+        "description": "抽取模型 Provider",
+        "hint": "留空则自动从已配置模型列表中选择",
         "type": "string",
         "default": ""
       }
@@ -480,15 +486,15 @@
       },
       "llm_provider": {
         "description": "整合模型 Provider",
-        "hint": "LLM 整合摘要调用的模型提供商",
+        "hint": "从已配置模型列表中选择整合模型 Provider；留空自动选择",
         "type": "string",
-        "default": "uuapi"
+        "default": ""
       },
       "llm_model": {
         "description": "整合模型名称",
-        "hint": "留空则使用 UUAPI deepseek-v4-flash",
+        "hint": "从已配置模型列表中选择，或填写自定义模型名；留空自动选择",
         "type": "string",
-        "default": "deepseek-v4-flash"
+        "default": ""
       }
     }
   }

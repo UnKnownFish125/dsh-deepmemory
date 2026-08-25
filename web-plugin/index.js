@@ -80,6 +80,31 @@ function boolValue(value, fallback) {
   return Boolean(value)
 }
 
+async function resolveModelRoute(llm, preferred) {
+  const preferredProvider = preferred && preferred.provider ? String(preferred.provider).trim() : ''
+  const preferredModel = preferred && preferred.model ? String(preferred.model).trim() : ''
+  if (preferredProvider && preferredModel) return { provider: preferredProvider, model: preferredModel, source: 'configured' }
+  let providers = []
+  try {
+    providers = (await llm.listProviders()).map((p) => p.id || p.provider || p.name).filter(Boolean)
+  } catch {}
+  const candidates = []
+  if (preferredProvider) candidates.push(preferredProvider)
+  if (providers.includes('uuapi') && !candidates.includes('uuapi')) candidates.push('uuapi')
+  for (const p of providers) if (!candidates.includes(p)) candidates.push(p)
+  for (const p of candidates) {
+    try {
+      const models = await llm.listModels(p)
+      const pick = preferredModel
+        ? models.find((m) => String(m.id || m.name || '').includes(preferredModel))
+        : models.find((m) => /flash|v4|chat/i.test(String(m.id || m.name || '')))
+      const chosen = pick || models[0]
+      if (chosen) return { provider: p, model: chosen.id || chosen.name, source: 'catalog' }
+    } catch {}
+  }
+  return { provider: preferredProvider || 'uuapi', model: preferredModel || 'deepseek-v4-flash', source: 'fallback' }
+}
+
 async function summarizeGroup(llm, route, group) {
   const source = [group.primary_content].concat(group.contents || []).filter(Boolean)
   let output = ''
@@ -100,14 +125,15 @@ async function summarizeGroup(llm, route, group) {
   return summary.slice(0, 4000)
 }
 
-async function extractSessionCard(llm, dialog, existingCard) {
+async function extractSessionCard(llm, dialog, existingCard, route = null) {
+  const r = route || await resolveModelRoute(llm, {})
   let lastError = ''
   for (let attempt = 0; attempt < 2; attempt++) {
     let output = ''
     try {
       const stream = llm.stream({
-        provider: 'uuapi',
-        model: 'deepseek-v4-flash',
+        provider: r.provider,
+        model: r.model,
         system: [
           '你是会话状态卡提取器。根据对话片段提取当前会话状态。',
           '只输出一个 JSON 对象，不要 markdown：',
@@ -316,10 +342,7 @@ async function performConsolidation(ctx, options = {}) {
     if (useLlm && llm) {
       const configuredProvider = String(config['memory_consolidation.llm_provider'] || '').trim()
       const configuredModel = String(config['memory_consolidation.llm_model'] || '').trim()
-      const legacyDefault = !configuredProvider && (!configuredModel || configuredModel === 'deepseek-chat')
-      route = legacyDefault
-        ? { provider: 'uuapi', model: 'deepseek-v4-flash' }
-        : { provider: configuredProvider || 'uuapi', model: configuredModel || 'deepseek-v4-flash' }
+      route = await resolveModelRoute(llm, { provider: configuredProvider, model: configuredModel })
       for (const group of candidates.candidates || []) {
         groups.push({
           primary_id: group.primary_id,
@@ -540,6 +563,40 @@ export function apply(ctx) {
     } finally {
       cardRuns.delete(sessionId)
     }
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: PREFIX + '/v1/models',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405)
+        res.end()
+        return
+      }
+      try {
+        const llm = ctx.get('llm')
+        const catalog = []
+        if (llm && typeof llm.listProviders === 'function') {
+          const rawProviders = await llm.listProviders()
+          const providerNames = (rawProviders || []).map((p) => p.id || p.provider || p.name).filter(Boolean)
+          const uniq = new Set(providerNames)
+          for (const name of uniq) {
+            const entry = { id: name, models: [] }
+            try {
+              const models = typeof llm.listModels === 'function' ? await llm.listModels(name) : []
+              entry.models = (models || []).map((m) => ({ id: m.id, name: m.name }))
+            } catch {}
+            catalog.push(entry)
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ providers: catalog }))
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: String((error && error.message) || error) }))
+      }
+    },
   })
 
   ctx.webServer.register({

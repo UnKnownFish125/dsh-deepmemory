@@ -16,6 +16,7 @@ const I18N = {
     back: '返回', refresh: '刷新', loading: '加载中…', search: '搜索', save: '保存', saved: '已保存',
     on: '已开启', off: '已关闭', memories: '记忆', stateCard: '会话状态卡', noCard: '（无状态卡）',
     sessionMaintain: '会话维护', sessionKey: '记忆库 key', noKey: '未创建',
+    autoSelect: '自动选择', modelCustom: '自定义模型名',
     sessionKeyCreate: '创建 key', sessionKeyRotate: '轮换', sessionExport: '导出记忆', sessionPurge: '归档清理',
     sessionKeyCreated: 'key 已创建。请立即复制保存；轮换后旧 key 失效。',
     sessionKeyRotated: 'key 已轮换，旧 key 立即失效。',
@@ -55,6 +56,7 @@ const I18N = {
     back: 'Back', refresh: 'Refresh', loading: 'Loading…', search: 'Search', save: 'Save', saved: 'Saved',
     on: 'Enabled', off: 'Disabled', memories: 'memories', stateCard: 'Conversation Card', noCard: '(no card)',
     sessionMaintain: 'Session Maintenance', sessionKey: 'Memory key', noKey: 'not created',
+    autoSelect: 'Auto select', modelCustom: 'Custom model name',
     sessionKeyCreate: 'Create key', sessionKeyRotate: 'Rotate', sessionExport: 'Export', sessionPurge: 'Purge',
     sessionKeyCreated: 'Key created. Copy it now; after rotation the old key stops working.',
     sessionKeyRotated: 'Key rotated; old key is now invalid.',
@@ -672,13 +674,16 @@ export function apply(ctx) {
     const [overrides, setOverrides] = React.useState([])
     const [busy, setBusy] = React.useState(false)
     const [msg, setMsg] = React.useState('')
+    const [models, setModels] = React.useState([])
 
     async function load() {
       const sres = await api('GET', '/v1/config-schema')
       const vres = sessionId ? await api('GET', '/v1/config/session?session_id=' + encodeURIComponent(sessionId)) : await api('GET', '/v1/config')
+      const mres = await api('GET', '/v1/models')
       setOverrides(sessionId && vres.overrides ? vres.overrides : [])
       if (sres && sres.schema) setSchema(sres.schema)
       if (vres && vres.config) setValues(vres.config)
+      if (mres && Array.isArray(mres.providers)) setModels(mres.providers)
       setLoaded(true)
     }
 
@@ -715,6 +720,40 @@ export function apply(ctx) {
 
     function renderField(key, spec) {
       const val = values[key] !== undefined ? values[key] : fieldDefault(spec)
+      const isModelField = key === 'reflection_engine.extract_provider' || key === 'reflection_engine.extract_model' ||
+        key === 'memory_consolidation.llm_provider' || key === 'memory_consolidation.llm_model'
+      if (isModelField) {
+        const providerEntries = models || []
+        const providerNames = providerEntries.map(function (p) { return p.id }).filter(Boolean)
+        const isProvider = key.endsWith('_provider')
+        const isModel = key.endsWith('_model')
+        let candidateValues = []
+        if (isProvider) {
+          candidateValues = providerNames.slice()
+        } else if (isModel) {
+          const providerKey = key.replace('_model', '_provider')
+          const providerName = String(values[providerKey] || providerNames[0] || '')
+          const entry = providerEntries.find(function (p) { return p.id === providerName })
+          candidateValues = (entry && entry.models || []).map(function (m) { return m.id || m.name }).filter(Boolean)
+        }
+        candidateValues = [...new Set(candidateValues)]
+        const optionEls = [React.createElement('option', { key: '', value: '' }, t('autoSelect'))]
+          .concat(candidateValues.map(function (o) { return React.createElement('option', { key: o, value: o }, o) }))
+        const showSelect = candidateValues.length > 0
+        return React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
+          showSelect
+            ? React.createElement('select', {
+                className: 'dsh-mem-select', style: { flex: 1, minWidth: 130 }, value: String(val),
+                onChange: function (e) { setValue(key, e.target.value) },
+              }, optionEls)
+            : null,
+          React.createElement('input', {
+            className: 'dsh-mem-input', style: { flex: 1, minWidth: 130 }, value: String(val),
+            placeholder: t('modelCustom'),
+            onChange: function (e) { setValue(key, e.target.value) },
+          }),
+        )
+      }
       if (spec.options && spec.options.length) {
         return React.createElement('select', {
           className: 'dsh-mem-select', style: { width: '100%' },
