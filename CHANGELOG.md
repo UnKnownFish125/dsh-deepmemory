@@ -2,6 +2,25 @@
 
 All notable changes to dsh-deepmemory are documented here.
 
+## [v0.6.2] - 2026-08-26
+
+### Added
+- 失败任务外援：Host 新增 `POST /mem-api/v1/v2/tasks/<id>/ask-sol`（自动发现 sol 模型追问并写回 `sol_advice`）；v2_domain 新增 `sol_advice` 字段与 `set_task_sol_advice`
+- 自定义确认弹窗（删除任务不再用浏览器 confirm）
+
+### Changed
+- 任务看板语义重做：6 栏只读状态告示板（草稿/规划/待办/进行中/待验收/失败），移除手动流转按钮（状态由 agent 驱动），任务卡主按钮改为「打开会话」跳转绑定会话
+- 进行中栏同步当前会话 agent 任务清单（`useProjection('todos')`，conversation.view「任务板」tab，后续移除）
+- 工作区切换下拉；转交任务过滤已归档会话
+- 任务看板独立成插件 `dsh-livetaskboard`（派生仓库），deepmemory 保留主体记忆职责
+
+## [v0.6.1] - 2026-08-25
+
+### Added
+- 任务可配置（`reflection_engine.extract_provider/extract_model`、`memory_consolidation.llm_provider/llm_model` 默认留空自动选择，配置 UI 支持已配置列表选择 + 自定义）
+- `/mem-api/v1/models` 目录接口（Host 列举已配置 provider/model）；插件统一 `resolveModelRoute`
+- plugin-v3 `redactSensitive`（凭据不进入 LLM 请求前缀与记忆）；task preset persona 增加 credential rule
+
 ## [v0.6.0] - 2026-08-25
 
 ### Added
