@@ -47,7 +47,6 @@ const I18N = {
     sessionConfig: '会话配置', defaultConfig: '默认配置', override: '覆盖', reset: '重置', overridden: '已覆盖',
     sensitiveWarning: '此内容含敏感信息，默认脱敏', requestApproval: '请求授权', approving: '授权中…',
     expand: '展开原文', approvalGranted: '已授权（剩余N次）', approvalExpired: '授权已过期',
-    tasks: '任务看板', taskTitle: '任务标题', taskDesc: '任务描述', taskStatus: '状态',
     taskCreate: '创建任务', taskEdit: '编辑', taskBlocked: '阻塞', taskUnblock: '解除阻塞',
     planned: '待规划', todo: '待办', inProgress: '进行中', completed: '已完成', failed: '已失败',
     blockReason: '阻塞原因', noTasks: '（无任务）', taskTransition: '流转', cardRevisions: '修订历史',
@@ -952,113 +951,6 @@ function apply(ctx) {
     )
   }
 
-  function TaskBoardView(props) {
-    const t = props.t
-    const lang = props.lang
-    const [tasks, setTasks] = React.useState([])
-    const [creating, setCreating] = React.useState(false)
-    const [newTitle, setNewTitle] = React.useState('')
-    const [newDesc, setNewDesc] = React.useState('')
-    const [newColor, setNewColor] = React.useState('neutral')
-    const [msg, setMsg] = React.useState('')
-    const workspaceId = props.workspaceId || ''
-    const sessionId = props.sessionId || ''
-    const sessionOptions = props.sessionOptions || []
-    const colors = { neutral: '#8a8f98', red: '#d94f4f', orange: '#e58a32', yellow: '#c6a52b', green: '#3e9b68', blue: '#4c83c3' }
-    const colorNames = { neutral: '默认', red: '红', orange: '橙', yellow: '黄', green: '绿', blue: '蓝' }
-    async function load() {
-      if (!workspaceId) { setTasks([]); setMsg(lang === 'en' ? 'No workspace for this conversation' : '当前会话未绑定工作区'); return }
-      const res = await api('GET', '/v1/v2/tasks?workspace_id=' + encodeURIComponent(workspaceId) + '&limit=100')
-      if (res && Array.isArray(res.tasks)) setTasks(res.tasks)
-    }
-    React.useEffect(function () { load() }, [])
-    async function createTask() {
-      if (!newTitle.trim()) return
-      const res = await api('POST', '/v1/v2/tasks', {
-        title: newTitle.trim(), description: newDesc.trim(), task_color: newColor,
-        status: 'planned', workspace_id: workspaceId, session_id: sessionId,
-      })
-      if (res && res.task) { setNewTitle(''); setNewDesc(''); setNewColor('neutral'); setCreating(false); load(); setMsg(t('saved')) }
-      else setMsg(t('cfgFail') + (res.error || ''))
-    }
-    async function transition(task, toStatus) {
-      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/transition', { to_status: toStatus, expected_version: task.version, reason: 'UI transition' })
-      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
-    }
-    async function toggleBlocked(task) {
-      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/blocked', { blocked: !task.blocked, expected_version: task.version, reason: task.blocked ? 'unblock' : 'block', missing_conditions: [] })
-      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
-    }
-    async function setColor(task, color) {
-      if (color === (task.task_color || 'neutral')) return
-      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/color', { task_color: color, expected_version: task.version })
-      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
-    }
-    async function setBinding(task, nextSessionId) {
-      if (!nextSessionId || nextSessionId === task.session_id) return
-      const res = await api('POST', '/v1/v2/tasks/' + task.id + '/binding', {
-        workspace_id: workspaceId, session_id: nextSessionId, expected_version: task.version,
-      })
-      if (res && res.task) { load(); setMsg(t('saved')) } else setMsg(t('cfgFail') + (res.error || ''))
-    }
-    const statusMap = { planned: t('planned'), todo: t('todo'), in_progress: t('inProgress'), completed: t('completed'), failed: t('failed') }
-    const canTransition = { planned: ['todo'], todo: ['in_progress'], in_progress: ['completed', 'failed'], completed: [], failed: ['todo', 'in_progress'] }
-    const activeCount = tasks.filter(function (task) { return task.status === 'todo' || task.status === 'in_progress' }).length
-    return React.createElement('div', { className: 'dsh-mem-panel dsh-mem-task-panel' },
-      React.createElement('div', { className: 'dsh-mem-task-toolbar' },
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: props.onBack }, '‹ ' + t('back')),
-        React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('tasks')),
-        React.createElement('div', { className: 'dsh-mem-task-toolbar-meta' },
-          React.createElement('span', null, tasks.length + ' ' + (lang === 'en' ? 'total' : '总计')),
-          React.createElement('span', null, activeCount + ' ' + (lang === 'en' ? 'active' : '进行中')),
-        ),
-        React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: function () { setCreating(!creating) } }, creating ? t('cardCancel') : '+ ' + t('taskCreate')),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, t('refresh')),
-      ),
-      msg ? React.createElement('div', { style: { opacity: .7 } }, msg) : null,
-      creating ? React.createElement('div', { className: 'dsh-mem-box' },
-        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } }, React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskTitle')), React.createElement('input', { className: 'dsh-mem-input', value: newTitle, onChange: function (e) { setNewTitle(e.target.value) } })),
-        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0 } }, React.createElement('span', { className: 'dsh-mem-cfg-label' }, t('taskDesc')), React.createElement('textarea', { className: 'dsh-mem-input', style: { minHeight: 60 }, value: newDesc, onChange: function (e) { setNewDesc(e.target.value) } })),
-        React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0 } }, React.createElement('span', { className: 'dsh-mem-cfg-label' }, '颜色'), React.createElement('select', { className: 'dsh-mem-input', value: newColor, onChange: function (e) { setNewColor(e.target.value) } }, Object.keys(colors).map(function (c) { return React.createElement('option', { key: c, value: c }, colorNames[c]) }))),
-        React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: createTask }, t('save')),
-      ) : null,
-      React.createElement('div', { className: 'dsh-mem-task-board' },
-        ['planned', 'todo', 'in_progress', 'completed', 'failed'].map(function (status) {
-          const items = tasks.filter(function (task) { return task.status === status })
-          return React.createElement('section', { key: status, className: 'dsh-mem-task-column', 'data-status': status },
-            React.createElement('div', { className: 'dsh-mem-task-column-title' }, React.createElement('span', null, statusMap[status]), React.createElement('span', { className: 'dsh-mem-badge' }, String(items.length))),
-            items.length ? items.map(function (task) {
-              const color = task.task_color || 'neutral'
-              return React.createElement('details', { key: task.id, className: 'dsh-mem-task-card' },
-                React.createElement('span', { className: 'dsh-mem-task-priority', style: { background: colors[color] || colors.neutral }, title: colorNames[color] || color }),
-                React.createElement('summary', null, task.title),
-                React.createElement('div', { className: 'dsh-mem-task-detail' },
-                  task.description ? React.createElement('div', { className: 'dsh-mem-task-description' }, task.description) : null,
-                  task.blocked ? React.createElement('div', { className: 'dsh-mem-task-blocked' }, t('taskBlocked')) : null,
-                  React.createElement('label', { className: 'dsh-mem-task-color-label' }, lang === 'en' ? 'Conversation ' : '对话 ',
-                    React.createElement('select', {
-                      value: task.session_id || '',
-                      onChange: function (e) { setBinding(task, e.target.value) },
-                    },
-                      !task.session_id ? React.createElement('option', { value: '' }, lang === 'en' ? 'Unbound' : '未绑定') : null,
-                      sessionOptions.map(function (item) { return React.createElement('option', { key: item.id, value: item.id }, item.title) }),
-                    ),
-                  ),
-                  React.createElement('label', { className: 'dsh-mem-task-color-label' }, '颜色 ', React.createElement('select', { value: color, onChange: function (e) { setColor(task, e.target.value) } }, Object.keys(colors).map(function (c) { return React.createElement('option', { key: c, value: c }, colorNames[c]) }))),
-                  React.createElement('div', { className: 'dsh-mem-task-controls' },
-                    task.session_id && props.onOpenSession ? React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { props.onOpenSession(task.session_id) } }, lang === 'en' ? 'Open conversation' : '打开对话') : null,
-                    status === 'in_progress' ? React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-warn', onClick: function () { toggleBlocked(task) } }, task.blocked ? t('taskUnblock') : t('taskBlocked')) : null,
-                    (canTransition[status] || []).map(function (st) { return React.createElement('button', { key: st, className: 'dsh-mem-btn', onClick: function () { transition(task, st) } }, statusMap[st]) }),
-                  ),
-                ),
-              )
-            }) : React.createElement('div', { className: 'dsh-mem-task-empty' }, t('noTasks')),
-          )
-        }),
-      ),
-    )
-  }
-
   function MemoryPanel(props) {
     const [view, setView] = React.useState('main')
     const [initialLoaded, setInitialLoaded] = React.useState(false)
@@ -1212,7 +1104,6 @@ function apply(ctx) {
     if (view === 'graph') return React.createElement(GraphView, subProps())
     if (view === 'archive') return React.createElement(ArchiveView, subProps())
     if (view === 'maintain') return React.createElement(MaintenanceView, subProps())
-    if (view === 'tasks') return React.createElement(TaskBoardView, subProps())
     if (view === 'config') return React.createElement(ConfigView, { t: t, lang: lang, sessionId: sid, onBack: function () { setView('main') } })
 
     const cardLines = []
@@ -1444,7 +1335,6 @@ function apply(ctx) {
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('graph') } }, t('graph')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('archive') } }, t('archive')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('maintain') } }, t('maintain')),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('tasks') } }, t('tasks')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('config') } }, t('sessionConfig')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: toggleEnabled }, enabled ? t('enabled') : t('disabled')),
         React.createElement('button', { className: 'dsh-mem-btn', title: 'Switch language', onClick: function () { setLang(lang === 'zh' ? 'en' : 'zh') } }, t('lang')),
