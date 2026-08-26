@@ -203,7 +203,7 @@ async function api(method, path, body) {
 
 
 // ── 全局任务看板（侧栏按钮 → 浮层窗口）──────────────────────────
-const taskBoardState = { open: false, listeners: new Set() }
+const taskBoardState = { open: false, listeners: new Set(), workspaces: null }
 function setTaskBoardOpen(open) {
   if (taskBoardState.open === open) return
   taskBoardState.open = open
@@ -282,6 +282,25 @@ function TaskBoardSurface(props) {
     const res = await api('POST', '/v1/v2/tasks/' + task.id + '/delete', { reason: 'deleted by user' })
     if (res && res.task) { setMsg('已删除'); await load() }
     else setMsg('删除失败: ' + (res.error || ''))
+  }
+
+  async function createNewSessionForTransfer() {
+    if (!transferTask) return
+    const targetWs = xferWs || workspaceId
+    if (!targetWs) { setMsg('请选择目标工作区'); return }
+    const wsvc = taskBoardState.workspaces
+    if (!wsvc || typeof wsvc.connectWorkspace !== 'function') { setMsg('当前环境不支持新建会话'); return }
+    setBusy(true)
+    try {
+      const newSid = await wsvc.connectWorkspace(targetWs)
+      setBusy(false)
+      if (!newSid) { setMsg('新建会话失败'); return }
+      setXferSid(String(newSid))
+      setMsg('已创建会话，可继续转入规划（新会话自动连接该工作区记忆）')
+    } catch (e) {
+      setBusy(false)
+      setMsg('新建会话失败: ' + String(e && e.message || e))
+    }
   }
 
   async function commitTransfer() {
@@ -407,6 +426,10 @@ function TaskBoardSurface(props) {
             ),
           ),
           xferSid ? React.createElement('div', { style: { fontSize: 12, opacity: .65 } }, '会话: ' + sessionTitle(xferSid)) : null,
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            React.createElement('button', { className: 'dsh-mem-btn', onClick: createNewSessionForTransfer, disabled: busy }, busy ? '…' : '✚ 新建会话'),
+            React.createElement('span', { style: { fontSize: 11, opacity: .55 } }, '新会话自动连接该工作区记忆'),
+          ),
         ),
         React.createElement('div', { style: { marginTop: 16, display: 'flex', gap: 8, justifyContent: 'flex-end' } },
           React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setTransferTask(null) } }, '取消'),
@@ -420,6 +443,8 @@ function apply(ctx) {
   const slots = ctx.get('slots')
   if (slots === undefined) return
   const sessionService = ctx.get('sessions')
+  const workspaceService = ctx.get('workspaces')
+  if (workspaceService) taskBoardState.workspaces = workspaceService
 
   const styleEl = document.createElement('style')
   styleEl.dataset.plugin = 'deepmemory'
