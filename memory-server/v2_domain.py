@@ -985,8 +985,11 @@ class V2Store:
                     "UPDATE documents SET status='archived',updated_at=? WHERE session_id=? AND status='active'",
                     (now, session_id),
                 )
+                # 任务无 archived 状态（v5 状态机不含'archived'）；会话软归档时把进行中/
+                # 待办任务收尾为 completed（保留事件与溯源），避免看板残留未完成项。
                 conn.execute(
-                    "UPDATE tasks SET status='archived',version=version+1,updated_at=? WHERE session_id=? AND status!='archived'",
+                    "UPDATE tasks SET status='completed',version=version+1,updated_at=? "
+                    "WHERE session_id=? AND status NOT IN ('completed')",
                     (now, session_id),
                 )
             # 统一撤除会话 key（归档/删除后不再有迁移凭证）
