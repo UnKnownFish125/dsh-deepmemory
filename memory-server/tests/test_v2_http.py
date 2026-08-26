@@ -184,12 +184,25 @@ class V2HttpTest(unittest.TestCase):
         self.assertEqual([], st.list_tasks('ws-del'), 'store direct should filter deleted')
         code, listed = self.request("GET", "/v1/v2/tasks?workspace_id=ws-del")
         self.assertEqual(200, code)
-        print('DEBUG listed:', listed["tasks"])
         self.assertEqual([], listed["tasks"])
         code, _ = self.request("POST", f"/v1/v2/tasks/{task['id']}/delete", {})
         self.assertEqual(409, code)
 
+    def test_task_sol_advice_roundtrip(self):
+        code, created = self.request("POST", "/v1/v2/tasks", {"title": "fail-me", "status": "todo", "workspace_id": "ws-sol", "session_id": "s1"})
+        self.assertEqual(200, code)
+        task = created["task"]
+        code, moved = self.request("POST", f"/v1/v2/tasks/{task['id']}/transition", {"to_status": "in_progress", "expected_version": task["version"], "reason": "go"})
+        task = moved["task"]
+        code, failed = self.request("POST", f"/v1/v2/tasks/{task['id']}/transition", {"to_status": "failed", "expected_version": task["version"], "reason": "外援失败"})
+        task = failed["task"]
+        code, adv = self.request("POST", f"/v1/v2/tasks/{task['id']}/sol-advice", {"advice": "- 换路线\n- 降级", "expected_version": task["version"]})
+        self.assertEqual(200, code)
+        self.assertIn("换路线", adv["task"]["sol_advice"])
+        code, _ = self.request("POST", f"/v1/v2/tasks/{task['id']}/sol-advice", {"advice": "x", "expected_version": task["version"]})
+        self.assertEqual(409, code)
 
+    def test_task_binding_endpoint_and_workspace_requirement(self):
         code, response = self.request("POST", "/v1/v2/tasks", {"title": "missing binding"})
         self.assertEqual(400, code)
         code, created = self.request("POST", "/v1/v2/tasks", {

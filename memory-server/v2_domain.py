@@ -375,6 +375,7 @@ def install_v2_schema(conn):
             ("workspace_id", "TEXT NOT NULL DEFAULT ''"),
             ("session_id", "TEXT NOT NULL DEFAULT ''"),
             ("deleted_at", "REAL"),
+            ("sol_advice", "TEXT NOT NULL DEFAULT ''"),
         ))
         tasks_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
@@ -385,7 +386,7 @@ def install_v2_schema(conn):
             conn.executescript("CREATE TABLE tasks_v5 (\n                  id TEXT PRIMARY KEY,\n                  parent_task_id TEXT REFERENCES tasks(id),\n                  workspace_id TEXT NOT NULL DEFAULT '',\n                  session_id TEXT NOT NULL DEFAULT '',\n                  title TEXT NOT NULL,\n                  description TEXT NOT NULL DEFAULT '',\n                  task_color TEXT NOT NULL DEFAULT 'neutral',\n                  status TEXT NOT NULL DEFAULT 'planned'\n                    CHECK(status IN ('draft','planned','todo','in_progress','review','completed','failed')),\n                  blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1)),\n                  block_reason TEXT NOT NULL DEFAULT '',\n                  missing_conditions TEXT NOT NULL DEFAULT '[]',\n                  completion_criteria TEXT NOT NULL DEFAULT '',\n                  failure_reason TEXT NOT NULL DEFAULT '',\n                  failure_evidence TEXT NOT NULL DEFAULT '',\n                  attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt >= 1),\n                  version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),\n                  source_message_id TEXT NOT NULL DEFAULT '',\n                  trace_id TEXT NOT NULL DEFAULT '',\n                  created_at REAL NOT NULL,\n                  updated_at REAL NOT NULL,\n                  CHECK(blocked = 0 OR status = 'in_progress')\n                );\n                INSERT INTO tasks_v5\n                  (id,parent_task_id,workspace_id,session_id,title,description,task_color,status,\n                   blocked,block_reason,missing_conditions,completion_criteria,failure_reason,\n                   failure_evidence,attempt,version,source_message_id,trace_id,created_at,updated_at)\n                SELECT id,parent_task_id,workspace_id,session_id,title,description,task_color,status,\n                   blocked,block_reason,missing_conditions,completion_criteria,failure_reason,\n                   failure_evidence,attempt,version,source_message_id,trace_id,created_at,updated_at\n                FROM tasks;\n                DROP TABLE tasks;\n                ALTER TABLE tasks_v5 RENAME TO tasks;\n                CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);\n                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, blocked);\n                CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id,status,updated_at);\n                CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id,updated_at);")
             conn.commit()
             conn.execute("PRAGMA foreign_keys=ON")
-        _ensure_columns(conn, "tasks", (("deleted_at", "REAL"),))
+        _ensure_columns(conn, "tasks", (("deleted_at", "REAL"), ("sol_advice", "TEXT NOT NULL DEFAULT ''")))
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_workspace "
             "ON tasks(workspace_id,status,updated_at)"
@@ -615,6 +616,33 @@ class V2Store:
                 row["status"],
                 row["attempt"],
                 {"reason": reason, "actor": actor},
+            )
+        return self.get_task(task_id)
+
+    def set_task_sol_advice(self, task_id, advice, expected_version, actor="main_agent", reason=""):
+        """Store the sol-provided advice for a failed task (one-time aid; versioned)."""
+        if not advice or not str(advice).strip():
+            raise DomainError("sol advice is required")
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"task not found: {task_id}")
+            if row["version"] != expected_version:
+                raise ConflictError(
+                    f"task version conflict: expected {expected_version}, current {row['version']}"
+                )
+            conn.execute(
+                "UPDATE tasks SET sol_advice=?,version=version+1,updated_at=? WHERE id=?",
+                (str(advice).strip(), time.time(), task_id),
+            )
+            self._task_event(
+                conn,
+                task_id,
+                "status_changed",
+                row["status"],
+                row["status"],
+                row["attempt"],
+                {"reason": reason or "sol advice recorded", "actor": actor},
             )
         return self.get_task(task_id)
 

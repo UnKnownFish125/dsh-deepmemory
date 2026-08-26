@@ -203,7 +203,7 @@ async function api(method, path, body) {
 
 
 // ── 全局任务看板（侧栏按钮 → 浮层窗口）──────────────────────────
-const taskBoardState = { open: false, listeners: new Set(), workspaces: null }
+const taskBoardState = { open: false, listeners: new Set(), workspaces: null, sessions: null }
 function setTaskBoardOpen(open) {
   if (taskBoardState.open === open) return
   taskBoardState.open = open
@@ -227,9 +227,11 @@ function TaskBoardSurface(props) {
   const sessionsState = typeof (props && props.useSessions) === 'function'
     ? props.useSessions(function (state) { return state })
     : { byId: {} }
-  const workspaces = typeof (props && props.useWorkspaces) === 'function'
-    ? props.useWorkspaces(function (state) { return state.items || [] })
-    : []
+  const workspaceState = typeof (props && props.useWorkspaces) === 'function'
+    ? props.useWorkspaces(function (state) { return state })
+    : { items: [], archivedSessionIds: [] }
+  const workspaces = workspaceState.items || []
+  const archivedIds = new Set((workspaceState.archivedSessionIds || []).map(String))
   const [tasks, setTasks] = React.useState([])
   const [workspaceId, setWorkspaceId] = React.useState('')
   const [sessionId, setSessionId] = React.useState('')
@@ -241,7 +243,9 @@ function TaskBoardSurface(props) {
   const [transferTask, setTransferTask] = React.useState(null)
   const [xferWs, setXferWs] = React.useState('')
   const [xferSid, setXferSid] = React.useState('')
+  const [confirmTask, setConfirmTask] = React.useState(null)
 
+  const agentTodos = typeof (props && props.useProjection) === 'function' ? (props.useProjection('todos') || []) : []
   function sessionTitle(sid) {
     if (!sid) return '（未绑定会话）'
     const item = (sessionsState.byId || {})[sid]
@@ -277,8 +281,21 @@ function TaskBoardSurface(props) {
     else setMsg('流转失败: ' + (res.error || ''))
   }
 
+  async function askSol(task) {
+    setBusy(true); setMsg('正在问 sol …')
+    const res = await api('POST', '/v1/v2/tasks/' + task.id + '/ask-sol', {})
+    setBusy(false)
+    if (res && res.ok) { setMsg('sol 建议已记录'); await load() }
+    else setMsg('sol 询问失败: ' + (res.error || (res && res.advice) || ''))
+  }
+
   async function removeTask(task) {
-    if (!window.confirm('删除该任务？「' + task.title + '」')) return
+    setConfirmTask(task)
+  }
+  async function doRemoveTask() {
+    const task = confirmTask
+    setConfirmTask(null)
+    if (!task) return
     const res = await api('POST', '/v1/v2/tasks/' + task.id + '/delete', { reason: 'deleted by user' })
     if (res && res.task) { setMsg('已删除'); await load() }
     else setMsg('删除失败: ' + (res.error || ''))
@@ -335,25 +352,30 @@ function TaskBoardSurface(props) {
     if (!workspaceIdNow && workspaces.length) workspaceIdNow = String(workspaces[0].workspaceId || workspaces[0].id || '')
     setSessionId(sessionIdNow)
     setWorkspaceId(workspaceIdNow)
-    const opts = ids.map(function (sid) { return { id: String(sid), title: sessionTitle(String(sid)) } })
-    if (!opts.length && sessionIdNow) opts.push({ id: sessionIdNow, title: sessionIdNow })
+    const opts = ids
+      .filter(function (sid) { return !archivedIds.has(String(sid)) })
+      .map(function (sid) { return { id: String(sid), title: sessionTitle(String(sid)) } })
+    if (!opts.length && sessionIdNow && !archivedIds.has(String(sessionIdNow))) opts.push({ id: sessionIdNow, title: sessionIdNow })
     setSessionOptions(opts)
   }, [open])
 
-  if (!open) return null
+  const embedded = !!(props && props.embedded)
+  if (!embedded && !open) return null
+  function openTaskSession(task) {
+    const svc = taskBoardState.sessions
+    if (svc && typeof svc.open === 'function' && task.session_id) { svc.open(task.session_id); return }
+    setMsg('无法打开会话（当前会话未绑定）')
+  }
   function taskButtons(task) {
     const cls = 'dsh-mem-btn'
     const danger = 'dsh-mem-btn dsh-mem-btn-danger'
     const out = []
+    if (task.status !== 'draft' && task.session_id) out.push(React.createElement('button', { key: 'o', className: cls, onClick: function () { openTaskSession(task) } }, '↗ 打开会话'))
     if (task.status === 'draft') {
       out.push(React.createElement('button', { key: 'a', className: cls, onClick: function () { setTransferTask(task); setXferWs(workspaceId); setXferSid('') } }, '转正式任务'))
       out.push(React.createElement('button', { key: 'g', className: danger, onClick: function () { removeTask(task) } }, '删除'))
     }
-    if (task.status === 'planned') out.push(React.createElement('button', { key: 'b', className: cls, onClick: function () { transition(task, 'todo', 'agent 认领') } }, '→ 待办'))
-    if (task.status === 'todo') out.push(React.createElement('button', { key: 'c', className: cls, onClick: function () { transition(task, 'in_progress', '开始执行') } }, '→ 进行中'))
-    if (task.status === 'in_progress') out.push(React.createElement('button', { key: 'd', className: cls, onClick: function () { transition(task, 'review', '执行完成') } }, '→ 待验收'))
-    if (task.status === 'review') out.push(React.createElement('button', { key: 'e', className: cls, onClick: function () { transition(task, 'completed', '验收通过') } }, '✓ 完成'))
-    if (task.status === 'in_progress' || task.status === 'review') out.push(React.createElement('button', { key: 'f', className: danger, onClick: function () { transition(task, 'failed', '失败') } }, '✗ 失败'))
+    if (task.status === 'failed') out.push(React.createElement('button', { key: 's', className: cls, onClick: function () { askSol(task) } }, '🤖 问 sol'))
     if (task.status === 'completed' || task.status === 'failed') out.push(React.createElement('button', { key: 'h', className: danger, onClick: function () { removeTask(task) } }, '删除'))
     return out
   }
@@ -361,18 +383,25 @@ function TaskBoardSurface(props) {
   const columns = [
     { status: 'draft', title: '草稿 / 想法', hint: '没传给对话的灵感，可随时删除' },
     { status: 'planned', title: '规划', hint: '已写入会话，等待 agent 认领' },
+    { status: 'todo', title: '待办', hint: 'agent 已认领，待执行' },
     { status: 'in_progress', title: '进行中', hint: 'agent 正在执行' },
+    { status: 'review', title: '待验收', hint: '执行完成，等待验收' },
     { status: 'failed', title: '失败', hint: '多轮失败/外援未成，可重建或删除' },
   ]
   const total = tasks.length
   const activeCount = tasks.filter(function (t) { return t.status === 'in_progress' || t.status === 'todo' }).length
   const empty = total === 0
-  return React.createElement('div', { style: { position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(8,11,16,.62)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18 } },
-    React.createElement('div', { style: { width: 'min(1180px, 96vw)', maxHeight: '90vh', background: 'var(--dsw-alias-bg-layer-1, #151a21)', color: 'var(--dsw-alias-label-primary, #eceff4)', borderRadius: 14, boxShadow: '0 24px 80px rgba(0,0,0,.6)', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))', display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
+  const shellStyle = embedded
+    ? { width: '100%', height: '100%', overflow: 'auto' }
+    : { position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(8,11,16,.62)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18 }
+  return React.createElement('div', { style: shellStyle },
+    React.createElement('div', { style: embedded ? { width: '100%', height: '100%', background: 'var(--dsw-alias-bg-layer-1, #151a21)', display: 'flex', flexDirection: 'column', overflow: 'hidden' } : { width: 'min(1180px, 96vw)', maxHeight: '90vh', background: 'var(--dsw-alias-bg-layer-1, #151a21)', color: 'var(--dsw-alias-label-primary, #eceff4)', borderRadius: 14, boxShadow: '0 24px 80px rgba(0,0,0,.6)', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))', display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
       // Header
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px', background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,.06))', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))' } },
         React.createElement('span', { style: { fontSize: 16, fontWeight: 700 } }, '🗂 任务看板'),
-        React.createElement('span', { style: { fontSize: 12, opacity: .65 } }, workspaceTitle(workspaceId)),
+        React.createElement('select', { className: 'dsh-mem-select', style: { maxWidth: 220, fontSize: 12 }, value: workspaceId, onChange: function (e) { setWorkspaceId(e.target.value) } },
+          workspaces.map(function (w) { return React.createElement('option', { key: String(w.workspaceId || w.id), value: String(w.workspaceId || w.id) }, String(w.title || w.workspaceId || w.id)) }),
+        ),
         React.createElement('span', { className: 'dsh-mem-badge' }, total + ' 项'),
         React.createElement('span', { className: 'dsh-mem-badge' }, '进行中 ' + activeCount),
         React.createElement('span', { style: { flex: 1 } }),
@@ -387,7 +416,7 @@ function TaskBoardSurface(props) {
         React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: addDraft, disabled: busy }, busy ? '…' : '存草稿'),
       ),
       // Columns
-      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, padding: 14, overflow: 'auto', flex: 1, minHeight: 0 } },
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, padding: 14, overflow: 'auto', flex: 1, minHeight: 0 } },
         columns.map(function (col) {
           const items = tasks.filter(function (t) { return t.status === col.status })
           return React.createElement('div', { key: col.status, style: { background: 'rgba(128,128,128,.05)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column' } },
@@ -397,11 +426,27 @@ function TaskBoardSurface(props) {
               React.createElement('span', { className: 'dsh-mem-badge' }, String(items.length)),
             ),
             React.createElement('div', { style: { fontSize: 11, opacity: .55, marginBottom: 8 } }, col.hint),
+            col.status === 'in_progress' && agentTodos.length ? [
+              React.createElement('div', { key: 'agent-todos', style: { fontSize: 11, opacity: .7, marginBottom: 6 } }, '当前会话 agent 任务清单（todo_write 实时同步）:'),
+              ...agentTodos.slice(0, 12).map(function (todo, ti) {
+                const todoStyle = { background: 'var(--dsw-alias-bg-layer-1, #1d232c)', borderRadius: 8, padding: '8px 10px', marginBottom: 8, fontSize: 13, border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.15))' }
+                const dot = todo.status === 'in_progress' ? '#e58a32' : todo.status === 'completed' ? '#3e9b68' : '#8a8f98'
+                return React.createElement('div', { key: 'at-' + ti, style: Object.assign({}, todoStyle, { display: 'flex', gap: 6, alignItems: 'flex-start' }) },
+                  React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: dot, marginTop: 4, flex: 'none' } }),
+                  React.createElement('div', null,
+                    React.createElement('div', { style: { wordBreak: 'break-word' } }, String(todo.content || '')),
+                    React.createElement('div', { style: { fontSize: 10, opacity: .55 } }, todo.status),
+                  ),
+                )
+              }),
+            ] : null,
             items.length ? items.map(function (task) {
               return React.createElement('div', { key: task.id, style: { background: 'var(--dsw-alias-bg-layer-1, #1d232c)', borderRadius: 8, padding: '8px 10px', marginBottom: 8, fontSize: 13, border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.15))' } },
                 React.createElement('div', { style: { fontWeight: 600, marginBottom: 2, wordBreak: 'break-word' } }, task.title),
                 task.description ? React.createElement('div', { style: { opacity: .7, fontSize: 12, marginBottom: 4, wordBreak: 'break-word', whiteSpace: 'pre-wrap' } }, task.description) : null,
                 React.createElement('div', { style: { fontSize: 11, opacity: .6, marginBottom: 6 } }, '会话: ' + sessionTitle(task.session_id)),
+                task.sol_advice ? React.createElement('div', { style: { fontSize: 12, marginBottom: 6, padding: 6, background: 'rgba(78,150,255,.10)', borderRadius: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, '💡 sol: ' + task.sol_advice) : null,
+                task.failure_reason ? React.createElement('div', { style: { fontSize: 11, opacity: .7, marginBottom: 6 } }, '失败原因: ' + task.failure_reason) : null,
                 React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } }, taskButtons(task)),
               )
             }) : React.createElement('div', { style: { opacity: .45, fontSize: 12, textAlign: 'center', padding: '18px 0' } }, '（空）'),
@@ -436,6 +481,16 @@ function TaskBoardSurface(props) {
           React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: commitTransfer }, '转入规划'),
         ),
       ) : null,
+      // 自定义确认弹窗（不用浏览器 confirm）
+      confirmTask ? React.createElement('div', { style: { position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', background: 'var(--dsw-alias-bg-layer-2, #20262f)', borderRadius: 12, padding: 20, width: 380, boxShadow: '0 18px 60px rgba(0,0,0,.55)', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))' } },
+        React.createElement('div', { style: { fontSize: 15, fontWeight: 700, marginBottom: 8 } }, '确认删除'),
+        React.createElement('div', { style: { fontSize: 13, opacity: .9, marginBottom: 4 } }, '确定删除任务「' + confirmTask.title + '」？'),
+        React.createElement('div', { style: { fontSize: 12, opacity: .6, marginBottom: 14 } }, '删除后从看板消失，不可恢复（保留审计）。'),
+        React.createElement('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setConfirmTask(null) } }, '取消'),
+          React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-danger', onClick: doRemoveTask }, '确认删除'),
+        ),
+      ) : null,
     ),
   )
 }
@@ -445,6 +500,7 @@ function apply(ctx) {
   const sessionService = ctx.get('sessions')
   const workspaceService = ctx.get('workspaces')
   if (workspaceService) taskBoardState.workspaces = workspaceService
+  if (sessionService) taskBoardState.sessions = sessionService
 
   const styleEl = document.createElement('style')
   styleEl.dataset.plugin = 'deepmemory'
@@ -1769,6 +1825,12 @@ function apply(ctx) {
     return slots.register(
       { name: 'conversation.view', id: 'memory', order: 5, label: '记忆' },
       function (props) { return React.createElement(MemoryPanel, props) },
+    )
+  })
+  slots.inject('conversation.view', function () {
+    return slots.register(
+      { name: 'conversation.view', id: 'taskboard', order: 4, label: '任务板' },
+      function (props) { return React.createElement(TaskBoardSurface, Object.assign({}, props, { embedded: true })) },
     )
   })
 

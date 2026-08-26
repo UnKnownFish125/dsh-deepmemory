@@ -2403,6 +2403,13 @@ class Handler(BaseHTTPRequestHandler):
                             task_id, actor=body.get("actor", "user"),
                             reason=body.get("reason", "deleted by user"),
                         )})
+                    if parts[4] == "sol-advice":
+                        return self._v2_call(lambda: {"task": store.set_task_sol_advice(
+                            task_id, body.get("advice", ""),
+                            int(body.get("expected_version", 0)),
+                            actor=body.get("actor", "main_agent"),
+                            reason=body.get("reason", ""),
+                        )})
                     if parts[4] == "transition":
                         return self._v2_call(lambda: {"task": store.transition_task(
                             task_id, body["to_status"], int(body["expected_version"]),

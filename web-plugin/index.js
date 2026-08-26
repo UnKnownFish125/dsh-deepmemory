@@ -599,6 +599,76 @@ export function apply(ctx) {
     },
   })
 
+  // 失败任务外援：问 sol（gpt-5.6-sol）要解决方案，写回 sol_advice
+  ctx.webServer.register({
+    kind: 'regex',
+    path: new RegExp('^' + PREFIX.replace('/', '\/') + '\/v1\/v2\/tasks\/([^\/]+)\/ask-sol$'),
+    handler: async (req, res) => {
+      if (req.method !== 'POST') { res.writeHead(405); res.end(); return }
+      const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)) }
+      try {
+        const m = String(req.url || '').match(new RegExp('^' + PREFIX.replace('/', '\/') + '\/v1\/v2\/tasks\/([^\/]+)\/ask-sol$'))
+        const taskId = m && m[1] ? decodeURIComponent(m[1]) : ''
+        let body = {}
+        try { body = req.body ? JSON.parse(req.body) : {} } catch {}
+        const llm = ctx.get('llm')
+        if (!llm || typeof llm.stream !== 'function') { send(503, { error: 'llm unavailable' }); return }
+        let mem = null
+        try { mem = await memoryRequest('GET', '/v1/v2/tasks/' + encodeURIComponent(taskId), null) } catch (e) {
+          send(404, { error: 'task not found: ' + String((e && e.message) || e) }); return
+        }
+        if (!mem || !mem.task) { send(404, { error: 'task not found' }); return }
+        const task = mem.task
+        // 找 sol 模型
+        let solRoute = null
+        try {
+          const rawProviders = await llm.listProviders()
+          const providers = (rawProviders || []).map((p) => p.id || p.provider || p.name).filter(Boolean)
+          for (const name of providers) {
+            try {
+              const models = typeof llm.listModels === 'function' ? await llm.listModels(name) : []
+              const sol = (models || []).find((mm) => /sol/i.test(mm.id || mm.name || ''))
+              if (sol) { solRoute = { provider: name, model: sol.id }; break }
+            } catch {}
+          }
+        } catch {}
+        if (!solRoute) { send(404, { error: 'no sol model configured in dsh model catalog' }); return }
+        const prompt = [
+          '你是外援分析器（gpt-5.6-sol）。给一个失败任务提出可行建议。',
+          '任务标题: ' + (task.title || ''),
+          '描述: ' + (task.description || ''),
+          '失败原因: ' + (task.failure_reason || ''),
+          '失败证据: ' + (task.failure_evidence || ''),
+          '要求: 输出 2-4 条可执行建议（每条一行，bullet 开头），中文，不含凭据字面值。若任务明显不可行，也指出并说明如何终止/拒绝。',
+        ].join('\n')
+        let advice = ''
+        try {
+          const stream = llm.stream({
+            provider: solRoute.provider, model: solRoute.model,
+            system: '你是外援分析助手。',
+            messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+            temperature: 0.3,
+            signal: undefined,
+          })
+          for await (const chunk of stream) {
+            if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') advice += chunk.text
+            else if (chunk && (chunk.type === 'error' || chunk.type === 'aborted')) break
+          }
+        } catch (e) { send(502, { error: 'sol stream failed: ' + String(e) }); return }
+        if (!advice.trim()) { send(502, { error: 'sol returned empty' }); return }
+        let saved = null
+        try { saved = await memoryRequest('POST', '/v1/v2/tasks/' + encodeURIComponent(taskId) + '/sol-advice', {
+          advice: advice.trim(), expected_version: task.version, actor: 'main_agent', reason: 'sol aid for failed task',
+        }) } catch (e) {
+          send(500, { ok: false, advice: advice.trim(), error: 'advice save failed: ' + String((e && e.message) || e) }); return
+        }
+        send(200, { ok: true, advice: advice.trim(), provider: solRoute.provider, model: solRoute.model, task: saved && saved.task })
+      } catch (error) {
+        send(500, { error: String((error && error.message) || error) })
+      }
+    },
+  })
+
   ctx.webServer.register({
     kind: 'exact',
     path: PREFIX + '/v1/maintenance/consolidate',
