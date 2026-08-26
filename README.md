@@ -15,8 +15,9 @@ Give your DeepSeek Harness agents **cross-session memory** and a **near-infinite
 - **Hybrid retrieval** — BM25 + vector + graph, RRF fusion, recency × importance × relevance weighting
 - **Dual domains** — work / life memory separated at write and query time
 - **Mode presets** — two production presets (task / daily) plus an extension template
-- **WebUI** — memory panel, entity graph, archive, maintenance, per-session config, task board (kanban)
-- **Explicit ownership** — task boards are Workspace-scoped, every task links to a Session, and state cards are independently versioned per Session
+- **WebUI** — memory panel, entity graph, archive, maintenance, per-session config
+- **Dynamic task board** — 任务看板已独立为 [dsh-livetaskboard](https://github.com/UnKnownFish125/dsh-livetaskboard) 插件（状态机 + 外援 sol/子代理），本仓库保留任务系统接口
+- **Explicit ownership** — tasks are Workspace-scoped and link to a Session; state cards are independently versioned per Session
 
 ## Memory Model (brief)
 
@@ -38,9 +39,9 @@ deepmemory ships as **three presets**, each a complete `agent.cordis.yml` config
 
 | Preset | Shape | Includes | Skips |
 |---|---|---|---|
-| `task` 任务工作模式 | full coding agent | all tools, plan mode, sub-agents, workflow, task board, process memory, budget profile `task-default` | — |
-| `daily` 日常问答模式 | lightweight Q&A | web search, short-term memory, daily state card, topic continuity, budget profile `daily-default` | task board, sub-agent orchestration, workflow |
-| `blank-template` | extension template | minimal persona, optional-tool comments, `plugin/` entry point, preset-local realm example, budget comments | deepmemory injection, extraction, state card, task board (deliberately) |
+| `task` 任务工作模式 | full coding agent | all tools, plan mode, sub-agents, workflow, process memory, budget profile `task-default`; 任务看板由 dsh-livetaskboard 提供 | — |
+| `daily` 日常问答模式 | lightweight Q&A | web search, short-term memory, daily state card, topic continuity, budget profile `daily-default` | sub-agent orchestration, workflow |
+| `blank-template` | extension template | minimal persona, optional-tool comments, `plugin/` entry point, preset-local realm example, budget comments | deepmemory injection, extraction, state card |
 
 Each preset declares a **budget contract**: `budget_profile` + `priority_allocation` (per-component priority and `min_tokens`). Unused budget returns to the pool and is redistributed by priority — the model context window is the hard cap, components negotiate within it.
 
@@ -75,7 +76,7 @@ Switching providers (e.g. `local` → `api`) is safe: the FAISS index is rebuilt
 
 1. **Choose a preset** — start a new session and select `任务工作模式` (task) or `日常问答模式` (daily). Memory plugin loads automatically; no dynamic `define+run` needed.
 2. **WebUI** — open the「记忆」tab in the conversation view: manage memories, inspect the entity graph, edit the current conversation card, and use the current Workspace task kanban. Every task can open or rebind its linked conversation.
-3. **API** — HTTP backend on `:6230`: v2 task boards at `/v1/v2/tasks?workspace_id=...`, session cards at `/v1/v2/cards/<kind>/<session_id>`, recall/lifecycle under `/v1/v2/`, session config at `/v1/config/session/*`, and sensitivity audit at `/v1/sensitive/audit`.
+3. **API** — HTTP backend on `:6230`: v2 task API at `/v1/v2/tasks?workspace_id=...`（任务看板 UI 由 dsh-livetaskboard 消费）, session cards at `/v1/v2/cards/<kind>/<session_id>`, recall/lifecycle under `/v1/v2/`, session config at `/v1/config/session/*`, and sensitivity audit at `/v1/sensitive/audit`.
 
 ## Extending
 
