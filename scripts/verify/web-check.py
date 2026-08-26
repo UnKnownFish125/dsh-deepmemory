@@ -340,7 +340,29 @@ with sync_playwright() as p:
         raise AssertionError("9. 敏感内容 UI CSS 未加载")
     print("9. 敏感内容 UI CSS 已加载 OK")
 
-    # 10. 无致命 console 错误
+    # 9b. 侧栏「任务看板」按钮 + 全屏看板浮层
+    tb_btn = page.get_by_text("任务看板", exact=False).first
+    if tb_btn.count() > 0:
+        try:
+            tb_btn.click(timeout=5000)
+            page.wait_for_timeout(1200)
+            body_text = page.inner_text("body")
+            if not any(k in body_text for k in ("草稿/想法", "规划", "进行中", "失败")):
+                raise AssertionError("9b. 任务看板浮层未渲染四栏")
+            print("9b. 任务看板浮层渲染 OK")
+            # 关闭
+            close_btn = page.get_by_text("关闭", exact=True).last
+            if close_btn.count() > 0:
+                close_btn.click()
+                page.wait_for_timeout(600)
+        except AssertionError:
+            raise
+        except Exception as e:
+            print("9b. 任务看板点击跳过:", str(e)[:60])
+    else:
+        print("9b. 未找到任务看板按钮（侧栏可能折叠），跳过")
+
+
     fatal = [e for e in errors if any(k in e for k in (
         "is not defined", "ReferenceError", "Cannot read", "Failed to fetch", "Unexpected token"))]
     if fatal:

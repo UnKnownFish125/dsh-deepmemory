@@ -109,16 +109,46 @@ class V2HttpTest(unittest.TestCase):
             {"to_status": "completed", "expected_version": 1},
         )
         self.assertEqual(409, code)
-        code, history = self.request("GET", f"/v1/v2/tasks/{task['id']}/history")
-        self.assertEqual(200, code)
-        self.assertEqual(["created", "status_changed"], [event["event_type"] for event in history["events"]])
         code, _ = self.request(
             "POST", f"/v1/v2/tasks/{task['id']}/transition",
-            {"to_status": "completed", "expected_version": moved["task"]["version"]},
+            {"to_status": "review", "expected_version": moved["task"]["version"]},
+        )
+        self.assertEqual(200, code)
+        review_task = (self.request("GET", f"/v1/v2/tasks/{task['id']}"))[1]["task"]
+        code, history = self.request("GET", f"/v1/v2/tasks/{task['id']}/history")
+        self.assertEqual(200, code)
+        self.assertEqual(["created", "status_changed", "status_changed"], [event["event_type"] for event in history["events"]])
+        code, _ = self.request(
+            "POST", f"/v1/v2/tasks/{task['id']}/transition",
+            {"to_status": "completed", "expected_version": review_task["version"]},
         )
         self.assertEqual(200, code)
 
-    def test_task_color_create_and_update(self):
+    def test_task_draft_review_lifecycle_and_limit(self):
+        code, created = self.request("POST", "/v1/v2/tasks", {"title": "idea", "status": "draft", "workspace_id": "ws-1", "session_id": "session-1"})
+        self.assertEqual(200, code)
+        task = created["task"]
+        self.assertEqual("draft", task["status"])
+        # draft -> planned -> todo -> in_progress -> review -> completed
+        for nxt, version in (("planned", task["version"]),):
+            code, moved = self.request("POST", f"/v1/v2/tasks/{task['id']}/transition", {"to_status": nxt, "expected_version": version, "reason": "write to conversation"})
+            self.assertEqual(200, code)
+            version = moved["task"]["version"]
+        for nxt in ("todo", "in_progress", "review", "completed"):
+            code, moved = self.request("POST", f"/v1/v2/tasks/{task['id']}/transition", {"to_status": nxt, "expected_version": version, "reason": "step"})
+            self.assertEqual(200, code)
+            version = moved["task"]["version"]
+        self.assertEqual("completed", moved["task"]["status"])
+        # 数量上限：活跃任务（draft/planned/todo/in_progress/review）超过 max_active_tasks 拒绝
+        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "seed1", "status": "draft", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
+        self.assertEqual(200, code)
+        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "seed2", "status": "planned", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
+        self.assertEqual(200, code)
+        code, err = self.request("POST", "/v1/v2/tasks", {"title": "overflow", "status": "planned", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
+        self.assertEqual(400, code)
+        self.assertIn("task limit", str(err.get("error", "")))
+
+
         code, created = self.request(
             "POST", "/v1/v2/tasks", {"title": "color", "status": "planned", "task_color": "orange", "workspace_id": "ws-1", "session_id": "session-1"}
         )

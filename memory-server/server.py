@@ -2393,6 +2393,7 @@ class Handler(BaseHTTPRequestHandler):
                             key: body[key] for key in (
                                 "description", "task_color", "blocked", "block_reason", "missing_conditions",
                                 "completion_criteria", "source_message_id", "trace_id", "workspace_id", "session_id",
+                                "max_active_tasks",
                             ) if key in body
                         })})
                 if len(parts) >= 5 and parts[2] == "tasks":

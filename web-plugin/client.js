@@ -1,8 +1,11 @@
+__ModuleLoader__.load({
+  id: 'dsh-deepmemory',
+  factory: (require) => {
 /**
  * deepmemory browser plugin — memory panel + schema-driven config page.
  * ESM source; installed via install.sh which converts it to __ModuleLoader__ format.
  */
-import * as React from 'react'
+const React = require('react')
 const name = 'deepmemory'
 
 const WORKSPACE_DEFAULT = 'deepseek-hardness'
@@ -198,7 +201,186 @@ async function api(method, path, body) {
   }
 }
 
-export function apply(ctx) {
+
+// ── 全局任务看板（侧栏按钮 → 浮层窗口）──────────────────────────
+const taskBoardState = { open: false, listeners: new Set() }
+function setTaskBoardOpen(open) {
+  if (taskBoardState.open === open) return
+  taskBoardState.open = open
+  for (const l of taskBoardState.listeners) l(open)
+}
+function useTaskBoardOpen() {
+  const [open, setOpen] = React.useState(taskBoardState.open)
+  React.useEffect(function () {
+    const l = function (v) { setOpen(v) }
+    taskBoardState.listeners.add(l)
+    return function () { taskBoardState.listeners.delete(l) }
+  }, [])
+  return [open, setTaskBoardOpen]
+}
+
+const TASK_STATUS_LABEL = { draft: '草稿', planned: '规划', todo: '待办', in_progress: '进行中', review: '待验收', completed: '完成', failed: '失败' }
+const TASK_STATUS_COLOR = { draft: '#8a8f98', planned: '#c6a52b', todo: '#4c83c3', in_progress: '#e58a32', review: '#3e9b68', completed: '#2f7d5c', failed: '#d94f4f' }
+
+function TaskBoardSurface(props) {
+  const [open, setOpen] = useTaskBoardOpen()
+  const sessionsState = typeof (props && props.useSessions) === 'function'
+    ? props.useSessions(function (state) { return state })
+    : { byId: {} }
+  const workspaces = typeof (props && props.useWorkspaces) === 'function'
+    ? props.useWorkspaces(function (state) { return state.items || [] })
+    : []
+  const [tasks, setTasks] = React.useState([])
+  const [workspaceId, setWorkspaceId] = React.useState('')
+  const [sessionId, setSessionId] = React.useState('')
+  const [sessionOptions, setSessionOptions] = React.useState([])
+  const [draftText, setDraftText] = React.useState('')
+  const [draftDesc, setDraftDesc] = React.useState('')
+  const [msg, setMsg] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [transferTask, setTransferTask] = React.useState(null)
+  const [newSessionPick, setNewSessionPick] = React.useState('')
+  const [xferWs, setXferWs] = React.useState('')
+  const [xferSid, setXferSid] = React.useState('')
+
+  async function load() {
+    if (!workspaceId || !sessionId) return
+    const res = await api('GET', '/v1/v2/tasks?workspace_id=' + encodeURIComponent(workspaceId) + '&limit=500')
+    if (res && Array.isArray(res.tasks)) setTasks(res.tasks)
+  }
+
+  async function addDraft() {
+    if (!draftText.trim()) return
+    setBusy(true)
+    const res = await api('POST', '/v1/v2/tasks', {
+      title: draftText.trim(), description: draftDesc.trim(), status: 'draft',
+      workspace_id: workspaceId, session_id: sessionId,
+    })
+    setBusy(false)
+    if (res && res.task) { setDraftText(''); setDraftDesc(''); setMsg('草稿已保存'); await load() }
+    else setMsg('保存失败: ' + (res.error || ''))
+  }
+
+  async function transition(task, toStatus, reason) {
+    const res = await api('POST', '/v1/v2/tasks/' + task.id + '/transition', { to_status: toStatus, expected_version: task.version, reason: reason || 'UI move' })
+    if (res && res.task) { setMsg('已流转 → ' + (TASK_STATUS_LABEL[toStatus] || toStatus)); await load() }
+    else setMsg('流转失败: ' + (res.error || ''))
+  }
+
+  async function commitTransfer() {
+    if (!transferTask) return
+    const targetWs = xferWs || workspaceId
+    const targetSid = xferSid || sessionId
+    const res = await api('POST', '/v1/v2/tasks/' + transferTask.id + '/transition', {
+      to_status: 'planned', expected_version: transferTask.version, reason: 'draft -> planned (选择会话)',
+    })
+    if (res && res.task) {
+      const task = res.task
+      if (task.session_id !== targetSid) {
+        await api('POST', '/v1/v2/tasks/' + task.id + '/binding', { workspace_id: targetWs, session_id: targetSid, expected_version: task.version })
+      }
+      setTransferTask(null); setMsg('已转入规划'); await load()
+    } else setMsg('转失败: ' + (res.error || ''))
+  }
+
+  React.useEffect(function () {
+    if (!open) return
+    const t = window.setTimeout(load, 0)
+    return function () { window.clearTimeout(t) }
+  }, [open, workspaceId, sessionId])
+
+  React.useEffect(function () {
+    if (!open) return
+    const current = sessionsState.byId || {}
+    const ids = Object.keys(current)
+    const sessionIdNow = ids && ids.length ? String(ids[0]) : ''
+    let workspaceIdNow = ''
+    for (const w of workspaces) {
+      if ((w.sessionIds || []).indexOf(sessionIdNow) >= 0) { workspaceIdNow = String(w.workspaceId || ''); break }
+    }
+    if (!workspaceIdNow && workspaces.length) workspaceIdNow = String(workspaces[0].workspaceId || workspaces[0].id || '')
+    setSessionId(sessionIdNow)
+    setWorkspaceId(workspaceIdNow)
+    const opts = []
+    for (const sid of ids) opts.push({ id: String(sid), title: (current[sid] && current[sid].displayTitle) || String(sid) })
+    if (!opts.length) opts.push({ id: sessionIdNow, title: sessionIdNow })
+    setSessionOptions(opts)
+  }, [open])
+
+  if (!open || !workspaceId) return null
+  function taskButtons(task) {
+    const out = []
+    const cls = 'dsh-mem-btn'
+    const danger = 'dsh-mem-btn dsh-mem-btn-danger'
+    if (task.status === 'draft') out.push(React.createElement('button', { key: 'a', className: cls, onClick: function () { setTransferTask(task); setXferWs(workspaceId); setXferSid(sessionId) } }, '转正式任务'))
+    if (task.status === 'planned') out.push(React.createElement('button', { key: 'b', className: cls, onClick: function () { transition(task, 'todo', 'agent 认领') } }, '→ 待办'))
+    if (task.status === 'todo') out.push(React.createElement('button', { key: 'c', className: cls, onClick: function () { transition(task, 'in_progress', '开始执行') } }, '→ 进行中'))
+    if (task.status === 'in_progress') out.push(React.createElement('button', { key: 'd', className: cls, onClick: function () { transition(task, 'review', '执行完成') } }, '→ 待验收'))
+    if (task.status === 'review') out.push(React.createElement('button', { key: 'e', className: cls, onClick: function () { transition(task, 'completed', '验收通过') } }, '✓ 完成'))
+    if (task.status === 'in_progress' || task.status === 'review') out.push(React.createElement('button', { key: 'f', className: danger, onClick: function () { transition(task, 'failed', '失败') } }, '✗ 失败'))
+    return out
+  }
+
+  const columns = [
+    { status: 'draft', title: '草稿/想法' },
+    { status: 'planned', title: '规划' },
+    { status: 'in_progress', title: '进行中' },
+    { status: 'failed', title: '失败' },
+  ]
+  return React.createElement('div', { style: { position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(10,14,20,.55)', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+    React.createElement('div', { style: { width: 'min(1200px, 94vw)', maxHeight: '88vh', background: 'var(--dsw-alias-bg-layer-1, #1a1f26)', color: 'var(--dsw-alias-label-primary, #eceff4)', borderRadius: 10, boxShadow: '0 12px 48px rgba(0,0,0,.45)', display: 'flex', flexDirection: 'column' } },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))' } },
+        React.createElement('strong', null, '任务看板'),
+        React.createElement('span', { style: { opacity: .6, fontSize: 12 } }, '工作区: ' + workspaceId),
+        React.createElement('span', { style: { flex: 1 } }),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, '刷新'),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setOpen(false) } }, '关闭'),
+      ),
+      msg ? React.createElement('div', { style: { padding: '6px 16px', opacity: .8 } }, msg) : null,
+      React.createElement('div', { style: { padding: '10px 16px', display: 'flex', gap: 8, borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.2))' } },
+        React.createElement('input', { className: 'dsh-mem-input', style: { flex: 2 }, placeholder: '写下还没传给对话的想法…', value: draftText, onChange: function (e) { setDraftText(e.target.value) } }),
+        React.createElement('input', { className: 'dsh-mem-input', style: { flex: 3 }, placeholder: '描述（可选）', value: draftDesc, onChange: function (e) { setDraftDesc(e.target.value) } }),
+        React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: addDraft, disabled: busy }, busy ? '…' : '存草稿'),
+      ),
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, padding: 14, overflow: 'auto' } },
+        columns.map(function (col) {
+          const items = tasks.filter(function (t) { return t.status === col.status })
+          return React.createElement('div', { key: col.status, style: { background: 'rgba(128,128,128,.06)', borderRadius: 8, padding: 10, minHeight: 160 } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
+              React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: TASK_STATUS_COLOR[col.status] } }),
+              React.createElement('strong', null, col.title),
+              React.createElement('span', { className: 'dsh-mem-badge' }, String(items.length)),
+            ),
+            items.length ? items.map(function (task) {
+              return React.createElement('div', { key: task.id, style: { background: 'rgba(128,128,128,.07)', borderRadius: 6, padding: 8, marginBottom: 6, fontSize: 13 } },
+                React.createElement('div', null, task.title),
+                task.description ? React.createElement('div', { style: { opacity: .7, fontSize: 12 } }, task.description) : null,
+                React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 } },
+                  taskButtons(task),
+                ),
+              )
+            }) : React.createElement('div', { style: { opacity: .5, fontSize: 12 } }, '（空）'),
+          )
+        }),
+      ),
+      // 草稿转正式任务：选择目标工作区/会话
+      transferTask ? React.createElement('div', { style: { position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', background: '#20262f', borderRadius: 10, padding: 18, width: 440, boxShadow: '0 10px 40px rgba(0,0,0,.5)' } },
+        React.createElement('strong', null, '草稿转正式任务'),
+        React.createElement('div', { style: { marginTop: 10, fontSize: 13 } }, transferTask.title),
+        React.createElement('div', { style: { marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 } },
+          React.createElement('label', null, '目标工作区: ', React.createElement('input', { className: 'dsh-mem-input', value: xferWs, onChange: function (e) { setXferWs(e.target.value) } })),
+          React.createElement('label', null, '目标会话: ', React.createElement('input', { className: 'dsh-mem-input', placeholder: '会话 id（留空用当前）', value: xferSid, onChange: function (e) { setXferSid(e.target.value) } })),
+        ),
+        React.createElement('div', { style: { marginTop: 12, display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setTransferTask(null) } }, '取消'),
+          React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: commitTransfer }, '转入规划'),
+        ),
+      ) : null,
+    ),
+  )
+}
+
+function apply(ctx) {
   const slots = ctx.get('slots')
   if (slots === undefined) return
   const sessionService = ctx.get('sessions')
@@ -1529,6 +1711,32 @@ export function apply(ctx) {
     )
   })
 
+  // 侧栏底部「任务看板」按钮（list slot，安全追加，不替换官方入口）
+  slots.inject('sidebar.footer.action', function () {
+    return slots.register(
+      { name: 'sidebar.footer.action', id: 'deepmemory-task-board', order: 40, label: '任务看板' },
+      function () {
+        const [open, setOpen] = useTaskBoardOpen()
+        return React.createElement('button', {
+          title: '任务看板',
+          onClick: function (e) { e.stopPropagation(); setOpen(!open) },
+          style: { background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: '6px 8px', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 6, width: '100%', fontSize: 13 },
+        },
+          React.createElement('span', null, open ? '⊙' : '◉'),
+          React.createElement('span', null, '任务看板'),
+        )
+      },
+    )
+  })
+
+  // 全屏任务看板浮层（shell.overlay：additive 浮动层）
+  slots.inject('shell.overlay', function () {
+    return slots.register(
+      { name: 'shell.overlay', id: 'deepmemory-task-board', order: 50, label: '任务看板' },
+      function (props) { return React.createElement(TaskBoardSurface, props) },
+    )
+  })
+
   // 记忆配置卡片：设置 → 插件 → 插件配置页（官方 configurable tab），独立卡片
   slots.inject('settings.plugin.item', function* () {
     yield slots.register(
@@ -1541,3 +1749,6 @@ export function apply(ctx) {
     )
   }, { key: 'deepmemory' })
 }
+return { name, apply }
+  }
+})
