@@ -374,16 +374,18 @@ def install_v2_schema(conn):
             ("task_color", "TEXT NOT NULL DEFAULT 'neutral'"),
             ("workspace_id", "TEXT NOT NULL DEFAULT ''"),
             ("session_id", "TEXT NOT NULL DEFAULT ''"),
+            ("deleted_at", "REAL"),
         ))
         tasks_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone()
-        if tasks_sql and ('"draft"' not in (tasks_sql[0] or "") or '"review"' not in (tasks_sql[0] or "")):
+        if tasks_sql and ("draft" not in (tasks_sql[0] or "") or "review" not in (tasks_sql[0] or "")):
             conn.commit()
             conn.execute("PRAGMA foreign_keys=OFF")
             conn.executescript("CREATE TABLE tasks_v5 (\n                  id TEXT PRIMARY KEY,\n                  parent_task_id TEXT REFERENCES tasks(id),\n                  workspace_id TEXT NOT NULL DEFAULT '',\n                  session_id TEXT NOT NULL DEFAULT '',\n                  title TEXT NOT NULL,\n                  description TEXT NOT NULL DEFAULT '',\n                  task_color TEXT NOT NULL DEFAULT 'neutral',\n                  status TEXT NOT NULL DEFAULT 'planned'\n                    CHECK(status IN ('draft','planned','todo','in_progress','review','completed','failed')),\n                  blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1)),\n                  block_reason TEXT NOT NULL DEFAULT '',\n                  missing_conditions TEXT NOT NULL DEFAULT '[]',\n                  completion_criteria TEXT NOT NULL DEFAULT '',\n                  failure_reason TEXT NOT NULL DEFAULT '',\n                  failure_evidence TEXT NOT NULL DEFAULT '',\n                  attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt >= 1),\n                  version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),\n                  source_message_id TEXT NOT NULL DEFAULT '',\n                  trace_id TEXT NOT NULL DEFAULT '',\n                  created_at REAL NOT NULL,\n                  updated_at REAL NOT NULL,\n                  CHECK(blocked = 0 OR status = 'in_progress')\n                );\n                INSERT INTO tasks_v5\n                  (id,parent_task_id,workspace_id,session_id,title,description,task_color,status,\n                   blocked,block_reason,missing_conditions,completion_criteria,failure_reason,\n                   failure_evidence,attempt,version,source_message_id,trace_id,created_at,updated_at)\n                SELECT id,parent_task_id,workspace_id,session_id,title,description,task_color,status,\n                   blocked,block_reason,missing_conditions,completion_criteria,failure_reason,\n                   failure_evidence,attempt,version,source_message_id,trace_id,created_at,updated_at\n                FROM tasks;\n                DROP TABLE tasks;\n                ALTER TABLE tasks_v5 RENAME TO tasks;\n                CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);\n                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, blocked);\n                CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id,status,updated_at);\n                CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id,updated_at);")
             conn.commit()
             conn.execute("PRAGMA foreign_keys=ON")
+        _ensure_columns(conn, "tasks", (("deleted_at", "REAL"),))
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_workspace "
             "ON tasks(workspace_id,status,updated_at)"
@@ -447,7 +449,7 @@ class V2Store:
             with self._connect() as conn:
                 count = conn.execute(
                     "SELECT COUNT(*) c FROM tasks WHERE workspace_id=? AND status IN "
-                    "('draft','planned','todo','in_progress','review')",
+                    "('planned','todo','in_progress','review')",
                     (workspace_id,),
                 ).fetchone()["c"]
             if count >= max_active:
@@ -554,6 +556,29 @@ class V2Store:
             )
         return self.get_task(task_id)
 
+    def delete_task(self, task_id, actor="user", reason="deleted by user"):
+        """Soft-delete one task: set deleted_at and record a status_changed event."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"task not found: {task_id}")
+            if row["deleted_at"] is not None:
+                raise ConflictError("task already deleted")
+            conn.execute(
+                "UPDATE tasks SET deleted_at=?,version=version+1,updated_at=? WHERE id=?",
+                (time.time(), time.time(), task_id),
+            )
+            self._task_event(
+                conn,
+                task_id,
+                "status_changed",
+                row["status"],
+                row["status"],
+                row["attempt"],
+                {"reason": reason, "actor": actor},
+            )
+        return self.get_task(task_id)
+
     def set_task_blocked(
         self,
         task_id,
@@ -648,7 +673,7 @@ class V2Store:
         workspace_id = str(workspace_id or "").strip()
         if not workspace_id:
             raise DomainError("workspace_id is required")
-        clauses, args = ["workspace_id=?"], [workspace_id]
+        clauses, args = ["workspace_id=?", "deleted_at IS NULL"], [workspace_id]
         if status:
             if status not in TASK_STATUSES:
                 raise DomainError(f"unknown task status: {status}")

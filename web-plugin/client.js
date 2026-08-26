@@ -239,12 +239,22 @@ function TaskBoardSurface(props) {
   const [msg, setMsg] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [transferTask, setTransferTask] = React.useState(null)
-  const [newSessionPick, setNewSessionPick] = React.useState('')
   const [xferWs, setXferWs] = React.useState('')
   const [xferSid, setXferSid] = React.useState('')
 
+  function sessionTitle(sid) {
+    if (!sid) return '（未绑定会话）'
+    const item = (sessionsState.byId || {})[sid]
+    const title = item && item.displayTitle ? String(item.displayTitle) : ''
+    return title || String(sid).slice(0, 18)
+  }
+  function workspaceTitle(wid) {
+    for (const w of workspaces) if (String(w.workspaceId || w.id || '') === String(wid || '')) return String(w.title || w.name || w.workspaceId || wid)
+    return String(wid || '')
+  }
+
   async function load() {
-    if (!workspaceId || !sessionId) return
+    if (!workspaceId) return
     const res = await api('GET', '/v1/v2/tasks?workspace_id=' + encodeURIComponent(workspaceId) + '&limit=500')
     if (res && Array.isArray(res.tasks)) setTasks(res.tasks)
   }
@@ -267,33 +277,38 @@ function TaskBoardSurface(props) {
     else setMsg('流转失败: ' + (res.error || ''))
   }
 
+  async function removeTask(task) {
+    if (!window.confirm('删除该任务？「' + task.title + '」')) return
+    const res = await api('POST', '/v1/v2/tasks/' + task.id + '/delete', { reason: 'deleted by user' })
+    if (res && res.task) { setMsg('已删除'); await load() }
+    else setMsg('删除失败: ' + (res.error || ''))
+  }
+
   async function commitTransfer() {
     if (!transferTask) return
     const targetWs = xferWs || workspaceId
-    const targetSid = xferSid || sessionId
+    const targetSid = xferSid
+    if (!targetSid) { setMsg('请选择目标会话'); return }
     const res = await api('POST', '/v1/v2/tasks/' + transferTask.id + '/transition', {
-      to_status: 'planned', expected_version: transferTask.version, reason: 'draft -> planned (选择会话)',
+      to_status: 'planned', expected_version: transferTask.version, reason: 'draft -> planned (选择会话: ' + sessionTitle(targetSid) + ')',
     })
     if (res && res.task) {
-      const task = res.task
-      if (task.session_id !== targetSid) {
-        await api('POST', '/v1/v2/tasks/' + task.id + '/binding', { workspace_id: targetWs, session_id: targetSid, expected_version: task.version })
-      }
-      setTransferTask(null); setMsg('已转入规划'); await load()
+      await api('POST', '/v1/v2/tasks/' + transferTask.id + '/binding', { workspace_id: targetWs, session_id: targetSid, expected_version: res.task.version })
+      setTransferTask(null); setMsg('已转入规划 · ' + sessionTitle(targetSid)); await load()
     } else setMsg('转失败: ' + (res.error || ''))
   }
 
   React.useEffect(function () {
-    if (!open) return
+    if (!open || !workspaceId) return
     const t = window.setTimeout(load, 0)
     return function () { window.clearTimeout(t) }
-  }, [open, workspaceId, sessionId])
+  }, [open, workspaceId])
 
   React.useEffect(function () {
     if (!open) return
     const current = sessionsState.byId || {}
     const ids = Object.keys(current)
-    const sessionIdNow = ids && ids.length ? String(ids[0]) : ''
+    const sessionIdNow = ids.length ? String(ids[0]) : ''
     let workspaceIdNow = ''
     for (const w of workspaces) {
       if ((w.sessionIds || []).indexOf(sessionIdNow) >= 0) { workspaceIdNow = String(w.workspaceId || ''); break }
@@ -301,77 +316,99 @@ function TaskBoardSurface(props) {
     if (!workspaceIdNow && workspaces.length) workspaceIdNow = String(workspaces[0].workspaceId || workspaces[0].id || '')
     setSessionId(sessionIdNow)
     setWorkspaceId(workspaceIdNow)
-    const opts = []
-    for (const sid of ids) opts.push({ id: String(sid), title: (current[sid] && current[sid].displayTitle) || String(sid) })
-    if (!opts.length) opts.push({ id: sessionIdNow, title: sessionIdNow })
+    const opts = ids.map(function (sid) { return { id: String(sid), title: sessionTitle(String(sid)) } })
+    if (!opts.length && sessionIdNow) opts.push({ id: sessionIdNow, title: sessionIdNow })
     setSessionOptions(opts)
   }, [open])
 
-  if (!open || !workspaceId) return null
+  if (!open) return null
   function taskButtons(task) {
-    const out = []
     const cls = 'dsh-mem-btn'
     const danger = 'dsh-mem-btn dsh-mem-btn-danger'
-    if (task.status === 'draft') out.push(React.createElement('button', { key: 'a', className: cls, onClick: function () { setTransferTask(task); setXferWs(workspaceId); setXferSid(sessionId) } }, '转正式任务'))
+    const out = []
+    if (task.status === 'draft') {
+      out.push(React.createElement('button', { key: 'a', className: cls, onClick: function () { setTransferTask(task); setXferWs(workspaceId); setXferSid('') } }, '转正式任务'))
+      out.push(React.createElement('button', { key: 'g', className: danger, onClick: function () { removeTask(task) } }, '删除'))
+    }
     if (task.status === 'planned') out.push(React.createElement('button', { key: 'b', className: cls, onClick: function () { transition(task, 'todo', 'agent 认领') } }, '→ 待办'))
     if (task.status === 'todo') out.push(React.createElement('button', { key: 'c', className: cls, onClick: function () { transition(task, 'in_progress', '开始执行') } }, '→ 进行中'))
     if (task.status === 'in_progress') out.push(React.createElement('button', { key: 'd', className: cls, onClick: function () { transition(task, 'review', '执行完成') } }, '→ 待验收'))
     if (task.status === 'review') out.push(React.createElement('button', { key: 'e', className: cls, onClick: function () { transition(task, 'completed', '验收通过') } }, '✓ 完成'))
     if (task.status === 'in_progress' || task.status === 'review') out.push(React.createElement('button', { key: 'f', className: danger, onClick: function () { transition(task, 'failed', '失败') } }, '✗ 失败'))
+    if (task.status === 'completed' || task.status === 'failed') out.push(React.createElement('button', { key: 'h', className: danger, onClick: function () { removeTask(task) } }, '删除'))
     return out
   }
 
   const columns = [
-    { status: 'draft', title: '草稿/想法' },
-    { status: 'planned', title: '规划' },
-    { status: 'in_progress', title: '进行中' },
-    { status: 'failed', title: '失败' },
+    { status: 'draft', title: '草稿 / 想法', hint: '没传给对话的灵感，可随时删除' },
+    { status: 'planned', title: '规划', hint: '已写入会话，等待 agent 认领' },
+    { status: 'in_progress', title: '进行中', hint: 'agent 正在执行' },
+    { status: 'failed', title: '失败', hint: '多轮失败/外援未成，可重建或删除' },
   ]
-  return React.createElement('div', { style: { position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(10,14,20,.55)', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
-    React.createElement('div', { style: { width: 'min(1200px, 94vw)', maxHeight: '88vh', background: 'var(--dsw-alias-bg-layer-1, #1a1f26)', color: 'var(--dsw-alias-label-primary, #eceff4)', borderRadius: 10, boxShadow: '0 12px 48px rgba(0,0,0,.45)', display: 'flex', flexDirection: 'column' } },
-      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))' } },
-        React.createElement('strong', null, '任务看板'),
-        React.createElement('span', { style: { opacity: .6, fontSize: 12 } }, '工作区: ' + workspaceId),
+  const total = tasks.length
+  const activeCount = tasks.filter(function (t) { return t.status === 'in_progress' || t.status === 'todo' }).length
+  const empty = total === 0
+  return React.createElement('div', { style: { position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(8,11,16,.62)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18 } },
+    React.createElement('div', { style: { width: 'min(1180px, 96vw)', maxHeight: '90vh', background: 'var(--dsw-alias-bg-layer-1, #151a21)', color: 'var(--dsw-alias-label-primary, #eceff4)', borderRadius: 14, boxShadow: '0 24px 80px rgba(0,0,0,.6)', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))', display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
+      // Header
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px', background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,.06))', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))' } },
+        React.createElement('span', { style: { fontSize: 16, fontWeight: 700 } }, '🗂 任务看板'),
+        React.createElement('span', { style: { fontSize: 12, opacity: .65 } }, workspaceTitle(workspaceId)),
+        React.createElement('span', { className: 'dsh-mem-badge' }, total + ' 项'),
+        React.createElement('span', { className: 'dsh-mem-badge' }, '进行中 ' + activeCount),
         React.createElement('span', { style: { flex: 1 } }),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: load }, '刷新'),
-        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setOpen(false) } }, '关闭'),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: load, title: '刷新' }, '↻ 刷新'),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setOpen(false) } }, '✕ 关闭'),
       ),
-      msg ? React.createElement('div', { style: { padding: '6px 16px', opacity: .8 } }, msg) : null,
-      React.createElement('div', { style: { padding: '10px 16px', display: 'flex', gap: 8, borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.2))' } },
-        React.createElement('input', { className: 'dsh-mem-input', style: { flex: 2 }, placeholder: '写下还没传给对话的想法…', value: draftText, onChange: function (e) { setDraftText(e.target.value) } }),
-        React.createElement('input', { className: 'dsh-mem-input', style: { flex: 3 }, placeholder: '描述（可选）', value: draftDesc, onChange: function (e) { setDraftDesc(e.target.value) } }),
+      msg ? React.createElement('div', { style: { padding: '4px 18px', fontSize: 12, opacity: .85, background: 'rgba(78,150,255,.08)' } }, msg) : null,
+      // Draft input
+      React.createElement('div', { style: { padding: '12px 18px', display: 'flex', gap: 10, borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.18))' } },
+        React.createElement('input', { className: 'dsh-mem-input', style: { flex: 2, minWidth: 160 }, placeholder: '✍️ 写下还没传给对话的想法…', value: draftText, onChange: function (e) { setDraftText(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') addDraft() } }),
+        React.createElement('input', { className: 'dsh-mem-input', style: { flex: 3, minWidth: 200 }, placeholder: '补充描述（可选）', value: draftDesc, onChange: function (e) { setDraftDesc(e.target.value) } }),
         React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: addDraft, disabled: busy }, busy ? '…' : '存草稿'),
       ),
-      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, padding: 14, overflow: 'auto' } },
+      // Columns
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, padding: 14, overflow: 'auto', flex: 1, minHeight: 0 } },
         columns.map(function (col) {
           const items = tasks.filter(function (t) { return t.status === col.status })
-          return React.createElement('div', { key: col.status, style: { background: 'rgba(128,128,128,.06)', borderRadius: 8, padding: 10, minHeight: 160 } },
+          return React.createElement('div', { key: col.status, style: { background: 'rgba(128,128,128,.05)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column' } },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } },
-              React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: TASK_STATUS_COLOR[col.status] } }),
-              React.createElement('strong', null, col.title),
+              React.createElement('span', { style: { width: 10, height: 10, borderRadius: 5, background: TASK_STATUS_COLOR[col.status] } }),
+              React.createElement('strong', { style: { fontSize: 13 } }, col.title),
               React.createElement('span', { className: 'dsh-mem-badge' }, String(items.length)),
             ),
+            React.createElement('div', { style: { fontSize: 11, opacity: .55, marginBottom: 8 } }, col.hint),
             items.length ? items.map(function (task) {
-              return React.createElement('div', { key: task.id, style: { background: 'rgba(128,128,128,.07)', borderRadius: 6, padding: 8, marginBottom: 6, fontSize: 13 } },
-                React.createElement('div', null, task.title),
-                task.description ? React.createElement('div', { style: { opacity: .7, fontSize: 12 } }, task.description) : null,
-                React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 } },
-                  taskButtons(task),
-                ),
+              return React.createElement('div', { key: task.id, style: { background: 'var(--dsw-alias-bg-layer-1, #1d232c)', borderRadius: 8, padding: '8px 10px', marginBottom: 8, fontSize: 13, border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.15))' } },
+                React.createElement('div', { style: { fontWeight: 600, marginBottom: 2, wordBreak: 'break-word' } }, task.title),
+                task.description ? React.createElement('div', { style: { opacity: .7, fontSize: 12, marginBottom: 4, wordBreak: 'break-word', whiteSpace: 'pre-wrap' } }, task.description) : null,
+                React.createElement('div', { style: { fontSize: 11, opacity: .6, marginBottom: 6 } }, '会话: ' + sessionTitle(task.session_id)),
+                React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } }, taskButtons(task)),
               )
-            }) : React.createElement('div', { style: { opacity: .5, fontSize: 12 } }, '（空）'),
+            }) : React.createElement('div', { style: { opacity: .45, fontSize: 12, textAlign: 'center', padding: '18px 0' } }, '（空）'),
           )
         }),
       ),
-      // 草稿转正式任务：选择目标工作区/会话
-      transferTask ? React.createElement('div', { style: { position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', background: '#20262f', borderRadius: 10, padding: 18, width: 440, boxShadow: '0 10px 40px rgba(0,0,0,.5)' } },
-        React.createElement('strong', null, '草稿转正式任务'),
-        React.createElement('div', { style: { marginTop: 10, fontSize: 13 } }, transferTask.title),
-        React.createElement('div', { style: { marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 } },
-          React.createElement('label', null, '目标工作区: ', React.createElement('input', { className: 'dsh-mem-input', value: xferWs, onChange: function (e) { setXferWs(e.target.value) } })),
-          React.createElement('label', null, '目标会话: ', React.createElement('input', { className: 'dsh-mem-input', placeholder: '会话 id（留空用当前）', value: xferSid, onChange: function (e) { setXferSid(e.target.value) } })),
+      empty ? React.createElement('div', { style: { padding: '0 18px 14px', fontSize: 12, opacity: .5 } }, '暂无任务。顶部输入一条想法存为草稿，或等对话产生任务。') : null,
+      // Transfer dialog
+      transferTask ? React.createElement('div', { style: { position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', background: 'var(--dsw-alias-bg-layer-2, #20262f)', borderRadius: 12, padding: 20, width: 460, boxShadow: '0 18px 60px rgba(0,0,0,.55)', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))' } },
+        React.createElement('div', { style: { fontSize: 15, fontWeight: 700, marginBottom: 6 } }, '草稿转正式任务'),
+        React.createElement('div', { style: { fontSize: 13, opacity: .85, marginBottom: 12 } }, '「' + transferTask.title + '」将写入会话，进入规划队列'),
+        React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+          React.createElement('label', { style: { fontSize: 12, opacity: .8 } }, '目标工作区: ',
+            React.createElement('select', { className: 'dsh-mem-select', value: xferWs, onChange: function (e) { setXferWs(e.target.value) } },
+              workspaces.map(function (w) { return React.createElement('option', { key: String(w.workspaceId || w.id), value: String(w.workspaceId || w.id) }, String(w.title || w.workspaceId || w.id)) }),
+            ),
+          ),
+          React.createElement('label', { style: { fontSize: 12, opacity: .8 } }, '目标会话（选择后进入该会话规划队列）: ',
+            React.createElement('select', { className: 'dsh-mem-select', value: xferSid, onChange: function (e) { setXferSid(e.target.value) } },
+              React.createElement('option', { value: '' }, '— 请选择会话 —'),
+              sessionOptions.map(function (o) { return React.createElement('option', { key: o.id, value: o.id }, o.title) }),
+            ),
+          ),
+          xferSid ? React.createElement('div', { style: { fontSize: 12, opacity: .65 } }, '会话: ' + sessionTitle(xferSid)) : null,
         ),
-        React.createElement('div', { style: { marginTop: 12, display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+        React.createElement('div', { style: { marginTop: 16, display: 'flex', gap: 8, justifyContent: 'flex-end' } },
           React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setTransferTask(null) } }, '取消'),
           React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: commitTransfer }, '转入规划'),
         ),
@@ -379,7 +416,6 @@ function TaskBoardSurface(props) {
     ),
   )
 }
-
 function apply(ctx) {
   const slots = ctx.get('slots')
   if (slots === undefined) return

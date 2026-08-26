@@ -140,9 +140,15 @@ class V2HttpTest(unittest.TestCase):
             version = moved["task"]["version"]
         self.assertEqual("completed", moved["task"]["status"])
         # 数量上限：活跃任务（draft/planned/todo/in_progress/review）超过 max_active_tasks 拒绝
-        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "seed1", "status": "draft", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
+        # draft 不占活跃上限：draft 可随意写
+        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "idea1", "status": "draft", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
         self.assertEqual(200, code)
-        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "seed2", "status": "planned", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
+        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "idea2", "status": "draft", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
+        self.assertEqual(200, code)
+        # planned/todo/in_progress/review 计入上限
+        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "p1", "status": "planned", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
+        self.assertEqual(200, code)
+        code, _ = self.request("POST", "/v1/v2/tasks", {"title": "p2", "status": "planned", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
         self.assertEqual(200, code)
         code, err = self.request("POST", "/v1/v2/tasks", {"title": "overflow", "status": "planned", "workspace_id": "ws-limit", "session_id": "s1", "max_active_tasks": 2})
         self.assertEqual(400, code)
@@ -167,7 +173,23 @@ class V2HttpTest(unittest.TestCase):
         )
         self.assertEqual(400, code)
 
-    def test_task_binding_endpoint_and_workspace_requirement(self):
+    def test_task_delete_soft_removes_from_board(self):
+        code, created = self.request("POST", "/v1/v2/tasks", {"title": "del-me", "status": "draft", "workspace_id": "ws-del", "session_id": "s1"})
+        self.assertEqual(200, code)
+        task = created["task"]
+        code, removed = self.request("POST", f"/v1/v2/tasks/{task['id']}/delete", {"reason": "user removed"})
+        self.assertEqual(200, code)
+        self.assertIsNotNone(removed["task"]["deleted_at"])
+        st = server.V2Store(server.DB_PATH)
+        self.assertEqual([], st.list_tasks('ws-del'), 'store direct should filter deleted')
+        code, listed = self.request("GET", "/v1/v2/tasks?workspace_id=ws-del")
+        self.assertEqual(200, code)
+        print('DEBUG listed:', listed["tasks"])
+        self.assertEqual([], listed["tasks"])
+        code, _ = self.request("POST", f"/v1/v2/tasks/{task['id']}/delete", {})
+        self.assertEqual(409, code)
+
+
         code, response = self.request("POST", "/v1/v2/tasks", {"title": "missing binding"})
         self.assertEqual(400, code)
         code, created = self.request("POST", "/v1/v2/tasks", {

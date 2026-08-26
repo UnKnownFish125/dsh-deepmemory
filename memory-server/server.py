@@ -2398,6 +2398,11 @@ class Handler(BaseHTTPRequestHandler):
                         })})
                 if len(parts) >= 5 and parts[2] == "tasks":
                     task_id = parts[3]
+                    if parts[4] == "delete":
+                        return self._v2_call(lambda: {"task": store.delete_task(
+                            task_id, actor=body.get("actor", "user"),
+                            reason=body.get("reason", "deleted by user"),
+                        )})
                     if parts[4] == "transition":
                         return self._v2_call(lambda: {"task": store.transition_task(
                             task_id, body["to_status"], int(body["expected_version"]),
