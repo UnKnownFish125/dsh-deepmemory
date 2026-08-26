@@ -1827,13 +1827,6 @@ function apply(ctx) {
       function (props) { return React.createElement(MemoryPanel, props) },
     )
   })
-  slots.inject('conversation.view', function () {
-    return slots.register(
-      { name: 'conversation.view', id: 'taskboard', order: 4, label: '任务板' },
-      function (props) { return React.createElement(TaskBoardSurface, Object.assign({}, props, { embedded: true })) },
-    )
-  })
-
   // 侧栏底部「任务看板」按钮（list slot，安全追加，不替换官方入口）
   slots.inject('sidebar.footer.action', function () {
     return slots.register(
