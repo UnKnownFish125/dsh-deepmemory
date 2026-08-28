@@ -17,6 +17,7 @@ Give your DeepSeek Harness agents **cross-session memory** and a **near-infinite
 - **Mode presets** — two production presets (task / daily) plus an extension template
 - **WebUI** — memory panel, entity graph, archive, maintenance, per-session config
 - **Dynamic task board** — 任务看板已独立为 [dsh-livetaskboard](https://github.com/UnKnownFish125/dsh-livetaskboard) 插件（状态机 + 外援 sol/子代理），本仓库保留任务系统接口
+- **Recommended companion** — 长对话场景推荐搭配 [dsh-longlongchat](https://github.com/UnKnownFish125/dsh-longlongchat)（大纲悬浮窗、跳转分块加载、LLM 中文总结），与 deepmemory 记忆补全互补使用
 - **Explicit ownership** — tasks are Workspace-scoped and link to a Session; state cards are independently versioned per Session
 
 ## Memory Model (brief)
