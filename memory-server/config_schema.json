@@ -323,6 +323,12 @@
         "hint": "创建超过该天数的记忆才允许自动归档",
         "type": "float",
         "default": 30.0
+      },
+      "retention_days": {
+        "description": "archive tier 保留天数",
+        "hint": "归档层保留期（默认不自动物理清理，软删可恢复优先）",
+        "type": "float",
+        "default": 365.0
       }
     }
   },
@@ -549,6 +555,36 @@
         "hint": "更新摘要链时保留最近 N 条原文（后续细节可溯）",
         "type": "int",
         "default": 20
+      }
+    }
+  },
+  "library": {
+    "description": "知识库分库（面向 agent 调度）",
+    "type": "object",
+    "items": {
+      "vocabulary": {
+        "description": "库词汇表",
+        "hint": "bias=总行为约束/core=主体/eco=生态/project=项目/runtime=运行时默认",
+        "type": "list",
+        "default": [
+          "bias",
+          "core",
+          "eco",
+          "project",
+          "runtime"
+        ]
+      },
+      "bias_min_importance": {
+        "description": "bias 库最低重要性",
+        "hint": "行为约束写入 bias 库需 importance>=该值",
+        "type": "float",
+        "default": 0.8
+      },
+      "bias_protected": {
+        "description": "bias 库永不归档",
+        "hint": "禁止对 bias 库执行归档（archive-library 拒绝 403）",
+        "type": "bool",
+        "default": true
       }
     }
   }

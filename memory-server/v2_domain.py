@@ -27,6 +27,8 @@ MEMORY_CLASSES = (
     "compressed_archive",
 )
 STORAGE_TIERS = ("active", "cold", "archive")
+LIBRARY_NAMES = ("bias", "core", "eco", "project", "runtime")
+BIAS_MIN_IMPORTANCE = 0.8
 DECISION_STATUSES = (
     "none",
     "proposed",
@@ -237,6 +239,7 @@ END;
 DOCUMENT_COLUMNS = (
     ("memory_class", "TEXT NOT NULL DEFAULT 'semantic'"),
     ("storage_tier", "TEXT NOT NULL DEFAULT 'active'"),
+    ("library", "TEXT NOT NULL DEFAULT 'runtime'"),
     ("decision_status", "TEXT NOT NULL DEFAULT 'none'"),
     ("disputed", "INTEGER NOT NULL DEFAULT 0"),
     ("supersedes_id", "INTEGER REFERENCES documents(id)"),
@@ -278,6 +281,10 @@ BEFORE INSERT ON documents BEGIN
     THEN RAISE(ABORT, 'invalid memory_class') END;
   SELECT CASE WHEN NEW.storage_tier NOT IN ('active','cold','archive')
     THEN RAISE(ABORT, 'invalid storage_tier') END;
+  SELECT CASE WHEN NEW.library NOT IN ('bias','core','eco','project','runtime')
+    THEN RAISE(ABORT, 'invalid library') END;
+  SELECT CASE WHEN NEW.library = 'bias' AND (NEW.scope != 'global' OR NEW.importance < 0.8)
+    THEN RAISE(ABORT, 'bias library requires scope=global and importance>=0.8') END;
   SELECT CASE WHEN NEW.decision_status NOT IN ('none','proposed','exploring','pending','adopted','rejected','superseded','invalid')
     THEN RAISE(ABORT, 'invalid decision_status') END;
   SELECT CASE WHEN NEW.sensitivity_level NOT IN ('normal','sensitive','protected','secret')
@@ -296,6 +303,10 @@ BEFORE UPDATE ON documents BEGIN
     THEN RAISE(ABORT, 'invalid memory_class') END;
   SELECT CASE WHEN NEW.storage_tier NOT IN ('active','cold','archive')
     THEN RAISE(ABORT, 'invalid storage_tier') END;
+  SELECT CASE WHEN NEW.library NOT IN ('bias','core','eco','project','runtime')
+    THEN RAISE(ABORT, 'invalid library') END;
+  SELECT CASE WHEN NEW.library = 'bias' AND (NEW.scope != 'global' OR NEW.importance < 0.8)
+    THEN RAISE(ABORT, 'bias library requires scope=global and importance>=0.8') END;
   SELECT CASE WHEN NEW.decision_status NOT IN ('none','proposed','exploring','pending','adopted','rejected','superseded','invalid')
     THEN RAISE(ABORT, 'invalid decision_status') END;
   SELECT CASE WHEN NEW.sensitivity_level NOT IN ('normal','sensitive','protected','secret')
@@ -308,6 +319,24 @@ BEFORE UPDATE ON documents BEGIN
     AND NEW.event_time_end < NEW.event_time_start
     THEN RAISE(ABORT, 'invalid event time range') END;
 END;
+"""
+
+
+DOCUMENT_LINKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS document_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id INTEGER NOT NULL REFERENCES documents(id),
+  doc_path TEXT NOT NULL,
+  doc_kind TEXT NOT NULL DEFAULT 'note'
+    CHECK(doc_kind IN ('contract','plan','proposal','code','note')),
+  doc_version TEXT NOT NULL DEFAULT '',
+  relation TEXT NOT NULL
+    CHECK(relation IN ('derived_from','summarized_by','superseded_by')),
+  workspace_id TEXT NOT NULL DEFAULT '',
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_document_links_doc ON document_links(doc_path);
+CREATE INDEX IF NOT EXISTS idx_document_links_mem ON document_links(memory_id);
 """
 
 
@@ -360,6 +389,7 @@ def install_v2_schema(conn):
             ("event_time", "REAL"),
         ))
         conn.executescript(VALIDATION_TRIGGERS)
+        conn.executescript(DOCUMENT_LINKS_SCHEMA)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_v2_lifecycle "
             "ON documents(storage_tier, memory_class, decision_status, disputed)"
@@ -367,6 +397,14 @@ def install_v2_schema(conn):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_v2_task ON documents(task_id)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_library ON documents(library)"
+        )
+        # 迁移补默认：遗留空 memory_class 视为 semantic（测试与契约期望）
+        conn.execute(
+            "UPDATE documents SET memory_class='semantic' WHERE memory_class IS NULL OR memory_class=''"
+        )
+        conn.commit()
     if "sources" in {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }:
@@ -1309,9 +1347,86 @@ class V2Store:
     def get_memory(self, memory_id):
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM documents WHERE id=?", (int(memory_id),)).fetchone()
-        if row is None:
+            if row is None:
+                raise NotFoundError(f"memory not found: {memory_id}")
+            links = conn.execute(
+                "SELECT id, doc_path, doc_kind, doc_version, relation, workspace_id, created_at "
+                "FROM document_links WHERE memory_id=? ORDER BY id", (int(memory_id),),
+            ).fetchall()
+        return dict(row) | {"doc_links": [dict(l) for l in links]}
+
+    def link_document(self, memory_id, doc_path, doc_kind="note", doc_version="",
+                      relation="derived_from", workspace_id=""):
+        """建/改 document_links：同一 memory+doc_path+relation 幂等更新。"""
+        if not doc_path or not doc_path.strip():
+            raise DomainError("doc_path is required")
+        if doc_kind not in ("contract", "plan", "proposal", "code", "note"):
+            raise DomainError(f"invalid doc_kind: {doc_kind}")
+        if relation not in ("derived_from", "summarized_by", "superseded_by"):
+            raise DomainError(f"invalid relation: {relation}")
+        if memory_id <= 0 or not self.get_memory(memory_id):
             raise NotFoundError(f"memory not found: {memory_id}")
-        return dict(row)
+        now = time.time()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM document_links WHERE memory_id=? AND doc_path=? AND relation=?",
+                (memory_id, doc_path, relation),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE document_links SET doc_kind=?, doc_version=?, workspace_id=? WHERE id=?",
+                    (doc_kind, doc_version, workspace_id, existing["id"]),
+                )
+                link_id = existing["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO document_links (memory_id, doc_path, doc_kind, doc_version,"
+                    " relation, workspace_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (memory_id, doc_path, doc_kind, doc_version, relation, workspace_id, now),
+                )
+                link_id = cur.lastrowid
+        return {"id": link_id, "memory_id": memory_id, "doc_path": doc_path,
+                "doc_kind": doc_kind, "doc_version": doc_version, "relation": relation}
+
+    def documents_for_path(self, doc_path, workspace_id=None):
+        """文档→记忆反查：返回该 doc_path 全部 document_links 关联。"""
+        if not doc_path or not doc_path.strip():
+            raise DomainError("doc_path is required")
+        with self._connect() as conn:
+            if workspace_id:
+                rows = conn.execute(
+                    "SELECT dl.*, d.content FROM document_links dl "
+                    "LEFT JOIN documents d ON d.id=dl.memory_id "
+                    "WHERE dl.doc_path=? AND dl.workspace_id=? ORDER BY dl.id",
+                    (doc_path, workspace_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT dl.*, d.content FROM document_links dl "
+                    "LEFT JOIN documents d ON d.id=dl.memory_id "
+                    "WHERE dl.doc_path=? ORDER BY dl.id", (doc_path,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def library_stats(self):
+        """库目录：各 library 条目数 / 最新更新 / topic 分布。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT library, COUNT(*) AS total, "
+                "SUM(CASE WHEN storage_tier='archive' THEN 1 ELSE 0 END) AS archived, "
+                "MAX(updated_at) AS latest "
+                "FROM documents GROUP BY library ORDER BY library"
+            ).fetchall()
+            topics = conn.execute(
+                "SELECT library, topic_id, COUNT(*) AS n FROM documents "
+                "WHERE topic_id!='' GROUP BY library, topic_id ORDER BY library, n DESC"
+            ).fetchall()
+        stats = {r["library"]: {"total": r["total"], "archived": r["archived"] or 0,
+                                "latest": r["latest"]} for r in rows}
+        for t in topics:
+            lib = stats.setdefault(t["library"], {"total": 0, "archived": 0, "latest": None})
+            lib.setdefault("topics", {})[t["topic_id"]] = t["n"]
+        return stats
 
     def migrate_memory(self, memory_id, target_tier, expected_version, actor="main_agent", reason=""):
         """Perform one explicit lifecycle hop; callers cannot skip a tier."""
@@ -1319,7 +1434,7 @@ class V2Store:
         current = row["storage_tier"]
         if target_tier not in STORAGE_TIERS:
             raise DomainError(f"unknown storage tier: {target_tier}")
-        valid = {"active": {"cold"}, "cold": {"archive", "active"}, "archive": set()}
+        valid = {"active": {"cold"}, "cold": {"archive", "active"}, "archive": {"active"}}
         if target_tier not in valid[current]:
             raise InvalidTransition(f"cannot move {current} to {target_tier}")
         changes = {"storage_tier": target_tier}
@@ -1334,6 +1449,10 @@ class V2Store:
         elif current == "cold" and target_tier == "active":
             changes["memory_class"] = "short_term"
             changes["cold_at"] = None
+        elif current == "archive" and target_tier == "active":
+            # archive → active 恢复：memory_class 还原为 semantic（摘要保留在 memory_archives 供审计）
+            changes["memory_class"] = "semantic"
+            changes["compressed_at"] = None
         version = self.update_memory_lifecycle(
             memory_id, changes, expected_version, actor=actor, reason=reason or f"migrate {current} to {target_tier}",
         )
@@ -1351,6 +1470,39 @@ class V2Store:
 
     def restore_memory(self, memory_id, expected_version, actor="main_agent", reason=""):
         return self.migrate_memory(memory_id, "active", expected_version, actor=actor, reason=reason or "restore cold memory")
+
+    def archive_library(self, library, topic=None, actor="main_agent", reason=""):
+        """库级归档：直接批量置 storage_tier='archive'（不走 migrate 单跳），
+        bias 库拒绝归档；批量写 memory_archives 摘要。返回归档条目数。"""
+        if library not in LIBRARY_NAMES:
+            raise DomainError(f"unknown library: {library}")
+        if library == "bias":
+            raise PermissionDenied("bias library may never be archived")
+        now = time.time()
+        archived_ids = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, content, source_ref, event_time_start, event_time_end FROM documents "
+                "WHERE library=? AND (topic_id=? OR ? IS NULL) AND storage_tier!='archive'",
+                (library, topic or "", topic),
+            ).fetchall()
+            for row in rows:
+                archived_ids.append(row["id"])
+                conn.execute(
+                    "UPDATE documents SET storage_tier='archive', memory_class='compressed_archive',"
+                    " compressed_at=?, updated_at=? WHERE id=?",
+                    (now, now, row["id"]),
+                )
+                conn.execute(
+                    "INSERT INTO memory_archives "
+                    "(id,memory_id,archive_kind,summary,source_refs,period_start,period_end,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), row["id"], "compressed",
+                     row["content"] or "", _json([row["source_ref"]] if row["source_ref"] else []),
+                     row["event_time_start"], row["event_time_end"], now),
+                )
+        return {"library": library, "topic": topic or "", "archived": len(archived_ids),
+                "ids": archived_ids}
 
     def resolve_dispute(self, memory_id, action, expected_version, actor="user", changes=None, replacement_id=None, reason=""):
         if actor != "user":

@@ -258,6 +258,26 @@ CREATE TABLE IF NOT EXISTS documents (
   has_sensitive INTEGER DEFAULT 0,
   sensitive_types TEXT DEFAULT '[]'
 );
+
+CREATE TABLE IF NOT EXISTS document_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  memory_id INTEGER NOT NULL REFERENCES documents(id),
+  doc_path TEXT NOT NULL,
+  doc_kind TEXT NOT NULL DEFAULT 'note'
+    CHECK(doc_kind IN ('contract','plan','proposal','code','note')),
+  doc_version TEXT DEFAULT '',
+  relation TEXT NOT NULL
+    CHECK(relation IN ('derived_from','summarized_by','superseded_by')),
+  workspace_id TEXT DEFAULT '',
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_document_links_doc ON document_links(doc_path);
+CREATE INDEX IF NOT EXISTS idx_document_links_mem ON document_links(memory_id);
+-- 校验：memory_id 必须存在
+CREATE TRIGGER IF NOT EXISTS trg_document_links_mem_check
+BEFORE INSERT ON document_links
+WHEN NEW.memory_id NOT IN (SELECT id FROM documents)
+BEGIN SELECT RAISE(ABORT, 'document_links memory_id not found'); END;
 CREATE TABLE IF NOT EXISTS atoms (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   memory_id INTEGER NOT NULL,
@@ -378,6 +398,13 @@ def run_migrations():
             "ALTER TABLE documents ADD COLUMN topic_id TEXT DEFAULT ''",
             "ALTER TABLE documents ADD COLUMN event_time REAL",
             "CREATE INDEX IF NOT EXISTS idx_documents_topic ON documents(topic_id)",
+        ],
+        5: [
+            "ALTER TABLE documents ADD COLUMN library TEXT NOT NULL DEFAULT 'runtime'",
+            "CREATE INDEX IF NOT EXISTS idx_documents_library ON documents(library)",
+            "CREATE TABLE IF NOT EXISTS document_links (id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id INTEGER NOT NULL REFERENCES documents(id), doc_path TEXT NOT NULL, doc_kind TEXT NOT NULL DEFAULT 'note' CHECK(doc_kind IN ('contract','plan','proposal','code','note')), doc_version TEXT DEFAULT '', relation TEXT NOT NULL CHECK(relation IN ('derived_from','summarized_by','superseded_by')), workspace_id TEXT DEFAULT '', created_at REAL NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_document_links_doc ON document_links(doc_path)",
+            "CREATE INDEX IF NOT EXISTS idx_document_links_mem ON document_links(memory_id)",
         ],
     }
     conn = get_conn()
@@ -575,7 +602,7 @@ def get_bm25():
 def rebuild_bm25():
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, content, key_facts, keywords FROM documents WHERE status='active'"
+        "SELECT id, content, key_facts, keywords FROM documents WHERE status='active' AND storage_tier='active'"
     ).fetchall()
     conn.close()
     bm = get_bm25()
@@ -612,7 +639,7 @@ def vector_search(query_vec, k):
     return out
 
 
-def graph_search(query, k):
+def graph_search(query, k, include_archived=False):
     """图检索路：query 命中实体节点 → 沿边找关联记忆 + 实体名命中记忆文本。"""
     tokens = tokenize(query)
     if not tokens:
@@ -647,7 +674,9 @@ def graph_search(query, k):
                 mem_scores[e["memory_id"]] = mem_scores.get(e["memory_id"], 0.0) + 0.4
     for name in matched[:12]:
         rows = conn.execute(
-            "SELECT id FROM documents WHERE status='active' AND (content LIKE ? OR key_facts LIKE ?) LIMIT 8",
+            "SELECT id FROM documents WHERE status='active'"
+            + ("" if include_archived else " AND storage_tier='active'")
+            + " AND (content LIKE ? OR key_facts LIKE ?) LIMIT 8",
             ("%" + name + "%", "%" + name + "%"),
         ).fetchall()
         for r in rows:
@@ -687,7 +716,7 @@ def rrf_fuse(ranked_lists):
     return sorted(fused.items(), key=lambda kv: -kv[1])
 
 
-def apply_weighting(fused, now=None):
+def apply_weighting(fused, now=None, include_archived=False):
     if not fused:
         return []
     alpha = cfg_float("fusion_strategy.alpha", ALPHA)
@@ -701,7 +730,8 @@ def apply_weighting(fused, now=None):
         return []
     qmarks = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT * FROM documents WHERE id IN ({qmarks}) AND status='active'", ids
+        f"SELECT * FROM documents WHERE id IN ({qmarks}) AND status='active'"
+        + ("" if include_archived else " AND storage_tier='active'"), ids
     ).fetchall()
     conn.close()
     meta = {r["id"]: r for r in rows}
@@ -756,13 +786,15 @@ def search_memories(
     domain=None,
     type_=None,
     persona_id=None,
+    library=None,
+    include_archived=False,
 ):
     if not query or not query.strip():
         return []
     k = max(1, min(int(k), 50))
     # 检索缓存：相同查询参数组合在 TTL 内直接复用（living memory 检索缓存）
     cache_enabled = cfg_bool("search_cache.enabled", True)
-    cache_key = (query.strip()[:200], k, session_id or "", workspace_id or "", domain or "", type_ or "", persona_id or "")
+    cache_key = (query.strip()[:200], k, session_id or "", workspace_id or "", domain or "", type_ or "", persona_id or "", library or "", bool(include_archived))
     if cache_enabled:
         hit = _search_cache.get(cache_key)
         if hit and time.time() - hit[0] < cfg_float("search_cache.ttl_seconds", 45.0):
@@ -770,9 +802,9 @@ def search_memories(
     vecs = embed_texts([query])
     vres = vector_search(vecs[0], k * 3)
     bres = get_bm25().search(query, k * 3)
-    gres = graph_search(query, k * 3)
+    gres = graph_search(query, k * 3, include_archived=include_archived)
     fused = rrf_fuse([vres, bres, gres])
-    weighted = apply_weighting(fused)
+    weighted = apply_weighting(fused, include_archived=include_archived)
     out = []
     for r in weighted:
         if not scope_allows(r, session_id, workspace_id):
@@ -782,6 +814,11 @@ def search_memories(
         if type_ and r["type"] != type_:
             continue
         if persona_id and r["persona_id"] and r["persona_id"] != persona_id:
+            continue
+        if library and r.get("library") != library:
+            continue
+        # G1 修复：archive tier 默认不召回（include_archived=true 时放开）
+        if not include_archived and r.get("storage_tier") == "archive":
             continue
         item = dict(r)
         if item.get("has_sensitive"):
@@ -876,12 +913,23 @@ def add_memory(payload):
             return {"id": top_id, "uuid": uuid_s, "merged": True,
                     "sensitive": bool(records), "protected_source_ids": _protected_ids(top_id)}
     conn = get_conn()
+    library = str(clean.get("library") or "runtime")
+    if library not in ("bias", "core", "eco", "project", "runtime"):
+        conn.close()
+        raise ValueError("invalid library: " + library)
+    if library == "bias":
+        if str(clean.get("scope") or "session") != "global":
+            conn.close()
+            raise ValueError("bias library requires scope=global")
+        if importance < 0.8:
+            conn.close()
+            raise ValueError("bias library requires importance>=0.8")
     cur = conn.execute(
         "INSERT INTO documents (uuid, content, key_facts, persona_summary,"
         " canonical_summary, type, domain, scope, workspace_id, session_id,"
         " persona_id, importance, created_at, last_access_at, access_count,"
-        " status, keywords, has_sensitive, sensitive_types, topic_id, event_time)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " status, keywords, has_sensitive, sensitive_types, topic_id, event_time, library)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             uuid_s,
             content,
@@ -899,11 +947,12 @@ def add_memory(payload):
             now,
             0,
             "active",
-            clean.get("topic_id") or "",
-            clean.get("event_time") if clean.get("event_time") is not None else now,
             clean.get("keywords") or "",
             int(clean.get("has_sensitive") or 0),
             json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False),
+            clean.get("topic_id") or "",
+            clean.get("event_time") if clean.get("event_time") is not None else now,
+            library,
         ),
     )
     doc_id = cur.lastrowid
@@ -2149,8 +2198,6 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[5] == "revisions":
                 return self._v2_call(lambda: {"revisions": store.state_card_revisions(card_key, kind)})
             return self._v2_call(lambda: {"card": store.get_state_card(card_key, kind)})
-        if len(parts) == 4 and parts[2] == "memories":
-            return self._v2_call(lambda: {"memory": self._v2_store().get_memory(int(parts[3]))})
         if len(parts) >= 4 and parts[2] == "session-keys":
             # GET /v1/v2/session-keys/<session_id>?workspace_id=
             # 返回描述符（prefix），全 key 通过 POST create/rotate 获得。
@@ -2276,17 +2323,24 @@ class Handler(BaseHTTPRequestHandler):
                 rows = conn.execute(sql, args).fetchall()
                 conn.close()
                 return self._send(200, {"memories": [dict(r) for r in rows]})
+            if path == "/v1/memories/for-doc":
+                doc_path = qs.get("path", [""])[0] or ""
+                if not doc_path:
+                    return self._send(400, {"error": "path is required"})
+                return self._v2_call(lambda: {"doc_path": doc_path, "links": self._v2_store().documents_for_path(
+                    doc_path, workspace_id=qs.get("workspace_id", [None])[0])})
+            if path == "/v1/memories/libraries":
+                return self._v2_call(lambda: {"libraries": self._v2_store().library_stats()})
             if path.startswith("/v1/memories/"):
                 parts = path.strip("/").split("/")
                 doc_id = int(parts[-1] if parts[-1] != "source" else parts[-2])
                 if parts[-1] == "source":
                     return self._send(200, {"sources": get_sources(doc_id)})
-                conn = get_conn()
-                r = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
-                conn.close()
-                if r is None:
+                try:
+                    mem = self._v2_store().get_memory(doc_id)
+                except NotFoundError:
                     return self._send(404, {"error": "not found"})
-                return self._send(200, {"memory": dict(r)})
+                return self._send(200, {"memory": mem})
             if path.startswith("/v1/atoms/list"):
                 conn = get_conn()
                 sql = "SELECT * FROM atoms WHERE 1=1"
@@ -2586,6 +2640,29 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._read_body()
                 ok = restore_memory(body.get("id"))
                 return self._send(200 if ok else 404, {"restored": ok})
+            if path == "/v1/memories/archive-library":
+                body = self._read_body()
+                return self._v2_call(lambda: self._v2_store().archive_library(
+                    str(body.get("library") or ""), topic=body.get("topic"),
+                    actor=body.get("actor", "main_agent"), reason=body.get("reason", ""),
+                ))
+            if path == "/v1/memories/restore-tier":
+                body = self._read_body()
+                memory_id = int(body.get("id") or 0)
+                store = self._v2_store()
+                return self._v2_call(lambda: {"memory": store.migrate_memory(
+                    memory_id, "active", int(body.get("expected_version", 0)),
+                    actor=body.get("actor", "main_agent"), reason=body.get("reason", "restore from archive tier"),
+                )})
+            if path == "/v1/memories/doc-link":
+                body = self._read_body()
+                return self._v2_call(lambda: self._v2_store().link_document(
+                    int(body.get("memory_id") or 0), str(body.get("doc_path") or ""),
+                    doc_kind=str(body.get("doc_kind") or "note"),
+                    doc_version=str(body.get("doc_version") or ""),
+                    relation=str(body.get("relation") or "derived_from"),
+                    workspace_id=str(body.get("workspace_id") or ""),
+                ))
             if path == "/v1/memories/add":
                 body = self._read_body()
                 r = add_memory(body)
@@ -2634,6 +2711,8 @@ class Handler(BaseHTTPRequestHandler):
                     domain=body.get("domain"),
                     type_=body.get("type"),
                     persona_id=body.get("persona_id"),
+                    library=body.get("library"),
+                    include_archived=bool(body.get("include_archived")),
                 )
                 return self._send(200, {"query": body.get("query"), "count": len(results), "results": results})
             if path == "/v1/atoms/add":

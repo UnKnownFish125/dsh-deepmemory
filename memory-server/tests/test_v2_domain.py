@@ -23,7 +23,25 @@ CREATE TABLE documents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   uuid TEXT UNIQUE NOT NULL,
   content TEXT NOT NULL,
-  status TEXT DEFAULT 'active'
+  status TEXT DEFAULT 'active',
+  type TEXT DEFAULT 'fact',
+  domain TEXT DEFAULT 'work',
+  scope TEXT DEFAULT 'session',
+  workspace_id TEXT DEFAULT '',
+  session_id TEXT DEFAULT '',
+  persona_id TEXT DEFAULT '',
+  importance REAL DEFAULT 0.5,
+  has_sensitive INTEGER DEFAULT 0,
+  sensitive_types TEXT DEFAULT '[]',
+  memory_class TEXT DEFAULT '',
+  storage_tier TEXT DEFAULT 'active',
+  decision_status TEXT DEFAULT 'none',
+  disputed INTEGER DEFAULT 0,
+  time_inferred INTEGER DEFAULT 0,
+  sensitivity_level TEXT DEFAULT 'normal',
+  library TEXT NOT NULL DEFAULT 'runtime',
+  topic_id TEXT DEFAULT '',
+  event_time REAL
 );
 CREATE TABLE sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
