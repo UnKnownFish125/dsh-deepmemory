@@ -171,3 +171,52 @@
 3. L2 摘要链 **append-only 分块**——数据落地（sqlite 表结构 proposal：`topic_summaries(topic_id, seq, summary, start_time, end_time, prev_seq)`）。
 4. L0 规则固化 **迁移即移除 + 降权**——是否会导致规则记忆"消失"（用户以为丢了）？保守改为"标记不删除"？
 5. 注入量：单轮 ≤800 tok（glm 建议）vs 我目前 10-13 条（每条 240 截断 ≈ 2.4k 字符 ≈ 600 tok）——**预算内是否 OK**？
+
+---
+
+## 11. 环境事实登记表（info registry，按需自建库）——新增到计划
+
+> 用户新增需求：记录不常变动的环境事实（当前工作区、服务器 IP、项目路径等），方便随时查询。
+> **已改为按需创建数据库**：不固定单一表，按需求（域/项目/场景）**动态建库、库内成表、按需求路由访问**。
+
+### 11.1 架构（按需库）
+
+```
+data/
+├── info/                          ← 环境事实库目录
+│   ├── env.db                     ← 服务器/工作区/基础设施域（按需创建）
+│   │   └── entries(key PK, value, updated_at, provenance)
+│   ├── project-livetaskboard.db   ← 按需：某个项目域（登记时自动建）
+│   │   └── entries(...)
+│   └── project-deepmemory.db      ← 按需：另一个项目
+├── registry.db                    ← 注册中心（小的 meta：记录已有哪些库/域/key 目录）
+│   └── domains(domain, db_path, created_at) / keys(domain, key, category, updated_at)
+└── 记忆库（documents，不变）
+```
+
+**按需规则**：
+- **建库**：首次登记某域（POST /v1/info/<domain>/<key> 或查询触发）→ 若该域库不存在 → 自动 CREATE `data/info/<domain>.db` + `entries` 表 + 注册到 registry.db
+- **成表**：每个域库内一张 `entries` 表（key-value + 时间 + 来源），域 = 按需拆分单位
+- **访问**：`GET /v1/info/<domain>/<key>` → 打开对应域库（路由到正确 db/表）；`GET /v1/info/keys` → 从 registry.db 读目录（不打开全部库）
+
+### 11.2 API（按需求路由）
+| 方法 | 路径 | 行为 |
+|---|---|---|
+| GET | `/v1/info/<domain>/<key>` | 打开 domain.db 查 key（精确；无则 404 提示可登记） |
+| GET | `/v1/info/<domain>` | 列出该域全部条目 |
+| GET | `/v1/info/keys` | 注册中心目录（已有哪些域/库/键） |
+| POST | `/v1/info/<domain>/<key>` | **按需建库**（域库不存在→自动建）+ upsert 条目（带 provenance） |
+| GET | `/v1/info/domains` | 已建库列表 |
+
+### 11.3 域规划（首次按需登记时创建）
+- `env`：server.ip / server.hostname / workspace.id / workspace.path
+- `project-<name>`：path / remote / type / status（一个项目一个库，可按需新建）
+- `infra`：端口/服务/systemd 单元等（按需）
+- `custom`：自定义（用户自由域）
+
+### 11.4 与记忆的关系
+- 按需库 = **确定性事实层**（精确查询、不衰减、不依赖语义检索）
+- 语义记忆（L3）= 知识/偏好层；项目登记时可反哺语义记忆，但按需库是**权威源**（防双写漂移）
+
+### 11.5 落地时机
+- 随记忆方案 L1/L2/L3 之后（独立小功能，可先行验证）——建议**先做**（改动小、立即有用：后续方案实施要经常查项目路径/工作区/服务器 IP）。
