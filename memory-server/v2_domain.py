@@ -355,6 +355,10 @@ def install_v2_schema(conn):
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }:
         _ensure_columns(conn, "documents", DOCUMENT_COLUMNS)
+        _ensure_columns(conn, "documents", (
+            ("topic_id", "TEXT NOT NULL DEFAULT ''"),
+            ("event_time", "REAL"),
+        ))
         conn.executescript(VALIDATION_TRIGGERS)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_v2_lifecycle "

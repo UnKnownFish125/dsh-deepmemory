@@ -113,6 +113,18 @@
         "hint": "systemPrompt 中的位置：0=人格之后，100=工具说明之前",
         "type": "int",
         "default": 50
+      },
+      "inject_group": {
+        "description": "注入组织形态",
+        "hint": "category 分类展示 | summary 同类总结 | flat 平铺（默认 category+summary 混合）",
+        "type": "string",
+        "default": "category"
+      },
+      "preference_guarantee": {
+        "description": "高价值偏好保底",
+        "hint": "importance>=0.8 的偏好记忆保证进入注入（即使语义不匹配）",
+        "type": "bool",
+        "default": true
       }
     }
   },
@@ -124,7 +136,7 @@
         "description": "每轮注入条数",
         "hint": "每轮对话注入的长期记忆条数；越大信息越全但更占模型注意力",
         "type": "int",
-        "default": 5
+        "default": 10
       },
       "max_k": {
         "description": "主动检索最大条数",
@@ -495,6 +507,48 @@
         "hint": "从已配置模型列表中选择，或填写自定义模型名；留空自动选择",
         "type": "string",
         "default": ""
+      }
+    }
+  },
+  "compression": {
+    "description": "deepmemory 独立压缩管线（不走 DSH 官方完全压缩）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "自主压缩开关",
+        "hint": "deepmemory 自己生成主题摘要链（不依赖官方 compaction 内容）",
+        "type": "bool",
+        "default": true
+      },
+      "min_turns": {
+        "description": "(备选)按轮数触发",
+        "hint": "0=不启用轮数触发，用 trigger_bytes",
+        "type": "int",
+        "default": 0
+      },
+      "summary_model": {
+        "description": "摘要模型",
+        "hint": "留空自动从已配置模型选择",
+        "type": "string",
+        "default": ""
+      },
+      "inject_summary": {
+        "description": "注入摘要链",
+        "hint": "注入时置顶主题摘要链（项目简介）",
+        "type": "bool",
+        "default": true
+      },
+      "trigger_bytes": {
+        "description": "摘要链触发长度（字符）",
+        "hint": "会话累计 user+assistant 文本字符数超过该值触发摘要链更新（约 4x 即 tokens）；0=禁用长度触发",
+        "type": "int",
+        "default": 60000
+      },
+      "retain_head": {
+        "description": "摘要链保留最近原文条数",
+        "hint": "更新摘要链时保留最近 N 条原文（后续细节可溯）",
+        "type": "int",
+        "default": 20
       }
     }
   }

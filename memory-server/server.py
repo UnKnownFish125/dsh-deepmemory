@@ -374,6 +374,11 @@ def run_migrations():
             "CREATE INDEX IF NOT EXISTS idx_protected_sources_resource ON protected_sources(resource_type, resource_id)",
             "CREATE INDEX IF NOT EXISTS idx_sensitive_audit_source ON sensitive_audit(protected_source_id)",
         ],
+        4: [
+            "ALTER TABLE documents ADD COLUMN topic_id TEXT DEFAULT ''",
+            "ALTER TABLE documents ADD COLUMN event_time REAL",
+            "CREATE INDEX IF NOT EXISTS idx_documents_topic ON documents(topic_id)",
+        ],
     }
     conn = get_conn()
     conn.execute(
@@ -427,6 +432,15 @@ def init_db():
     conn.commit()
     conn.close()
     run_migrations()
+    # v2 存储域：启动时确保 install_v2_schema 的列/索引迁移（幂等；懒 V2Store.migrate 前）
+    try:
+        _conn = get_conn()
+        try:
+            install_v2_schema(_conn)
+        finally:
+            _conn.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- faiss
@@ -703,11 +717,21 @@ def apply_weighting(fused, now=None):
         recency = math.exp(-DECAY_RATE * days_old)
         norm = rrf / max_score
         final = ALPHA * norm + BETA * importance + GAMMA * recency
+        # 偏好/高重要性记忆保底：relevance 弱时不被语义不匹配淹没（用户约定、校验规则类记忆保持曝光）
+        mtype = str(r["type"] or "")
+        if mtype == "preference" and importance >= 0.7:
+            final += 0.35 * importance
+        elif importance >= 0.7:
+            final += 0.18 * importance
         item = dict(r)
         item["rrf_score"] = round(rrf, 4)
         item["final_score"] = round(final, 4)
         item["recency_weight"] = round(recency, 4)
         item["days_old"] = round(days_old, 2)
+        # ① 绝对时间：入库/最后访问的本地时间字符串
+        import datetime
+        item["created_local"] = datetime.datetime.fromtimestamp(float(r["created_at"] or now)).strftime("%Y-%m-%d %H:%M")
+        item["accessed_local"] = datetime.datetime.fromtimestamp(float(r["last_access_at"] or r["created_at"] or now)).strftime("%Y-%m-%d %H:%M")
         results.append(item)
     results.sort(key=lambda x: -x["final_score"])
     return results
@@ -816,6 +840,12 @@ def add_memory(payload):
     persona_summary = clean.get("persona_summary") or ""
     canonical_summary = clean.get("canonical_summary") or ""
     clean = _mark_sensitive(clean, records)
+    # ② 系统兜底：来自当前对话（dialog_scoped）的写入，若模型判 workspace 且有具体会话 → 回落 session
+    if clean.get("dialog_scoped") and clean.get("session_id"):
+        sc = str(clean.get("scope") or "")
+        if sc == "workspace":
+            clean["scope"] = "session"
+    clean.pop("dialog_scoped", None)
     # 检索文本 = 摘要 + 关键事实，提升检索信息密度（对齐 living memory）
     search_text = content + (" " + key_facts if key_facts else "")
     vecs = embed_texts([search_text])
@@ -850,7 +880,8 @@ def add_memory(payload):
         "INSERT INTO documents (uuid, content, key_facts, persona_summary,"
         " canonical_summary, type, domain, scope, workspace_id, session_id,"
         " persona_id, importance, created_at, last_access_at, access_count,"
-        " status, keywords, has_sensitive, sensitive_types) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " status, keywords, has_sensitive, sensitive_types, topic_id, event_time)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             uuid_s,
             content,
@@ -868,6 +899,8 @@ def add_memory(payload):
             now,
             0,
             "active",
+            clean.get("topic_id") or "",
+            clean.get("event_time") if clean.get("event_time") is not None else now,
             clean.get("keywords") or "",
             int(clean.get("has_sensitive") or 0),
             json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False),
