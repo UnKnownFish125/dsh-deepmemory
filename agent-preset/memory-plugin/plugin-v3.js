@@ -24,12 +24,12 @@ export const inject = ['tools']
 export function apply(ctx, config = {}) {
   const state = { injectCount: 0, extractCount: 0, lastConfigLoad: 0, lastInjectionDetail: [] }
   const queryBySession = new Map()
+const userCountBySession = new Map()
   const recentBytes = new Map()
   const CARD_KIND = config.preset_mode === 'daily' ? 'daily' : 'task'
   const buckets = new Map()
   const enabledCache = new Map()
   const memoryCache = new Map()
-  const biasCache = new Map()   // 总行为约束（bias 库）缓存：会话内冻结，前缀稳定
   const recentBySession = new Map()
   const initializedSessions = new Set()
   const refreshes = new Map()
@@ -70,11 +70,12 @@ export function apply(ctx, config = {}) {
     '5. entities：抽取记忆中的实体名词列表（人名/项目/工具/概念），每项 {name, kind: person|project|tool|concept|other}。',
     '6. relations：实体之间的关系边列表（可 0-3 条），每项 {source, relation, target}，source/target 必须是 entities 里出现过的实体名，relation 用短动词短语（如 "使用"、"依赖"、"属于"、"负责"）。',
     '6b. credential-redaction：若对话内容包含密钥/令牌/口令/私钥，不要输出其字面值；能记忆就只记录引用名/env var，值为 REDACTED。',
-    '6c. 每条 memory 输出 library（从固定集合选择：bias=对 agent 行为的约束/硬性指示，core=deepmemory 主体设计/契约，eco=派生插件/集成，project=具体开发项目，runtime=其他默认）与 topic（该库内子主题，如 project 库的“任务看板开发”）；**判定为“对 agent 行为的约束/用户硬性指示”（如“先测试机验证”“不要直接动生产机”）必须 library=bias 且 scope=global、importance≥0.8**。另可输出 doc_ref {path, kind: contract|plan|proposal|code|note, version}——当记忆源自某份文档（契约/方案/计划）时给出文档绝对路径。',
+    // 6c 已撤：topic_id 从未产出真主题（273 条仅 27 条且全为 "0"），不再让抽取模型打标签（字段保留向后兼容）
+
     '7. card：增量更新当前会话状态卡（goal/current_plan 各一句话；key_decisions 追加新决定≤3条；in_progress/next_steps 各≤4条；无需变化时 card 为 null）。',
     '8. tasks：仅当对话中出现明确任务/子任务时才输出数组（title + status∈planned|todo|in_progress|completed|failed + 可选 parent/blocked/reason）；无明确任务时 tasks 为 []。',
     '8. 严格只输出一个 JSON 对象（不要 markdown 代码块）：',
-    '{"memories":[{"content":"...","key_facts":"词1;词2","persona_summary":"...或空","type":"fact","domain":"work","scope":"workspace","importance":0.7,"library":"project","topic":"任务看板开发","doc_ref":{"path":"/www/.../docs/plan.md","kind":"plan","version":"v0.2"},"atoms":[{"atom_type":"factual","content":"...","ttl_days":180,"decay_type":"exponential","importance":0.6}],"entities":[{"name":"...","kind":"project"}],"relations":[{"source":"...","relation":"...","target":"..."}]}],"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]},"tasks":[{"title":"...","status":"todo"}]}',
+    '{"memories":[{"content":"...","key_facts":"词1;词2","persona_summary":"...或空","type":"fact","domain":"work","scope":"workspace","importance":0.7,"topic":"任务看板开发","atoms":[{"atom_type":"factual","content":"...","ttl_days":180,"decay_type":"exponential","importance":0.6}],"entities":[{"name":"...","kind":"project"}],"relations":[{"source":"...","relation":"...","target":"..."}]}],"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]},"tasks":[{"title":"...","status":"todo"}]}',
     '没有值得记忆的内容时 memories 为 []。',
   ].join('\n')
 
@@ -190,7 +191,10 @@ function redactSensitive(text) {
   function formatMemories(results, limit) {
     if (!results || !results.length) return ''
     const k = limit || RECALL_K
-    let items = results.slice(0, k)
+    // 稳定性：按 id 排序（id 不变则文本稳定），去掉全部易变元数据（时间/权重/topic）
+    let items = (results.slice(0, k)).slice().sort(function (a, b) {
+      return String(a.id || '').localeCompare(String(b.id || ''))
+    })
     // ④ 偏好保底：importance>=0.8 的偏好/高价值记忆保证在注入内（即使语义弱）
     const threshold = 0.8
     const preferred = results.filter(function (r) { return (r.type === 'preference' || Number(r.importance || 0) >= threshold) })
@@ -205,10 +209,9 @@ function redactSensitive(text) {
     const pushGroup = function (title, arr) {
       if (!arr.length) return
       const lines = arr.map(function (r) {
-        const imp = Number(r.importance || 0)
-        const time = r.created_local || ''
-        const src = r.topic_id ? ('topic:' + String(r.topic_id).slice(0, 24)) : (r.scope || '?')
-        return '  - [i' + imp.toFixed(2) + (time ? '/' + time.slice(0, 10) : '') + '/ ' + src + '] ' + String(r.content || '').slice(0, 240)
+        const sid = String(r.id || '').slice(-6)
+        const sc = r.scope || '?'
+        return '  - [' + sid + ' ' + sc + '] ' + String(r.content || '').slice(0, 240)
       })
       groups.push('[' + title + ']\n' + lines.join('\n'))
     }
@@ -217,8 +220,8 @@ function redactSensitive(text) {
     pushGroup('事实与事件', byType(function (r) { return r.type === 'fact' || r.type === 'episode' }))
     if (!groups.length) {
       const lines = items.map(function (r) {
-        const imp = Number(r.importance || 0)
-        return '  - [' + (r.type || 'fact') + '/' + (r.scope || '?') + '/i' + imp.toFixed(2) + '] ' + String(r.content || '').slice(0, 240)
+        const sid = String(r.id || '').slice(-6)
+        return '  - [' + sid + ' ' + (r.scope || '?') + '] ' + String(r.content || '').slice(0, 240)
       })
       return '[长期记忆召回]\n' + lines.join('\n') + '\n[/长期记忆]\n'
     }
@@ -305,29 +308,6 @@ function redactSensitive(text) {
     return lines.length ? '[会话状态]\n' + lines.join('\n') + '\n[/会话状态]\n' : ''
   }
 
-  async function refreshBiasCache() {
-    // 总行为约束（bias 库）：独立查询，会话内冻结（进 system 前缀需稳定）
-    if (biasCache.has('bias')) return biasCache.get('bias')
-    try {
-      const res = await http('POST', '/v1/memories/search', {
-        query: '总行为约束 规则 禁止 必须',
-        k: 12,
-        library: 'bias',
-        include_archived: false,
-      })
-      if (!res.ok) return ''
-      const items = ((res.data && res.data.results) || []).filter(function (r) { return r.library === 'bias' })
-      if (!items.length) return ''   // bias 库为空 → 回退走 formatMemories 的 type 分组
-      const lines = items.map(function (r) {
-        const imp = Number(r.importance || 0)
-        return '  - [i' + imp.toFixed(2) + (r.created_local ? '/' + r.created_local.slice(0, 10) : '') + '] ' + String(r.content || '').slice(0, 240)
-      })
-      const text = '[总行为约束]\n' + lines.join('\n') + '\n[/总行为约束]\n'
-      biasCache.set('bias', text)
-      return text
-    } catch { return '' }
-  }
-
   async function refreshMemoryCache(sessionId, query, limit) {
     if (!sessionId) return false
     if (refreshes.has(sessionId)) return refreshes.get(sessionId)
@@ -345,9 +325,7 @@ function redactSensitive(text) {
         if (!cres.ok) return false
         nextCardText = cardText(cres.data && cres.data.card)
       }
-      // 总行为约束（bias 库）置顶；为空时 formatMemories 按 type 分组回退
-      const biasText = await refreshBiasCache()
-      const nextText = nextCardText + biasText + formatMemories((sres.data && sres.data.results) || [], limit || RECALL_K)
+      const nextText = nextCardText + formatMemories((sres.data && sres.data.results) || [], limit || RECALL_K)
       const previous = memoryCache.get(sessionId) || ''
       initializedSessions.add(sessionId)
       if (nextText === previous) return true
@@ -398,13 +376,13 @@ function redactSensitive(text) {
         memoryCache.delete(sessionId)
         initializedSessions.delete(sessionId)
       } else {
-        // 实时上下文驱动：每轮按最近上下文刷新（去重：query 变化才重新请求）
-        const q = recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文')
-        const prevQ = queryBySession.get(sessionId) || ''
-        if (initializedSessions.has(sessionId) && q === prevQ) {
-          // 上下文未变，使用缓存
-        } else {
-          queryBySession.set(sessionId, q)
+        // 回合内冻结：仅当出现新用户消息（userCount 增长）时刷新一次；
+        // 工具结果不触发（避免每步改前缀击穿缓存）
+        const lastUserCount = userCountBySession.get(sessionId) || 0
+        const curUserCount = (state.userCounts && state.userCounts[sessionId]) || 0
+        if (!initializedSessions.has(sessionId) || curUserCount !== lastUserCount) {
+          const q = recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文')
+          userCountBySession.set(sessionId, curUserCount)
           await refreshMemoryCache(sessionId, q, completionLimit)
         }
       }
@@ -437,6 +415,10 @@ function redactSensitive(text) {
         }
       } else if (typeof msg.content === 'string') {
         text = msg.content
+      }
+      if (t === 'user/message') {
+        state.userCounts = state.userCounts || {}
+        state.userCounts[sid] = (state.userCounts[sid] || 0) + 1
       }
       if (text && text.trim()) {
         let bucket = buckets.get(sid)
@@ -481,16 +463,10 @@ function redactSensitive(text) {
         domain: m.domain || 'work',
         scope: m.scope || 'workspace',
         importance: typeof m.importance === 'number' ? m.importance : 0.5,
-        library: ['bias','core','eco','project','runtime'].includes(m.library) ? m.library : 'runtime',
         workspace_id: WORKSPACE,
         session_id: sid,
         dialog_scoped: true,
         topic_id: String(m.topic || '').slice(0, 60),
-        doc_ref: (m.doc_ref && typeof m.doc_ref === 'object' && m.doc_ref.path) ? {
-          path: redactSensitive(String(m.doc_ref.path).slice(0, 500)),
-          kind: ['contract','plan','proposal','code','note'].includes(m.doc_ref.kind) ? m.doc_ref.kind : 'note',
-          version: String(m.doc_ref.version || '').slice(0, 60),
-        } : null,
         atoms: rawAtom,
         entities: rawEntities,
         relations: rawRelations,
@@ -503,25 +479,6 @@ function redactSensitive(text) {
           memoryChanged = true
           state.extractCount += items.length
           console.log('[deepmemory] extracted ' + items.length + ' memories (total ' + state.extractCount + '): ' + JSON.stringify((res.data && res.data.added) || []).slice(0, 400))
-          // G5: 记忆源自文档 → 自动建 document_links(derived_from)
-          const added = (res.data && res.data.added) || []
-          for (let i = 0; i < items.length; i++) {
-            const item = items[i]
-            const doc = item.doc_ref
-            const created = added[i]
-            if (doc && created && created.id) {
-              try {
-                await http('POST', '/v1/memories/doc-link', {
-                  memory_id: Number(created.id),
-                  doc_path: doc.path,
-                  doc_kind: doc.kind,
-                  doc_version: doc.version,
-                  relation: 'derived_from',
-                  workspace_id: WORKSPACE,
-                })
-              } catch {}
-            }
-          }
         }
       }
     }
@@ -628,62 +585,14 @@ function redactSensitive(text) {
       query: { type: 'string', required: true, description: 'Concise recall keywords for long-term memory.' },
       k: { type: 'integer', description: 'Maximum number of memories to return.', default: 5 },
       persona: { type: 'string', description: 'Optional persona id filter. Leave empty for shared memories.' },
-      library: { type: 'string', description: 'Optional library filter: bias | core | eco | project | runtime.', default: '' },
-      include_archived: { type: 'boolean', description: 'Include archived-tier memories in results.', default: false },
     },
     output: { schema: outSchema, render: (args, value) => textRender(value) },
     async execute(args) {
       if (!TOOLS_ENABLED) return { count: 0, results: [], error: 'deepmemory tools disabled' }
-      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: WORKSPACE, persona_id: String(args.persona || ''), library: args.library || undefined, include_archived: Boolean(args.include_archived) })
+      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: WORKSPACE, persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, results: [], error: res.error }
-      const items = (res.data.results || []).map((r) => ({ id: r.id, content: redactSensitive(r.content), type: r.type, domain: r.domain, scope: r.scope, library: r.library, importance: r.importance, score: r.final_score }))
+      const items = (res.data.results || []).map((r) => ({ id: r.id, content: redactSensitive(r.content), type: r.type, domain: r.domain, scope: r.scope, importance: r.importance, score: r.final_score }))
       return { count: items.length, results: items }
-    },
-  })
-
-  const browseTool = defineTool({
-    name: 'kb_browse',
-    description: 'Browse the knowledge library catalog: per-library entry counts, archived counts, latest update, and topic distribution. Use before recall to decide which library to search.',
-    parameters: {
-      library: { type: 'string', description: 'Optional single library: bias | core | eco | project | runtime. Empty = all libraries.', default: '' },
-    },
-    output: { schema: outSchema, render: (args, value) => textRender(value) },
-    async execute(args) {
-      if (!TOOLS_ENABLED) return { error: 'deepmemory tools disabled' }
-      const res = await http('GET', '/v1/memories/libraries')
-      if (!res.ok) return { error: res.error }
-      const libs = res.data.libraries || {}
-      if (args.library) {
-        return { library: args.library, stats: libs[args.library] || { total: 0, archived: 0 } }
-      }
-      return { libraries: libs }
-    },
-  })
-
-  const archiveTool = defineTool({
-    name: 'archive_memory',
-    description: 'Archive memories: by ids or by whole library/topic (tier-level archive; excluded from recall, restorable). The bias library can never be archived. Use when a project/decision is finished or obsolete.',
-    parameters: {
-      ids: { type: 'array', description: 'Optional list of memory ids to archive.', default: [] },
-      library: { type: 'string', description: 'Optional library to archive (core | eco | project | runtime).', default: '' },
-      topic: { type: 'string', description: 'Optional topic within the library.', default: '' },
-      reason: { type: 'string', description: 'Why this is being archived.', required: true },
-    },
-    output: { schema: outSchema, render: (args, value) => textRender(value) },
-    async execute(args) {
-      if (!TOOLS_ENABLED) return { error: 'deepmemory tools disabled' }
-      const reason = String(args.reason || '')
-      if (!reason) return { error: 'reason is required' }
-      if (args.ids && args.ids.length) {
-        const res = await http('POST', '/v1/memories/archive', { ids: args.ids.map(Number), reason: reason })
-        return res.ok ? { archived: res.data.archived } : { error: res.error }
-      }
-      if (args.library) {
-        if (args.library === 'bias') return { error: 'bias library may never be archived' }
-        const res = await http('POST', '/v1/memories/archive-library', { library: args.library, topic: args.topic || undefined, reason: reason })
-        return res.ok ? { library: args.library, topic: args.topic || '', archived: res.data.archived } : { error: res.error }
-      }
-      return { error: 'ids or library is required' }
     },
   })
 
@@ -737,8 +646,6 @@ function redactSensitive(text) {
   ctx.effect(() => ctx.tools.register(recallTool))
   ctx.effect(() => ctx.tools.register(saveTool))
   ctx.effect(() => ctx.tools.register(briefingTool))
-  ctx.effect(() => ctx.tools.register(browseTool))
-  ctx.effect(() => ctx.tools.register(archiveTool))
 
   loadConfig().then(() => console.log('[deepmemory] ready (preset plugin P2: relations + cross-turn query + graph route)'))
 }
