@@ -22,7 +22,9 @@ export const name = 'deepmemory'
 export const inject = ['tools']
 
 export function apply(ctx, config = {}) {
-  const state = { injectCount: 0, extractCount: 0, lastConfigLoad: 0 }
+  const state = { injectCount: 0, extractCount: 0, lastConfigLoad: 0, lastInjectionDetail: [] }
+  const queryBySession = new Map()
+  const recentBytes = new Map()
   const CARD_KIND = config.preset_mode === 'daily' ? 'daily' : 'task'
   const buckets = new Map()
   const enabledCache = new Map()
@@ -62,15 +64,16 @@ export function apply(ctx, config = {}) {
     '规则：',
     '1. memories 只提取：事实(fact)、偏好(preference)、决定(decision)、计划(plan)、事件约定(episode)。忽略闲聊和过程细节。',
     '2. 每条记忆 content 用简洁完整的一句话；key_facts 提取其中的关键实体与主题短语（分号分隔，≤5 个，用于检索）；persona_summary 为面向模型注入的一句话表述（无特殊表述时留空）。',
-    '3. domain：项目/技术/工作任务=work，个人生活/习惯/人际=life。scope：仅当前对话=session，当前项目/工作区=workspace，用户个人长期适用=global。importance：0-1，偏好与重要约定 0.7+。',
+    '3. domain：项目/技术/工作任务=work，个人生活/习惯/人际=life。scope：仅当前对话=session，当前项目/工作区=workspace，用户个人长期适用=global。**凡是用户/助手在本轮对话中说出或确认的内容（约定、指示、决策、偏好、任务背景）一律 scope=session**，只有明确跨对话/项目级才 workspace，用户长期偏好=global。importance：0-1，偏好与重要约定 0.7+。',
     '4. atoms：把每条记忆拆成独立事实单元（可 0-3 条），每单元含 atom_type（factual 事实/preference 偏好/decision 决定/episodic 事件/planned 计划/relational 关系）、content（独立自包含一句话）、ttl_days（factual=180, preference=60, decision=30, episodic=7, planned=2, relational=90）、decay_type（exponential/linear/step）、importance。',
     '5. entities：抽取记忆中的实体名词列表（人名/项目/工具/概念），每项 {name, kind: person|project|tool|concept|other}。',
     '6. relations：实体之间的关系边列表（可 0-3 条），每项 {source, relation, target}，source/target 必须是 entities 里出现过的实体名，relation 用短动词短语（如 "使用"、"依赖"、"属于"、"负责"）。',
     '6b. credential-redaction：若对话内容包含密钥/令牌/口令/私钥，不要输出其字面值；能记忆就只记录引用名/env var，值为 REDACTED。',
+    '6c. 每条 memory 输出 topic：概括该记忆所属的工作主题（如“任务看板开发”“记忆系统架构”），同主题跨对话聚合成一条项目简介/摘要链；无明确主题时 topic 留空。',
     '7. card：增量更新当前会话状态卡（goal/current_plan 各一句话；key_decisions 追加新决定≤3条；in_progress/next_steps 各≤4条；无需变化时 card 为 null）。',
     '8. tasks：仅当对话中出现明确任务/子任务时才输出数组（title + status∈planned|todo|in_progress|completed|failed + 可选 parent/blocked/reason）；无明确任务时 tasks 为 []。',
     '8. 严格只输出一个 JSON 对象（不要 markdown 代码块）：',
-    '{"memories":[{"content":"...","key_facts":"词1;词2","persona_summary":"...或空","type":"fact","domain":"work","scope":"workspace","importance":0.7,"atoms":[{"atom_type":"factual","content":"...","ttl_days":180,"decay_type":"exponential","importance":0.6}],"entities":[{"name":"...","kind":"project"}],"relations":[{"source":"...","relation":"...","target":"..."}]}],"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]},"tasks":[{"title":"...","status":"todo"}]}',
+    '{"memories":[{"content":"...","key_facts":"词1;词2","persona_summary":"...或空","type":"fact","domain":"work","scope":"workspace","importance":0.7,"topic":"任务看板开发","atoms":[{"atom_type":"factual","content":"...","ttl_days":180,"decay_type":"exponential","importance":0.6}],"entities":[{"name":"...","kind":"project"}],"relations":[{"source":"...","relation":"...","target":"..."}]}],"card":{"goal":"...","current_plan":"...","key_decisions":["..."],"in_progress":["..."],"next_steps":["..."]},"tasks":[{"title":"...","status":"todo"}]}',
     '没有值得记忆的内容时 memories 为 []。',
   ].join('\n')
 
@@ -185,8 +188,40 @@ function redactSensitive(text) {
 
   function formatMemories(results, limit) {
     if (!results || !results.length) return ''
-    const lines = results.slice(0, limit || RECALL_K).map((r) => '- [' + (r.type || 'fact') + '/' + (r.scope || '?') + '] ' + String(r.content || '').slice(0, 240))
-    return '[长期记忆召回]\n' + lines.join('\n') + '\n[/长期记忆]\n'
+    const k = limit || RECALL_K
+    let items = results.slice(0, k)
+    // ④ 偏好保底：importance>=0.8 的偏好/高价值记忆保证在注入内（即使语义弱）
+    const threshold = 0.8
+    const preferred = results.filter(function (r) { return (r.type === 'preference' || Number(r.importance || 0) >= threshold) })
+    const ids = new Set(items.map(function (r) { return r.id }))
+    for (const x of preferred) {
+      if (items.length >= k + 3) break
+      if (!ids.has(x.id)) { items.push(x); ids.add(x.id) }
+    }
+    // 分类组织：preference/rule → 规则类；goal/decision → 决策；fact → 事实
+    const groups = []
+    const byType = function (pred) { return items.filter(pred) }
+    const pushGroup = function (title, arr) {
+      if (!arr.length) return
+      const lines = arr.map(function (r) {
+        const imp = Number(r.importance || 0)
+        const time = r.created_local || ''
+        const src = r.topic_id ? ('topic:' + String(r.topic_id).slice(0, 24)) : (r.scope || '?')
+        return '  - [i' + imp.toFixed(2) + (time ? '/' + time.slice(0, 10) : '') + '/ ' + src + '] ' + String(r.content || '').slice(0, 240)
+      })
+      groups.push('[' + title + ']\n' + lines.join('\n'))
+    }
+    pushGroup('规则与偏好', byType(function (r) { return r.type === 'preference' }))
+    pushGroup('决定与目标', byType(function (r) { return r.type === 'decision' || r.type === 'goal' || r.type === 'plan' }))
+    pushGroup('事实与事件', byType(function (r) { return r.type === 'fact' || r.type === 'episode' }))
+    if (!groups.length) {
+      const lines = items.map(function (r) {
+        const imp = Number(r.importance || 0)
+        return '  - [' + (r.type || 'fact') + '/' + (r.scope || '?') + '/i' + imp.toFixed(2) + '] ' + String(r.content || '').slice(0, 240)
+      })
+      return '[长期记忆召回]\n' + lines.join('\n') + '\n[/长期记忆]\n'
+    }
+    return '[长期记忆召回]\n' + groups.join('\n') + '\n[/长期记忆]\n'
   }
 
   async function resolveModelRoute(llm, preferredProvider, preferredModel) {
@@ -253,8 +288,10 @@ function redactSensitive(text) {
 
   function recentQuery(sessionId, seed) {
     const recent = recentBySession.get(sessionId) || []
-    const suffix = recent.length ? '\n最近上下文: ' + recent.join(' | ') : ''
-    return (String(seed || '').slice(0, 300) + suffix).slice(0, 700)
+    // 优先用真实上下文：最近消息全文（前 1500 字符），尾部拼 seed 保底
+    const context = recent.slice(-6).join('\n')
+    if (context) return (context.slice(0, 1500) + '\n' + String(seed || '').slice(0, 200)).slice(0, 1800)
+    return String(seed || '').slice(0, 300)
   }
 
   function cardText(card) {
@@ -290,7 +327,11 @@ function redactSensitive(text) {
       if (nextText === previous) return true
       memoryCache.set(sessionId, nextText)
       state.injectCount += 1
-      console.log('[deepmemory] session memory cache updated (total ' + state.injectCount + ')')
+      const detail = ((sres.data && sres.data.results) || []).map(function (r) {
+        return (r.id || '?') + '[s' + (r.scope || '?') + '/i' + (r.importance || 0) + '/score' + (r.final_score || 0) + ']'
+      })
+      console.log('[deepmemory] session memory cache updated (total ' + state.injectCount + ') mems=' + JSON.stringify(detail) + ' size=' + String(memoryCache.get(sessionId) || '').length)
+      state.lastInjectionDetail = detail
       return true
     })().finally(() => refreshes.delete(sessionId))
     refreshes.set(sessionId, refresh)
@@ -330,8 +371,16 @@ function redactSensitive(text) {
       if (!INJECT_ENABLED || !automationEnabled || !(await isEnabled(sessionId))) {
         memoryCache.delete(sessionId)
         initializedSessions.delete(sessionId)
-      } else if (!initializedSessions.has(sessionId)) {
-        await refreshMemoryCache(sessionId, recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文'), completionLimit)
+      } else {
+        // 实时上下文驱动：每轮按最近上下文刷新（去重：query 变化才重新请求）
+        const q = recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文')
+        const prevQ = queryBySession.get(sessionId) || ''
+        if (initializedSessions.has(sessionId) && q === prevQ) {
+          // 上下文未变，使用缓存
+        } else {
+          queryBySession.set(sessionId, q)
+          await refreshMemoryCache(sessionId, q, completionLimit)
+        }
       }
     } catch (e) {
       console.error('[deepmemory] prompt cache refresh failed', String(e))
@@ -370,8 +419,10 @@ function redactSensitive(text) {
         if (bucket.length > 40) bucket.shift()
         let recent = recentBySession.get(sid)
         if (!recent) { recent = []; recentBySession.set(sid, recent) }
-        recent.push((t === 'user/message' ? '用户: ' : '助手: ') + text.slice(0, 120))
-        if (recent.length > 6) recent.shift()
+        recent.push((t === 'user/message' ? '用户: ' : '助手: ') + text.slice(0, 600))
+        if (recent.length > 10) recent.shift()
+        // 按长度累计（触发摘要链/上下文刷新用）
+        recentBytes.set(sid, (recentBytes.get(sid) || 0) + text.length)
       }
     } catch (e) {}
   })
@@ -406,6 +457,8 @@ function redactSensitive(text) {
         importance: typeof m.importance === 'number' ? m.importance : 0.5,
         workspace_id: WORKSPACE,
         session_id: sid,
+        dialog_scoped: true,
+        topic_id: String(m.topic || '').slice(0, 60),
         atoms: rawAtom,
         entities: rawEntities,
         relations: rawRelations,
