@@ -191,8 +191,12 @@ function redactSensitive(text) {
   function formatMemories(results, limit) {
     if (!results || !results.length) return ''
     const k = limit || RECALL_K
-    // 稳定性：按 id 排序（id 不变则文本稳定），去掉全部易变元数据（时间/权重/topic）
+    // 稳定性 + 重要度语义：按 importance 降序（高重要度在前，行序即重要度），
+    // id 兜底（importance 不变则文本稳定）；不写浮点进文本（模型看行序感知）
     let items = (results.slice(0, k)).slice().sort(function (a, b) {
+      const ai = Number(a.importance || 0)
+      const bi = Number(b.importance || 0)
+      if (bi !== ai) return bi - ai
       return String(a.id || '').localeCompare(String(b.id || ''))
     })
     // ④ 偏好保底：importance>=0.8 的偏好/高价值记忆保证在注入内（即使语义弱）
@@ -203,6 +207,13 @@ function redactSensitive(text) {
       if (items.length >= k + 3) break
       if (!ids.has(x.id)) { items.push(x); ids.add(x.id) }
     }
+    // 保底追加后按 importance 重排（高重要度恒在前）
+    items.sort(function (a, b) {
+      const ai = Number(a.importance || 0)
+      const bi = Number(b.importance || 0)
+      if (bi !== ai) return bi - ai
+      return String(a.id || '').localeCompare(String(b.id || ''))
+    })
     // 分类组织：preference/rule → 规则类；goal/decision → 决策；fact → 事实
     const groups = []
     const byType = function (pred) { return items.filter(pred) }
@@ -308,6 +319,23 @@ function redactSensitive(text) {
     return lines.length ? '[会话状态]\n' + lines.join('\n') + '\n[/会话状态]\n' : ''
   }
 
+  // 会话刷新去重/等待：user/message 启动，assemble await；
+  // 回合内冻结 = 仅 userCount 变化（新用户消息）才启动新刷新
+  const pendingRefresh = new Map()
+  function ensureSessionRefresh(sessionId, completionLimit) {
+    const cur = (state.userCounts && state.userCounts[sessionId]) || 0
+    const last = userCountBySession.get(sessionId) || 0
+    if (initializedSessions.has(sessionId) && cur === last) return pendingRefresh.get(sessionId) || null
+    userCountBySession.set(sessionId, cur)
+    const q = recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文')
+    const limit = completionLimit || Math.max(1, Math.min(20, Number(RECALL_K)))
+    const p = refreshMemoryCache(sessionId, q, limit).finally(function () {
+      pendingRefresh.delete(sessionId)
+    })
+    pendingRefresh.set(sessionId, p)
+    return p
+  }
+
   async function refreshMemoryCache(sessionId, query, limit) {
     if (!sessionId) return false
     if (refreshes.has(sessionId)) return refreshes.get(sessionId)
@@ -334,7 +362,7 @@ function redactSensitive(text) {
       const detail = ((sres.data && sres.data.results) || []).map(function (r) {
         return (r.id || '?') + '[s' + (r.scope || '?') + '/i' + (r.importance || 0) + '/score' + (r.final_score || 0) + ']'
       })
-      console.log('[deepmemory] session memory cache updated (total ' + state.injectCount + ') mems=' + JSON.stringify(detail) + ' size=' + String(memoryCache.get(sessionId) || '').length)
+      console.log('[deepmemory] session memory cache updated sid=' + String(sessionId).slice(0, 12) + ' (total ' + state.injectCount + ') mems=' + JSON.stringify(detail) + ' size=' + String(memoryCache.get(sessionId) || '').length)
       state.lastInjectionDetail = detail
       return true
     })().finally(() => refreshes.delete(sessionId))
@@ -376,15 +404,9 @@ function redactSensitive(text) {
         memoryCache.delete(sessionId)
         initializedSessions.delete(sessionId)
       } else {
-        // 回合内冻结：仅当出现新用户消息（userCount 增长）时刷新一次；
-        // 工具结果不触发（避免每步改前缀击穿缓存）
-        const lastUserCount = userCountBySession.get(sessionId) || 0
-        const curUserCount = (state.userCounts && state.userCounts[sessionId]) || 0
-        if (!initializedSessions.has(sessionId) || curUserCount !== lastUserCount) {
-          const q = recentQuery(sessionId, '当前会话目标、计划、决定、偏好和相关工作上下文')
-          userCountBySession.set(sessionId, curUserCount)
-          await refreshMemoryCache(sessionId, q, completionLimit)
-        }
+        // 回合内冻结：待 user/message 已启动的刷新（若 userCount 变化则新启动），
+        // 完成后注入即新文本——首请求带新注入，回合内不再变
+        await ensureSessionRefresh(sessionId, completionLimit)
       }
     } catch (e) {
       console.error('[deepmemory] prompt cache refresh failed', String(e))
@@ -419,6 +441,9 @@ function redactSensitive(text) {
       if (t === 'user/message') {
         state.userCounts = state.userCounts || {}
         state.userCounts[sid] = (state.userCounts[sid] || 0) + 1
+        // 用户消息到达即启动刷新（assemble 会 await 它）：
+        // 保证本回合首请求已带新注入（miss=首请求允许），回合内不再切换
+        ensureSessionRefresh(sid)
       }
       if (text && text.trim()) {
         let bucket = buckets.get(sid)
@@ -535,7 +560,10 @@ function redactSensitive(text) {
         console.log('[deepmemory] AI tasks write failed: ' + String(e))
       }
     }
-    if (memoryChanged) await refreshMemoryCache(sid, recentQuery(sid, dialog.slice(-300)))
+    // 注入刷新唯一入口=assemble 的 userCount 守卫（回合内冻结）。
+    // turn-stopping 只写库（抽取/状态卡/任务），不刷注入：
+    // 内存库更新在下一回合首请求（userCount 变）时自然并入，避免回合中途断前缀。
+    // (修前: if (memoryChanged) await refreshMemoryCache(...) —— 回合中段刷新击穿缓存)
   })
 
   const commands = ctx.get('commands')

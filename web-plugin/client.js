@@ -783,6 +783,19 @@ function apply(ctx) {
           onChange: function (e) { setValue(key, e.target.value) },
         })
       }
+      if (spec.type === 'list' || spec.type === 'array') {
+        // 列表字段：逗号/换行分隔 ↔ 数组（如 library.vocabulary = ['bias','core',...]）
+        const joined = Array.isArray(val) ? val.join(', ') : String(val || '')
+        return React.createElement('textarea', {
+          className: 'dsh-mem-input', style: { width: '100%', minHeight: 60, resize: 'vertical' },
+          value: joined,
+          placeholder: '逗号分隔，如 bias, core, eco, project, runtime',
+          onChange: function (e) {
+            const parts = String(e.target.value).split(/[,，\n]+/).map(function (x) { return x.trim() }).filter(Boolean)
+            setValue(key, parts)
+          },
+        })
+      }
       return React.createElement('input', {
         className: 'dsh-mem-input', style: { width: '100%' },
         type: (spec.type === 'int' || spec.type === 'float' || spec.type === 'number' || spec.type === 'integer') ? 'number' : 'text',
