@@ -19,6 +19,7 @@ Give your DeepSeek Harness agents **cross-session memory** and a **near-infinite
 - **Dynamic task board** — 任务看板已独立为 [dsh-livetaskboard](https://github.com/UnKnownFish125/dsh-livetaskboard) 插件（状态机 + 外援 sol/子代理），本仓库保留任务系统接口
 - **Recommended companion** — 长对话场景推荐搭配 [dsh-longlongchat](https://github.com/UnKnownFish125/dsh-longlongchat)（大纲悬浮窗、跳转分块加载、LLM 中文总结），与 deepmemory 记忆补全互补使用
 - **Explicit ownership** — tasks are Workspace-scoped and link to a Session; state cards are independently versioned per Session
+- **Tools** — 运维/迁移工具见 [`tools/`](tools/README.md)：`migrate_embedding.py`（更换向量模型：全库重嵌 + 重建 FAISS/BM25，含备份/验证/回滚）、`check_cache_health.py`（缓存命中率检查：更新生产前的硬 gate，防前缀缓存击穿）
 
 ## Memory Model (brief)
 
