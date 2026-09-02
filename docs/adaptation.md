@@ -11,7 +11,7 @@ deepmemory = 记忆后端（memory-server）+ Web 记忆面板（web 插件）+ 
 | 配置键 | 默认值 | 说明 |
 |---|---|---|
 | `deepmemory.server_url` | `http://localhost:6230` | 插件连接的记忆后端地址（可改为远程地址） |
-| `deepmemory.workspace` | `deepseek-hardness` | 当前工作区标识（绑定 workspace 级记忆） |
+| `deepmemory.workspace` | `deepseek-harness` | 当前工作区标识（绑定 workspace 级记忆） |
 | `deepmemory.extract_threshold` | `4` | 累积多少条消息触发一次自动抽取 |
 | `deepmemory.recall_k` | `5` | 每轮注入的召回记忆条数 |
 | `deepmemory.inject_order` | `50` | systemPrompt 中记忆 section 的排序（persona=0 之后、工具引导=100 之前） |

@@ -174,7 +174,7 @@ with sync_playwright() as p:
     fixture = "web-check-memory-edit-fixture"
     edited_fixture = fixture + "-updated"
     added = page.evaluate("""async ({fixture}) => {
-      const r = await fetch('/mem-api/v1/memories/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:fixture, type:'fact', scope:'workspace', domain:'work', workspace_id:'deepseek-hardness'})});
+      const r = await fetch('/mem-api/v1/memories/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:fixture, type:'fact', scope:'workspace', domain:'work', workspace_id:'deepseek-harness'})});
       return await r.json();
     }""", {"fixture": fixture})
     fixture_id = added.get("id")
@@ -200,7 +200,7 @@ with sync_playwright() as p:
     # 空数据时图谱只显示"（暂无）"且不渲染 SVG，先写入带实体/关系的记忆让图有节点
     graph_fixture = "web-check-graph-fixture"
     graph_id = page.evaluate("""async ({content}) => {
-      const r = await fetch('/mem-api/v1/memories/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content: content, type:'fact', scope:'workspace', domain:'work', importance:0.6, workspace_id:'deepseek-hardness', entities:[{name:'图谱试验机', kind:'tool'}], relations:[{source:'图谱试验机', relation:'验证', target:'图谱链路'}]})});
+      const r = await fetch('/mem-api/v1/memories/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content: content, type:'fact', scope:'workspace', domain:'work', importance:0.6, workspace_id:'deepseek-harness', entities:[{name:'图谱试验机', kind:'tool'}], relations:[{source:'图谱试验机', relation:'验证', target:'图谱链路'}]})});
       return (await r.json()).id;
     }""", {"content": graph_fixture})
     try:

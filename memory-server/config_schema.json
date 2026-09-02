@@ -13,7 +13,7 @@
         "description": "工作区标识",
         "hint": "绑定工作区级记忆的标识；换项目时修改，新记忆写入新工作区",
         "type": "string",
-        "default": "deepseek-hardness"
+        "default": "deepseek-harness"
       }
     }
   },
