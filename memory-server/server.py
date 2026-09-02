@@ -2930,6 +2930,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, {"error": "domain not allowed（白名单: env/project/status/config/ticket）"})
                 return self._send(200, {"saved": domain + "/" + key})
             if path == "/v1/memories/injection-log":
+                global _last_injection
                 body = self._read_body()
                 with _injection_lock:
                     if _last_injection is None: _last_injection = {}
