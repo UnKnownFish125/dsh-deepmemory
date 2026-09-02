@@ -409,6 +409,10 @@ function redactSensitive(text) {
       })
       console.log('[deepmemory] session memory cache updated sid=' + String(sessionId).slice(0, 12) + ' (total ' + state.injectCount + ') mems=' + JSON.stringify(detail) + ' size=' + String(memoryCache.get(sessionId) || '').length)
       state.lastInjectionDetail = detail
+      // 注入全文上报（WebUI「最近注入」可查看完整内容）
+      try {
+        await http('POST', '/v1/memories/injection-log', { full: nextText })
+      } catch (e2) { /* 日志上报失败不影响注入 */ }
       return true
     })().finally(() => refreshes.delete(sessionId))
     refreshes.set(sessionId, refresh)
