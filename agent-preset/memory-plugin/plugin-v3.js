@@ -52,6 +52,10 @@ const userCountBySession = new Map()
   let EXTRACT_THRESHOLD = 4
   let RECALL_K = 5
   const INJECT_ORDER = 50
+  // 使用指引：固定文本（不随会话/回合变化 → 前缀缓存安全），引导"优先已注入 + 合并调用 + 提前规划"
+  const GUIDE = '[记忆使用指引] 以上为当前会话相关记忆（完整、按重要度排序）。' +
+    '优先直接基于注入内容作答，不要重复调用检索；仅当存在明确信息缺口时才调用 memory_recall，' +
+    '且一次检索到位（k 最大 10，避免多次小调用）；发现值得长期保留的新信息时用 memory_save 一次写入。'
   let INJECT_ENABLED = true
   let INJECT_CARD = true
   let EXTRACT_ENABLED = true
@@ -379,7 +383,8 @@ function redactSensitive(text) {
       text: (context) => {
         const agent = context && context.agent
         const sessionId = agent && agent.id ? String(agent.id) : ''
-        return sessionId ? (memoryCache.get(sessionId) || '') : ''
+        const base = sessionId ? (memoryCache.get(sessionId) || '') : ''
+        return base ? base + '\n\n' + GUIDE : ''
       },
     }))
   } else {
@@ -411,7 +416,7 @@ function redactSensitive(text) {
     } catch (e) {
       console.error('[deepmemory] prompt cache refresh failed', String(e))
     }
-    const text = memoryCache.get(sessionId) || ''
+    const text = (memoryCache.get(sessionId) || '') ? String(memoryCache.get(sessionId) || '') + '\n\n' + GUIDE : ''
     return {
       ...assembled,
       sections: assembled.sections.map((section) => section.name === 'deepmemory' ? { ...section, text: text } : section),
@@ -608,7 +613,7 @@ function redactSensitive(text) {
 
   const recallTool = defineTool({
     name: 'memory_recall',
-    description: 'Recall long-term memories semantically. Use concise recall keywords instead of copying the full message. Call when the user references past facts, preferences, decisions, or older context.',
+    description: 'Recall long-term memories semantically. Use concise recall keywords instead of copying the full message. Prefer the injected memory block; call this ONLY when a clear gap exists, and retrieve everything needed in ONE call (set k up to 10) instead of multiple small calls.',
     parameters: {
       query: { type: 'string', required: true, description: 'Concise recall keywords for long-term memory.' },
       k: { type: 'integer', description: 'Maximum number of memories to return.', default: 5 },

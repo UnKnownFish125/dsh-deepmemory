@@ -2331,6 +2331,18 @@ class Handler(BaseHTTPRequestHandler):
                     doc_path, workspace_id=qs.get("workspace_id", [None])[0])})
             if path == "/v1/memories/libraries":
                 return self._v2_call(lambda: {"libraries": self._v2_store().library_stats()})
+            if path == "/v1/memories/hot":
+                # 热点记忆：按调用次数（access_count）排序——用于可见化/维护，不进注入排序（防缓存抖动）
+                limit = int(qs.get("limit", ["10"])[0])
+                conn = get_conn()
+                rows = conn.execute(
+                    "SELECT id, content, type, importance, access_count, last_access_at,"
+                    " storage_tier, library FROM documents WHERE status='active'"
+                    " ORDER BY access_count DESC, last_access_at DESC LIMIT ?",
+                    (min(limit, 100),),
+                ).fetchall()
+                conn.close()
+                return self._send(200, {"hot": [dict(r) for r in rows]})
             if path.startswith("/v1/memories/"):
                 parts = path.strip("/").split("/")
                 doc_id = int(parts[-1] if parts[-1] != "source" else parts[-2])

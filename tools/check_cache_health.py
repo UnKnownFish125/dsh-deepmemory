@@ -102,23 +102,23 @@ def check_dynamic(sessions_root, recent_n, min_rate, plugin_mtime=0):
             reports.append({'session': sid, 'error': '无 usage 数据'})
             all_ok = False
             continue
-        # 按 turn 分组: 每组"首步允许 miss"(回合首请求, query 变化触发刷新);
-        # 组内后续步骤若 miss => 真击穿
-        by_turn = {}
+        # 按"真实用户消息计数"分组（turn 字段与 user 消息有偏移，不准确）：
+        # 每组（一个用户消息起的回合）允许 **1 个 miss**（刷新点=新注入生效的请求）；
+        # 同组内第 2+ 个 miss => 真击穿（回合内前缀被改）
+        by_group = {}
         for u in uses:
-            by_turn.setdefault(u['turn'], []).append(u)
+            by_group.setdefault(u['ugroup'], []).append(u)
         bad_steps = []
-        for turn, steps in by_turn.items():
-            first_ok = True
+        for gname, steps in by_group.items():
+            misses = 0
             for u in steps:
                 cache = u.get('cacheReadTokens', 0)
                 inc = u.get('inputTokens', 0)
                 rate = cache / (cache + inc) if (cache + inc) else 1.0
-                if first_ok:
-                    first_ok = False      # 首请求允许 miss
-                    continue
                 if rate < min_rate and inc > 1000:
-                    bad_steps.append(round(rate, 3))
+                    misses += 1
+                    if misses > 1:            # 每组第 2 个 miss = 击穿
+                        bad_steps.append(round(rate, 3))
         ok = not bad_steps or stale
         all_ok = all_ok and ok
         tin = sum(u.get('inputTokens', 0) for u in uses)
@@ -133,6 +133,7 @@ def check_dynamic(sessions_root, recent_n, min_rate, plugin_mtime=0):
 
 def parse_usage_with_turn(text):
     uses = []
+    ugroup = 0
     for line in text.split('\n'):
         if not line.strip():
             continue
@@ -140,7 +141,11 @@ def parse_usage_with_turn(text):
             e = json.loads(line)
         except Exception:
             continue
-        if e.get('type') != 'assistant/message':
+        t = e.get('type')
+        if t == 'user/message':
+            ugroup += 1          # 每个用户消息 → 新回合组
+            continue
+        if t != 'assistant/message':
             continue
         d = e.get('data', {})
         def find_u(o):
@@ -160,6 +165,7 @@ def parse_usage_with_turn(text):
         u = find_u(d)
         if u:
             u['turn'] = d.get('turn', '?')
+            u['ugroup'] = ugroup
             uses.append(u)
     return uses
 

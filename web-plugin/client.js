@@ -626,7 +626,20 @@ function apply(ctx) {
       msg ? React.createElement('div', { style: { opacity: .75 } }, msg) : null,
       resultData ? React.createElement('div', { className: 'dsh-mem-box dsh-mem-maintenance-result' },
         React.createElement('div', { className: 'dsh-mem-title' }, t('result')),
-        resultData.status === 'no_candidates'
+        resultData.status === 'hot' && Array.isArray(resultData.hot)
+          ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+            React.createElement('div', { className: 'dsh-mem-title' }, (lang === 'en' ? 'Hot memories (by calls)' : '热点记忆（按调用次数）')),
+            resultData.hot.map(function (m) {
+              return React.createElement('div', { key: m.id, className: 'dsh-mem-cfg-item' },
+                React.createElement('span', { className: 'dsh-mem-cfg-label' },
+                  '#' + m.id + ' · ' + (m.access_count || 0) + ' 次调用' + (m.library ? ' · ' + m.library : '')),
+                React.createElement('div', { className: 'dsh-mem-content', style: { fontSize: 12, whiteSpace: 'pre-wrap' } },
+                  String(m.content || '').slice(0, 140)),
+              )
+            }),
+            resultData.hot.length === 0 ? React.createElement('div', { className: 'dsh-mem-cfg-hint' }, (lang === 'en' ? 'No calls yet' : '暂无调用记录')) : null,
+          )
+          : resultData.status === 'no_candidates'
           ? React.createElement('div', { className: 'dsh-mem-content' }, t('noConsolidationCandidates'))
           : resultData.status === 'completed'
             ? React.createElement('div', { className: 'dsh-mem-content' }, t('consolidationDone'))
@@ -664,6 +677,7 @@ function apply(ctx) {
           React.createElement('input', { className: 'dsh-mem-input', style: { maxWidth: 90 }, value: sim, title: t('similarity'), onChange: function (e) { setSim(e.target.value) } }),
           React.createElement('button', { className: 'dsh-mem-btn', onClick: doConsolidate, disabled: busy }, busy ? t('loading') : t('consolidate')),
           React.createElement('button', { className: 'dsh-mem-btn', onClick: doDecay }, t('decayRun')),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: doHot }, (lang === 'en' ? 'Hot' : '热点记忆')),
         ),
       ),
     )
