@@ -409,6 +409,13 @@ def run_migrations():
         6: [
             "ALTER TABLE documents ADD COLUMN rule_crystallized INTEGER NOT NULL DEFAULT 0",
         ],
+        7: [
+            "CREATE TABLE IF NOT EXISTS topic_summaries ("
+            " topic_id TEXT NOT NULL, seq INTEGER NOT NULL, summary TEXT NOT NULL,"
+            " start_time REAL NOT NULL, end_time REAL NOT NULL, prev_seq INTEGER,"
+            " created_at REAL NOT NULL, PRIMARY KEY (topic_id, seq))",
+            "CREATE INDEX IF NOT EXISTS idx_topic_summaries ON topic_summaries(topic_id, seq)",
+        ],
     }
     conn = get_conn()
     conn.execute(
@@ -2545,6 +2552,16 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/memories/injection-log":
                 with _injection_lock:
                     return self._send(200, {"injection": _last_injection})
+            if path == "/v1/topic-summaries":
+                topic_id = qs.get("topic_id", [""])[0]
+                conn = get_conn()
+                rows = conn.execute(
+                    "SELECT topic_id, seq, summary, start_time, end_time, prev_seq, created_at"
+                    " FROM topic_summaries WHERE topic_id=? ORDER BY seq DESC LIMIT ?",
+                    (topic_id, int(qs.get("limit", ["20"])[0])),
+                ).fetchall()
+                conn.close()
+                return self._send(200, {"topic": topic_id, "summaries": [dict(r) for r in rows]})
             if path == "/v1/memories/hot":
                 # 热点记忆：按调用次数（access_count）排序——用于可见化/维护，不进注入排序（防缓存抖动）
                 limit = int(qs.get("limit", ["10"])[0])
@@ -2899,6 +2916,52 @@ class Handler(BaseHTTPRequestHandler):
                 if get_info_store().set(domain, key, body.get("value")) is None:
                     return self._send(404, {"error": "domain not allowed（白名单: env/project/status/config/ticket）"})
                 return self._send(200, {"saved": domain + "/" + key})
+            if path == "/v1/topic-summaries/auto":
+                body = self._read_body()
+                topic_id = str(body.get("topic_id") or "").strip()
+                text = str(body.get("text") or "").strip()
+                if not topic_id or not text:
+                    return self._send(400, {"error": "topic_id and text are required"})
+                res = llm_chat(
+                    "把以下对话历史压缩为一条可增值的摘要（保留：目标/决定/待办/关键事实，中文，≤300字）：\n"
+                    + text[:8000],
+                    system="你是记忆摘要助手：输出仅摘要。")
+                if res.get("error"):
+                    return self._send(500, {"error": res["error"]})
+                summary = (res.get("content") or "").strip()
+                conn = get_conn()
+                row = conn.execute("SELECT COALESCE(MAX(seq),0) FROM topic_summaries WHERE topic_id=?", (topic_id,)).fetchone()
+                seq = int(row[0]) + 1
+                now = time.time()
+                conn.execute(
+                    "INSERT INTO topic_summaries (topic_id, seq, summary, start_time, end_time, prev_seq, created_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (topic_id, seq, summary, float(body.get("start_time") or now), float(body.get("end_time") or now), seq - 1 if seq > 1 else None, now),
+                )
+                conn.commit()
+                conn.close()
+                return self._send(200, {"topic_id": topic_id, "seq": seq, "summary": summary})
+            if path == "/v1/topic-summaries":
+                body = self._read_body()
+                topic_id = str(body.get("topic_id") or "").strip()
+                summary = str(body.get("summary") or "").strip()
+                if not topic_id or not summary:
+                    return self._send(400, {"error": "topic_id and summary are required"})
+                conn = get_conn()
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(seq),0) FROM topic_summaries WHERE topic_id=?", (topic_id,)
+                ).fetchone()
+                seq = int(row[0]) + 1
+                now = time.time()
+                prev = seq - 1 if seq > 1 else None
+                conn.execute(
+                    "INSERT INTO topic_summaries (topic_id, seq, summary, start_time, end_time, prev_seq, created_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (topic_id, seq, summary, float(body.get("start_time") or now), float(body.get("end_time") or now), prev, now),
+                )
+                conn.commit()
+                conn.close()
+                return self._send(200, {"topic_id": topic_id, "seq": seq, "prev_seq": prev})
             if path == "/v1/memories/doc-link":
                 body = self._read_body()
                 return self._v2_call(lambda: self._v2_store().link_document(

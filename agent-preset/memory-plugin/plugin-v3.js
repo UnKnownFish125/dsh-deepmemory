@@ -376,12 +376,13 @@ function redactSensitive(text) {
     return refresh
   }
 
-  // 记忆注入：按 agent scope 同步读取会话缓存，不进入消息序列。
+  // 记忆注入（D3 注入后置）：systemPrompt.context —— 渲染为对话流尾部的持久用户角色快照
+  // （system 前缀彻底稳定 → 工具轮/跨回合前缀缓存不破坏；注入内容回合内冻结仍生效）
   const systemPrompt = ctx.get('systemPrompt')
   if (systemPrompt) {
-    ctx.effect(() => systemPrompt.section({
+    ctx.effect(() => systemPrompt.context({
       name: 'deepmemory',
-      order: INJECT_ORDER,
+      order: 50,
       text: (context) => {
         const agent = context && context.agent
         const sessionId = agent && agent.id ? String(agent.id) : ''
