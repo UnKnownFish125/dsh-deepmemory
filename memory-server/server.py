@@ -904,7 +904,6 @@ def search_memories(
             _types = [x.strip() for x in str(type_).split(",") if x.strip()]
             if _types and str(r.get("type") or "") not in _types:
                 continue
-            continue
         if persona_id and r["persona_id"] and r["persona_id"] != persona_id:
             continue
         if library and r.get("library") != library:
