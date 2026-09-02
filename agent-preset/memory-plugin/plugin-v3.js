@@ -51,6 +51,7 @@ const userCountBySession = new Map()
   let WORKSPACE = 'deepseek-harness'
   let EXTRACT_THRESHOLD = 4
   let RECALL_K = 5
+  const INJECT_BUDGET_CHARS = 2600   // token 预算 1-2K：注入文本（记忆+摘要）上限（约 2000 token，中文 1字≈1token）
   const INJECT_ORDER = 50
   // 使用指引：固定文本（不随会话/回合变化 → 前缀缓存安全），引导"优先已注入 + 合并调用 + 提前规划"
   const GUIDE = '[记忆使用指引] 以上为当前会话相关记忆（完整、按重要度排序）。' +
@@ -346,26 +347,64 @@ function redactSensitive(text) {
     if (!sessionId) return false
     if (refreshes.has(sessionId)) return refreshes.get(sessionId)
     const refresh = (async () => {
-      const sres = await http('POST', '/v1/memories/search', {
-        query: query || '当前会话目标、计划、决定、偏好和相关工作上下文',
-        k: limit || RECALL_K,
-        session_id: sessionId,
-        workspace_id: WORKSPACE,
-      })
-      if (!sres.ok) return false
+      // 分类拉取（满足"记忆增多+按类平衡"）：规则/决定/事实 三类各检索，合并去重（importance 排序）
+      const CATEGORIES = [
+        ['preference', 'rule'],
+        ['decision', 'goal', 'plan'],
+        ['fact', 'episode'],
+      ]
+      const perCategory = Math.max(4, Math.round((limit || RECALL_K) * 0.8))   // 预算 1-2K：每类 4-5 条 ≈ 12-15 条
+      let catResults = []
+      for (const types of CATEGORIES) {
+        const r = await http('POST', '/v1/memories/search', {
+          query: query || '当前会话目标、计划、决定、偏好和相关工作上下文',
+          k: perCategory,
+          type: types.join(','),
+          session_id: sessionId,
+          workspace_id: WORKSPACE,
+        })
+        if (!r.ok) return false
+        catResults = catResults.concat((r.data && r.data.results) || [])
+      }
+      // 去重（按 id）+ 总量上限（不足则放宽到 12 条分类结果）
+      const seen = new Set()
+      let results = []
+      for (const r of catResults) {
+        if (r && r.id && !seen.has(r.id)) { seen.add(r.id); results.push(r) }
+      }
+      const sres = { ok: true, data: { results: results }}
+      // 摘要链注入（compression.inject_summary）：把 topic_summaries 主脉络并入注入
+      // （历史压缩后靠它补"过程主脉络"，与 12 条记忆共同覆盖压缩语义）
+      let summaryBrief = ''
+      try {
+        const injSummary = await readKeyOr(['compression.inject_summary', 'inject_summary'])
+        if (injSummary) {
+          const sumres = await http('GET', '/v1/topic-summaries?topic_id=' + encodeURIComponent(String(sessionId).slice(0, 12)) + '&limit=5')
+          if (sumres.ok && sumres.data && sumres.data.summaries && sumres.data.summaries.length) {
+            const blocks = (sumres.data.summaries || []).slice().reverse().map(function (x) {
+              return '  [摘要#' + String(x.seq || '?') + '] ' + String(x.summary || '').slice(0, 240)
+            })
+            summaryBrief = '[历史脉络摘要]\n' + blocks.join('\n') + '\n'
+          }
+        }
+      } catch (e) { /* 摘要链失败不影响主注入 */ }
       let nextCardText = ''
       if (INJECT_CARD) {
         const cres = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sessionId))
         if (!cres.ok) return false
         nextCardText = cardText(cres.data && cres.data.card)
       }
-      const nextText = nextCardText + formatMemories((sres.data && sres.data.results) || [], limit || RECALL_K)
+      let nextText = nextCardText + summaryBrief + formatMemories(results, Math.max(limit || RECALL_K, results.length))
+      // 预算裁剪：超 INJECT_BUDGET_CHARS 时截断（尾部=低 importance；摘要段在前部保留）
+      if (nextText.length > INJECT_BUDGET_CHARS + 300) {
+        nextText = nextText.slice(0, INJECT_BUDGET_CHARS + 300) + '\n[^ 预算裁剪 ' + String(nextText.length - INJECT_BUDGET_CHARS - 300) + ' 字符 ^]'
+      }
       const previous = memoryCache.get(sessionId) || ''
       initializedSessions.add(sessionId)
       if (nextText === previous) return true
       memoryCache.set(sessionId, nextText)
       state.injectCount += 1
-      const detail = ((sres.data && sres.data.results) || []).map(function (r) {
+      const detail = results.map(function (r) {
         return (r.id || '?') + '[s' + (r.scope || '?') + '/i' + (r.importance || 0) + '/score' + (r.final_score || 0) + ']'
       })
       console.log('[deepmemory] session memory cache updated sid=' + String(sessionId).slice(0, 12) + ' (total ' + state.injectCount + ') mems=' + JSON.stringify(detail) + ' size=' + String(memoryCache.get(sessionId) || '').length)
@@ -449,6 +488,8 @@ function redactSensitive(text) {
       if (t === 'user/message') {
         state.userCounts = state.userCounts || {}
         state.userCounts[sid] = (state.userCounts[sid] || 0) + 1
+        state.turnCounts = state.turnCounts || {}
+        state.turnCounts[sid] = (state.turnCounts[sid] || 0) + 1
         // 用户消息到达即启动刷新（assemble 会 await 它）：
         // 保证本回合首请求已带新注入（miss=首请求允许），回合内不再切换
         ensureSessionRefresh(sid)
@@ -568,6 +609,30 @@ function redactSensitive(text) {
         console.log('[deepmemory] AI tasks write failed: ' + String(e))
       }
     }
+    // 自动摘要（压缩语义补全）：每满 N 回合（compression.min_turns 默认 8），
+    // 把本会话新历史交给谷价模型生成一条摘要块（topic_summaries append-only）。
+    // 压缩触发时注入已带摘要链——压缩丢的过程主脉络可追溯。
+    try {
+      const summaryTurnGap = Math.max(2, Number((automationConfig_raw && automationConfig_raw['compression.min_turns']) || 8) || 8)
+      const curTurn = Number(state.turnCounts && state.turnCounts[sid] || 0)
+      const lastSum = Number(state.lastSummaryTurn && state.lastSummaryTurn[sid] || 0)
+      if (curTurn - lastSum >= summaryTurnGap) {
+        const hist = (buckets.get(sid) || []).map(function (m) { return (m.role === 'user' ? '用户: ' : '助手: ') + m.text }).join('\n')
+        if (hist && hist.length > 400) {
+          const t = await http('POST', '/v1/topic-summaries/auto', {
+            topic_id: String(sid).slice(0, 12),
+            text: hist.slice(-8000),
+          })
+          if (t.ok) {
+            state.lastSummaryTurn = state.lastSummaryTurn || {}
+            state.lastSummaryTurn[sid] = curTurn
+            buckets.set(sid, [])
+            console.log('[deepmemory] topic summary appended (turn ' + curTurn + ', seq ' + ((t.data && t.data.seq) || '?') + ')')
+          }
+        }
+      }
+    } catch (e) { console.log('[deepmemory] auto summary skipped: ' + String(e)) }
+
     // 注入刷新唯一入口=assemble 的 userCount 守卫（回合内冻结）。
     // turn-stopping 只写库（抽取/状态卡/任务），不刷注入：
     // 内存库更新在下一回合首请求（userCount 变）时自然并入，避免回合中途断前缀。

@@ -659,15 +659,26 @@ def llm_chat(prompt, model=None, system=None, provider=None, api_key=None):
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     body = {"model": model, "messages": messages, "max_tokens": 512, "temperature": 0.3}
-    try:
-        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers={
-            "Authorization": "Bearer " + key, "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        return {"content": content, "usage": data.get("usage")}
-    except Exception as e:
-        return {"error": redact_text(str(e))[0]}
+    # 模型链 fallback：0731 波动（502）时回落 deepseek-v4-flash（同价/稍差，保证批处理可用）
+    model_chain = []
+    if model:
+        model_chain.append(model)
+    for m in ("deepseek-v4-flash", "deepseek-v4-flash-0731"):
+        if m and m not in model_chain:
+            model_chain.append(m)
+    last_err = None
+    for m in model_chain:
+        body["model"] = m
+        try:
+            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers={
+                "Authorization": "Bearer " + key, "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            return {"content": content, "usage": data.get("usage"), "model": m}
+        except Exception as e:
+            last_err = redact_text(str(e))[0]
+    return {"error": last_err or "all models failed"}
 
 
 _bm25 = BM25()
@@ -889,7 +900,10 @@ def search_memories(
             continue
         if domain and r["domain"] != domain:
             continue
-        if type_ and r["type"] != type_:
+        if type_:
+            _types = [x.strip() for x in str(type_).split(",") if x.strip()]
+            if _types and str(r.get("type") or "") not in _types:
+                continue
             continue
         if persona_id and r["persona_id"] and r["persona_id"] != persona_id:
             continue
