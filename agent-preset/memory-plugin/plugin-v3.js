@@ -193,6 +193,8 @@ function redactSensitive(text) {
   }
 
   function formatMemories(results, limit) {
+    // L0 固化记忆不再注入（rule_crystallized=1 —— 已沉淀为规则文件，避免与活跃偏好重复）
+    results = (results || []).filter(function (r) { return !r.rule_crystallized })
     if (!results || !results.length) return ''
     const k = limit || RECALL_K
     // 稳定性 + 重要度语义：按 importance 降序（高重要度在前，行序即重要度），

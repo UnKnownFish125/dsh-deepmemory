@@ -406,6 +406,9 @@ def run_migrations():
             "CREATE INDEX IF NOT EXISTS idx_document_links_doc ON document_links(doc_path)",
             "CREATE INDEX IF NOT EXISTS idx_document_links_mem ON document_links(memory_id)",
         ],
+        6: [
+            "ALTER TABLE documents ADD COLUMN rule_crystallized INTEGER NOT NULL DEFAULT 0",
+        ],
     }
     conn = get_conn()
     conn.execute(
@@ -590,6 +593,74 @@ class BM25:
                 denom = tf + 1.5 * (1 - 0.75 + 0.75 * dl / max(1.0, avgdl))
                 scores[doc_id] = scores.get(doc_id, 0.0) + idf * (tf * 1.5) / denom
         return sorted(scores.items(), key=lambda kv: -kv[1])[:k]
+
+
+_last_injection = None
+_injection_lock = threading.Lock()
+
+def note_injection(query, results):
+    """记录最近一次注入（WebUI 显示用；内存级，避免每回合写盘）。"""
+    global _last_injection
+    with _injection_lock:
+        _last_injection = {
+            "ts": time.time(),
+            "query": str(query or "")[:120],
+            "ids": [int(r.get("id") or 0) for r in results[:20] if r.get("id")],
+            "top": [str(r.get("content") or "")[:100] for r in results[:5]],
+            "count": len(results or []),
+        }
+
+
+_info_store = None
+
+def get_info_store():
+    global _info_store
+    if _info_store is None:
+        from info_store import InfoStore
+        _info_store = InfoStore(os.path.join(DATA_DIR, "info"))
+    return _info_store
+
+
+def _credentials_map():
+    """读取 DSH 凭据文件（refs.*），key 引用：credentials['UUAPI_GPT_API_KEY']。"""
+    dsh_home = os.environ.get("DSH_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "dsh"))
+    for cand in (os.path.join(dsh_home, ".credentials.yaml"), "/www/dsh/home/.credentials.yaml"):
+        if os.path.isfile(cand):
+            try:
+                import yaml as _yaml
+                doc = _yaml.safe_load(open(cand, encoding="utf-8"))
+                return (doc.get("refs") or doc) or {}
+            except Exception:
+                continue
+    return {}
+
+
+def llm_chat(prompt, model=None, system=None, provider=None, api_key=None):
+    """夜间批处理 LLM 提炼（低成本默认：uuapi/deepseek-v4-flash-0731，谷时批处理）。
+
+    provider=http 兼容 endpoints；key 来自 .credentials.yaml refs.UUAPI_GPT_API_KEY。
+    """
+    model = model or "deepseek-v4-flash-0731"
+    credentials = _credentials_map()
+    key = api_key or credentials.get("UUAPI_API_KEY") or credentials.get("UUAPI_GPT_API_KEY") or ""
+    if not key:
+        return {"error": "no api key (refs.UUAPI_API_KEY)"}
+    base = (provider or "https://uuapi.io/v1").rstrip("/")
+    url = base + "/chat/completions"
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    body = {"model": model, "messages": messages, "max_tokens": 512, "temperature": 0.3}
+    try:
+        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers={
+            "Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        return {"content": content, "usage": data.get("usage")}
+    except Exception as e:
+        return {"error": redact_text(str(e))[0]}
 
 
 _bm25 = BM25()
@@ -1708,8 +1779,60 @@ def run_decay(decay_rate=0.01, force=False):
         return _run_decay(decay_rate, force)
 
 
+def _nightly_tier_forgetting():
+    """夜间遗忘：importance 低于阈值的 active 记忆降 cold；冷置 30 天以上转 archive（收敛检索面）。"""
+    conn = get_conn()
+    now = time.time()
+    cold_threshold = float(cfg_float("archiving.cold_importance_threshold", 0.4))
+    archive_after_days = float(cfg_float("archiving.archive_after_days", 30))
+    moved_cold = conn.execute(
+        "UPDATE documents SET storage_tier='cold', memory_class='short_term', updated_at=?"
+        " WHERE status='active' AND storage_tier='active' AND importance<? AND COALESCE(rule_crystallized,0)=0",
+        (now, cold_threshold),
+    ).rowcount
+    conn.commit()
+    # active 冷置太久的（access 强化过的 last_access_at 推后）
+    moved_archive = conn.execute(
+        "UPDATE documents SET storage_tier='archive', memory_class='compressed_archive', updated_at=?"
+        " WHERE status='active' AND storage_tier='cold' AND ?-COALESCE(last_access_at, created_at) > ?",
+        (now, now, archive_after_days * 86400),
+    ).rowcount
+    conn.commit()
+    conn.close()
+    rebuild_bm25()
+    return {"moved_cold": moved_cold, "moved_archive": moved_archive}
+
+
+def _nightly_maintenance():
+    """夜间批处理（默认 03:00，谷时低负载）：遗忘 + 沉淀(LLM 提炼) + 固化(LLM 规则)。"""
+    out = {"forgetting": _nightly_tier_forgetting()}
+    try:
+        if cfg_bool("memory_consolidation.enabled", True) and cfg_bool("memory_consolidation.llm_summarize", True):
+            res = consolidate_memories(similarity=cfg_float("memory_consolidation.semantic_similarity_threshold", 0.92),
+                                       limit_groups=5, dry_run=False)
+            out["consolidate"] = res if isinstance(res, dict) else {"ok": bool(res)}
+    except Exception as exc:
+        out["consolidate_error"] = redact_text(str(exc))[0]
+    try:
+        cands = rule_candidates(min_similar=0.86, min_occur=2, limit=5)
+        if cands.get("candidates"):
+            # LLM 提炼规则（低成本模型），失败则直接按代表记忆固化
+            texts = "\n---\n".join(str(c["representative"]["content"])[:300] for c in cands["candidates"])
+            merged_ids = [r["id"] for c in cands["candidates"] for r in c["similar_ids"]]
+            summary = llm_chat(
+                "以下是用户在对话中被反复确认的偏好/约定（重复出现）。请提炼为一条简洁、可执行的持久规则文本（中文，30字内）：\n" + texts,
+                system="你是记忆固化助手：输出仅规则本身，不要解释。")
+            if summary.get("content") and not summary.get("error"):
+                out["crystallize_note"] = summary["content"]
+            out["crystallize"] = crystallize_rules(merged_ids)
+    except Exception as exc:
+        out["crystallize_error"] = redact_text(str(exc))[0]
+    return out
+
+
 def lifecycle_scheduler(stop_event, check_interval=3600):
-    """Keep daily decay independent from any Agent preset or active session."""
+    """每日 decay（每小时）+ 凌晨 03:00 夜间批处理（遗忘/沉淀/固化，谷时低成本模型）。"""
+    last_night = None
     while not stop_event.is_set():
         wait_seconds = check_interval
         try:
@@ -1721,6 +1844,11 @@ def lifecycle_scheduler(stop_event, check_interval=3600):
                     check_interval,
                     max(1, int(result.get("next_run_in_seconds") or check_interval)),
                 )
+            now_h = int(time.strftime("%H"))
+            today = time.strftime("%Y-%m-%d")
+            if now_h == 3 and last_night != today:
+                last_night = today
+                print("memory nightly maintenance: " + json.dumps(_nightly_maintenance(), ensure_ascii=False)[:400], flush=True)
         except Exception as exc:
             print("memory lifecycle decay failed: " + redact_text(str(exc))[0], flush=True)
         stop_event.wait(wait_seconds)
@@ -1861,6 +1989,73 @@ def _rebuild_indexes_internal():
 def rebuild_indexes():
     """索引重建：指纹校验 + 影子重建（临时文件生成后原子替换，living memory 对齐）。"""
     return _rebuild_indexes_internal()
+
+
+def rule_candidates(min_similar=0.86, min_occur=2, limit=20):
+    """L0 固化候选（E1）：type=preference 记忆中语义相似 （重复抽取的同约定）>=min_occur 次 -> 候选。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, content, importance, workspace_id FROM documents"
+        " WHERE status='active' AND type='preference' AND COALESCE(rule_crystallized,0)=0"
+        " ORDER BY importance DESC").fetchall()
+    conn.close()
+    if not rows:
+        return {"candidates": [], "note": "no preference memories"}
+    cands = []
+    for i, a in enumerate(rows):
+        va = embed_texts([str(a["content"])[:200]])
+        if not va:
+            continue
+        group = [a]
+        for b in rows[i + 1:]:
+            vb = embed_texts([str(b["content"])[:200]])
+            if not vb:
+                continue
+            sim = float(np.dot(normalize(va[0]), normalize(vb[0])))
+            if sim >= min_similar:
+                group.append(b)
+        if len(group) >= min_occur:
+            cands.append({
+                "representative": dict(group[0]),
+                "occurrences": len(group),
+                "similar_ids": [g["id"] for g in group],
+            })
+        if len(cands) >= limit:
+            break
+    return {"candidates": cands}
+
+
+def crystallize_rules(ids, rules_dir=None):
+    """E2 固化：候选沉淀规则文件（带 provenance），标记 rule_crystallized=1（注入池移除）。"""
+    rules_dir = rules_dir or os.path.join(DATA_DIR, "rules")
+    os.makedirs(rules_dir, exist_ok=True)
+    conn = get_conn()
+    markers = []
+    cnt = 0
+    for mid in ids:
+        try:
+            mid = int(mid)
+        except (TypeError, ValueError):
+            continue
+        rows = conn.execute(
+            "SELECT id, content, importance, workspace_id, created_at FROM documents WHERE id=?",
+            (mid,),
+        ).fetchall()
+        if not rows:
+            continue
+        r = rows[0]
+        markers.append("- " + str(r["content"])[:400] + " (mem #" + str(r["id"]) +
+                       " / workspace=" + str(r["workspace_id"]) + " / " + str(r["created_at"]) + ")")
+        conn.execute("UPDATE documents SET rule_crystallized=1 WHERE id=?", (mid,))
+        cnt += 1
+    conn.commit()
+    conn.close()
+    out = os.path.join(rules_dir, "crystallized-rules.md")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write("# 固化规则 L0 沉淀（runtime 生成）\n\n")
+        fh.write("> 重复出现的高重要度偏好记忆固化；rule_crystallized=1 不再注入，原文保留可溯源。\n\n")
+        fh.write("\n".join(markers) + "\n")
+    return {"crystallized": cnt, "file": out}
 
 
 def consolidate_memories(similarity=None, limit_groups=None, dry_run=False):
@@ -2331,6 +2526,25 @@ class Handler(BaseHTTPRequestHandler):
                     doc_path, workspace_id=qs.get("workspace_id", [None])[0])})
             if path == "/v1/memories/libraries":
                 return self._v2_call(lambda: {"libraries": self._v2_store().library_stats()})
+            if path.startswith("/v1/info/"):
+                # GET /v1/info/<domain>/<key> | /v1/info/keys/<domain> | /v1/info/domains
+                iparts = [unquote(x) for x in path.strip("/").split("/")]
+                if len(iparts) == 4 and iparts[1] == "info" and iparts[2] not in ("keys",):
+                    # GET /v1/info/<domain>/<key>
+                    entry = get_info_store().get(iparts[2], iparts[3])
+                    if entry is None:
+                        return self._send(404, {"error": "info not found（未登记键：先 POST /v1/info/<domain>/<key>）"})
+                    return self._send(200, entry)
+                if len(iparts) == 4 and iparts[1] == "info" and iparts[2] == "keys":
+                    # GET /v1/info/keys/<domain>
+                    return self._send(200, {"domain": iparts[3], "keys": get_info_store().keys(iparts[3])})
+                if len(iparts) == 3 and iparts[1] == "info" and iparts[2] == "domains":
+                    # GET /v1/info/domains
+                    return self._send(200, {"domains": get_info_store().domains()})
+                return self._send(404, {"error": "info route not found"})
+            if path == "/v1/memories/injection-log":
+                with _injection_lock:
+                    return self._send(200, {"injection": _last_injection})
             if path == "/v1/memories/hot":
                 # 热点记忆：按调用次数（access_count）排序——用于可见化/维护，不进注入排序（防缓存抖动）
                 limit = int(qs.get("limit", ["10"])[0])
@@ -2645,6 +2859,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/maintenance/rebuild":
                 body = self._read_body()
                 return self._send(200, rebuild_indexes())
+            if path == "/v1/maintenance/rule-candidates":
+                body = self._read_body()
+                return self._send(200, rule_candidates(
+                    similarity=float(body.get("similarity") or 0.86),
+                    min_occur=int(body.get("min_occur") or 2),
+                ))
+            if path == "/v1/maintenance/crystallize":
+                body = self._read_body()
+                res = crystallize_rules(body.get("ids") or [])
+                rebuild_bm25()
+                return self._send(200, res)
             if path == "/v1/memories/archive":
                 body = self._read_body()
                 return self._send(200, archive_memories(body.get("ids") or []))
@@ -2666,6 +2891,14 @@ class Handler(BaseHTTPRequestHandler):
                     memory_id, "active", int(body.get("expected_version", 0)),
                     actor=body.get("actor", "main_agent"), reason=body.get("reason", "restore from archive tier"),
                 )})
+            if path.startswith("/v1/info/") and len(path.strip("/").split("/")) == 4:
+                # POST /v1/info/<domain>/<key>  {value: ...} —— 按需建库/覆盖写
+                iparts = [unquote(x) for x in path.strip("/").split("/")]
+                domain, key = iparts[2], iparts[3]
+                body = self._read_body()
+                if get_info_store().set(domain, key, body.get("value")) is None:
+                    return self._send(404, {"error": "domain not allowed（白名单: env/project/status/config/ticket）"})
+                return self._send(200, {"saved": domain + "/" + key})
             if path == "/v1/memories/doc-link":
                 body = self._read_body()
                 return self._v2_call(lambda: self._v2_store().link_document(
@@ -2726,6 +2959,7 @@ class Handler(BaseHTTPRequestHandler):
                     library=body.get("library"),
                     include_archived=bool(body.get("include_archived")),
                 )
+                note_injection(body.get("query"), results)
                 return self._send(200, {"query": body.get("query"), "count": len(results), "results": results})
             if path == "/v1/atoms/add":
                 body = self._read_body()

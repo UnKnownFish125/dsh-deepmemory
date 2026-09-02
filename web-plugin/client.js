@@ -617,6 +617,16 @@ function apply(ctx) {
       setBusy(false)
     }
     async function doDecay() { result(await api('POST', '/v1/maintenance/decay', { force: true })) }
+    async function doHot() {
+      const h = await api('GET', '/v1/memories/hot?limit=10')
+      setResultData({ hot: (h && h.hot) || [], status: 'hot' })
+      setMsg(h && h.error ? String(h.error) : '')
+    }
+    async function doInjection() {
+      const i = await api('GET', '/v1/memories/injection-log')
+      setResultData({ injection: (i && i.injection) || null, status: 'injection' })
+      setMsg(i && i.error ? String(i.error) : '')
+    }
     return React.createElement('div', { className: 'dsh-mem-panel' },
       React.createElement('div', { className: 'dsh-mem-actions' },
         React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, t('maintainTitle')),
@@ -639,7 +649,21 @@ function apply(ctx) {
             }),
             resultData.hot.length === 0 ? React.createElement('div', { className: 'dsh-mem-cfg-hint' }, (lang === 'en' ? 'No calls yet' : '暂无调用记录')) : null,
           )
-          : resultData.status === 'no_candidates'
+          : resultData.status === 'injection'
+            ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+              React.createElement('div', { className: 'dsh-mem-title' }, (lang === 'en' ? 'Last injection' : '最近一次注入')),
+              resultData.injection
+                ? (React.createElement('div', { className: 'dsh-mem-cfg-item' },
+                    React.createElement('span', { className: 'dsh-mem-cfg-label' },
+                      new Date((resultData.injection.ts || 0) * 1000).toLocaleString() + ' · ' +
+                      (resultData.injection.count || 0) + ' 条 · query: ' + (resultData.injection.query || '')),
+                    (resultData.injection.top || []).map(function (c, i) {
+                      return React.createElement('div', { key: i, className: 'dsh-mem-content', style: { fontSize: 12, whiteSpace: 'pre-wrap' } }, String(c))
+                    }),
+                  ))
+                : React.createElement('div', { className: 'dsh-mem-cfg-hint' }, (lang === 'en' ? 'No injection yet' : '暂无注入记录')),
+            )
+            : resultData.status === 'no_candidates'
           ? React.createElement('div', { className: 'dsh-mem-content' }, t('noConsolidationCandidates'))
           : resultData.status === 'completed'
             ? React.createElement('div', { className: 'dsh-mem-content' }, t('consolidationDone'))
@@ -678,6 +702,7 @@ function apply(ctx) {
           React.createElement('button', { className: 'dsh-mem-btn', onClick: doConsolidate, disabled: busy }, busy ? t('loading') : t('consolidate')),
           React.createElement('button', { className: 'dsh-mem-btn', onClick: doDecay }, t('decayRun')),
           React.createElement('button', { className: 'dsh-mem-btn', onClick: doHot }, (lang === 'en' ? 'Hot' : '热点记忆')),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: doInjection }, (lang === 'en' ? 'Injection' : '最近注入')),
         ),
       ),
     )
