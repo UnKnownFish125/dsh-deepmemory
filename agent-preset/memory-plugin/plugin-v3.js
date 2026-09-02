@@ -48,7 +48,7 @@ const userCountBySession = new Map()
     }
     return ''
   }
-  let WORKSPACE = 'deepseek-hardness'
+  let WORKSPACE = 'deepseek-harness'
   let EXTRACT_THRESHOLD = 4
   let RECALL_K = 5
   const INJECT_ORDER = 50

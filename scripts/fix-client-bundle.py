@@ -3,7 +3,7 @@
 幂等：已包裹则只清理 import/export，不重复包裹。
 自动保证 React 绑定存在（vite 写回可能吃掉 require 行，这里兜底补齐）。
 用法: fix-client-bundle.py <client.js路径> <插件id>"""
-import re, subprocess, sys
+import os, re, subprocess, sys
 
 HEAD = "__ModuleLoader__.load({\n  id: '%s',\n  factory: (require) => {\n"
 TAIL = "\n    return { name, apply }\n  }\n})\n"
@@ -22,6 +22,20 @@ def ensure_react_binding(src):
 
 def main():
     path, pid = sys.argv[1], sys.argv[2]
+    # 防复发：目标文件同目录存在 package.json 时，强制从 package.json 读插件 name（loader 条目名来源），
+    # 命令行传参仅作对照；不一致直接报错退出（杜绝转换传旧 id 导致 "loaded without registering"）
+    pkg_path = os.path.join(os.path.dirname(os.path.abspath(path)), "package.json")
+    if os.path.isfile(pkg_path):
+        try:
+            import json
+            pkg_name = json.load(open(pkg_path, encoding="utf-8")).get("name", "")
+        except Exception:
+            pkg_name = ""
+        if pkg_name and pkg_name != pid:
+            print(f"ERROR: 插件 id 不匹配——package.json name={pkg_name}，传参 pid={pid}（拒绝转换，请以 {pkg_name} 为准）")
+            sys.exit(1)
+        if pkg_name:
+            pid = pkg_name   # 以 package.json 为准（同源保证 loader 条目一致）
     src = open(path).read()
     # 1) import -> require
     src = re.sub(r"^import \* as (\w+) from '([^']+)'", r"const \1 = require('\2')", src, flags=re.M)

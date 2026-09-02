@@ -8,7 +8,7 @@ __ModuleLoader__.load({
 const React = require('react')
 const name = 'deepmemory'
 
-const WORKSPACE_DEFAULT = 'deepseek-hardness'
+const WORKSPACE_DEFAULT = 'deepseek-harness'
 
 const TYPE_ZH = { fact: '事实', preference: '偏好', decision: '决定', plan: '计划', episode: '事件' }
 const TYPE_EN = { fact: 'fact', preference: 'preference', decision: 'decision', plan: 'plan', episode: 'episode' }

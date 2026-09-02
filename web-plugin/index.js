@@ -406,7 +406,7 @@ export function apply(ctx) {
     if (hostMemoryRefreshes.has(sessionId)) return hostMemoryRefreshes.get(sessionId)
     const refresh = (async () => {
       const limit = Math.max(1, Math.min(20, Number(config['context_automation.memory_completion_k'] || 5)))
-      const workspaceId = String(config.workspace || 'deepseek-hardness')
+      const workspaceId = String(config.workspace || 'deepseek-harness')
       const search = await memoryRequest('POST', '/v1/memories/search', {
         query: latestMemoryQuery(agent),
         k: limit,
