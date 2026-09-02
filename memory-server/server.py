@@ -2930,6 +2930,12 @@ class Handler(BaseHTTPRequestHandler):
                 if get_info_store().set(domain, key, body.get("value")) is None:
                     return self._send(404, {"error": "domain not allowed（白名单: env/project/status/config/ticket）"})
                 return self._send(200, {"saved": domain + "/" + key})
+            if path == "/v1/memories/injection-log":
+                body = self._read_body()
+                with _injection_lock:
+                    if _last_injection is None: _last_injection = {}
+                    _last_injection["full"] = str(body.get("full") or "")[:6000]
+                return self._send(200, {"saved": True})
             if path == "/v1/topic-summaries/auto":
                 body = self._read_body()
                 topic_id = str(body.get("topic_id") or "").strip()

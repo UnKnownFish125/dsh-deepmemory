@@ -465,12 +465,35 @@ function redactSensitive(text) {
     }
   })
 
-  ctx.on('session/event', (session, event) => {
+  ctx.on('session/event', async (session, event) => {
     try {
       const t = event && event.type
       const sid = sessionIdOf(session)
       if (t === 'compaction/summary') {
         if (sid) initializedSessions.delete(sid)
+        // 跟随压缩：DSH 压缩摘要存入 topic_summaries（零额外 LLM——复用压缩下发的 summary 文本；
+        // 压缩剪哪段、摘要覆盖哪段——记忆注入已读链，压缩语义双覆盖）
+        try {
+          const cmsg = (event.data || {}).message || {}
+          let ctxt = ''
+          const ccontent = cmsg.content
+          if (Array.isArray(ccontent)) {
+            for (const b of ccontent) {
+              if (b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string') ctxt += b.text
+            }
+          } else if (typeof ccontent === 'string') {
+            ctxt = ccontent
+          }
+          if (ctxt && ctxt.length > 100) {
+            const cres = await http('POST', '/v1/topic-summaries', {
+              topic_id: String(sid).slice(0, 12),
+              summary: ctxt.slice(0, 3000),
+              start_time: 0,
+              end_time: Date.now() / 1000,
+            })
+            if (cres.ok) console.log('[deepmemory] topic summary stored from compaction (' + ((cres.data && cres.data.seq) || '?') + ')')
+          }
+        } catch (ce) { console.log('[deepmemory] compaction summary store skipped: ' + String(ce)) }
         return
       }
       if (t !== 'user/message' && t !== 'assistant/message') return
@@ -609,30 +632,7 @@ function redactSensitive(text) {
         console.log('[deepmemory] AI tasks write failed: ' + String(e))
       }
     }
-    // 自动摘要（压缩语义补全）：每满 N 回合（compression.min_turns 默认 8），
-    // 把本会话新历史交给谷价模型生成一条摘要块（topic_summaries append-only）。
-    // 压缩触发时注入已带摘要链——压缩丢的过程主脉络可追溯。
-    try {
-      const summaryTurnGap = Math.max(2, Number((automationConfig_raw && automationConfig_raw['compression.min_turns']) || 8) || 8)
-      const curTurn = Number(state.turnCounts && state.turnCounts[sid] || 0)
-      const lastSum = Number(state.lastSummaryTurn && state.lastSummaryTurn[sid] || 0)
-      if (curTurn - lastSum >= summaryTurnGap) {
-        const hist = (buckets.get(sid) || []).map(function (m) { return (m.role === 'user' ? '用户: ' : '助手: ') + m.text }).join('\n')
-        if (hist && hist.length > 400) {
-          const t = await http('POST', '/v1/topic-summaries/auto', {
-            topic_id: String(sid).slice(0, 12),
-            text: hist.slice(-8000),
-          })
-          if (t.ok) {
-            state.lastSummaryTurn = state.lastSummaryTurn || {}
-            state.lastSummaryTurn[sid] = curTurn
-            buckets.set(sid, [])
-            console.log('[deepmemory] topic summary appended (turn ' + curTurn + ', seq ' + ((t.data && t.data.seq) || '?') + ')')
-          }
-        }
-      }
-    } catch (e) { console.log('[deepmemory] auto summary skipped: ' + String(e)) }
-
+    // （自动摘要已改为跟随压缩：compaction/summary 事件存链，见 session/event 处理）
     // 注入刷新唯一入口=assemble 的 userCount 守卫（回合内冻结）。
     // turn-stopping 只写库（抽取/状态卡/任务），不刷注入：
     // 内存库更新在下一回合首请求（userCount 变）时自然并入，避免回合中途断前缀。

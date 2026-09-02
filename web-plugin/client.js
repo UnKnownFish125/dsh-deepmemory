@@ -657,9 +657,12 @@ function apply(ctx) {
                     React.createElement('span', { className: 'dsh-mem-cfg-label' },
                       new Date((resultData.injection.ts || 0) * 1000).toLocaleString() + ' · ' +
                       (resultData.injection.count || 0) + ' 条 · query: ' + (resultData.injection.query || '')),
-                    (resultData.injection.top || []).map(function (c, i) {
-                      return React.createElement('div', { key: i, className: 'dsh-mem-content', style: { fontSize: 12, whiteSpace: 'pre-wrap' } }, String(c))
-                    }),
+                    (resultData.injection.full
+                      ? React.createElement('pre', { className: 'dsh-mem-srcpre', style: { fontSize: 12, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' } },
+                        String(resultData.injection.full).slice(0, 6000))
+                      : (resultData.injection.top || []).map(function (c, i) {
+                        return React.createElement('div', { key: i, className: 'dsh-mem-content', style: { fontSize: 12, whiteSpace: 'pre-wrap' } }, String(c))
+                      })),
                   ))
                 : React.createElement('div', { className: 'dsh-mem-cfg-hint' }, (lang === 'en' ? 'No injection yet' : '暂无注入记录')),
             )
