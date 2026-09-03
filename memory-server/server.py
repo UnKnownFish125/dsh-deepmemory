@@ -1226,6 +1226,55 @@ def add_relation(memory_id, payload):
     return cur.lastrowid
 
 
+def export_archive(since=None, workspace_id=None, limit=200):
+    """R1+R5+R6 批量导出（标签-提炼-原文）：按 since 增量返回记忆及其脱敏原文（分段拼装）。
+    过滤：workspace_id 匹配 OR scope='global'（R5——与 deepmemory 召回语义对齐，防漏全局约束）。
+    响应带 protected 标记（不做原文展开承诺）。"""
+    conn = get_conn()
+    where = ["d.status='active'"]
+    args = []
+    if workspace_id:
+        where.append("(d.workspace_id=? OR d.scope='global')")
+        args.append(workspace_id)
+    if since:
+        where.append("d.created_at>=?")
+        args.append(float(since))
+    rows = conn.execute(
+        "SELECT d.id FROM documents d WHERE " + " AND ".join(where) +
+        " ORDER BY d.created_at DESC LIMIT ?", args + [min(int(limit) or 200, 1000)]).fetchall()
+    out = []
+    for (mid,) in rows:
+        m = conn.execute(
+            "SELECT id, type, library, scope, importance, content, workspace_id, created_at, rule_crystallized"
+            " FROM documents WHERE id=?", (mid,)).fetchone()
+        if not m:
+            continue
+        srcs = conn.execute(
+            "SELECT seq, content, created_at, protected_source_id, truncated FROM sources"
+            " WHERE memory_id=? ORDER BY seq ASC", (mid,)).fetchall()
+        sources = []
+        for src in srcs:
+            item = dict(src)
+            item["protected"] = bool(item.get("protected_source_id"))
+            if item["protected"]:
+                prot = _load_protected(item["protected_source_id"])
+                item["content"] = prot["redacted_content"] if prot else "[sensitive content redacted]"
+                item["needs_auth"] = True
+            sources.append(item)
+        out.append({
+            "id": m["id"],
+            "tags": {"type": m["type"], "library": m["library"], "scope": m["scope"],
+                     "importance": m["importance"], "rule_crystallized": bool(m["rule_crystallized"])},
+            "summary": m["content"],
+            "workspace_id": m["workspace_id"],
+            "created_at": m["created_at"],
+            "plain": (not sources) or all(not s.get("protected") for s in sources),
+            "sources": sources,
+        })
+    conn.close()
+    return {"count": len(out), "memories": out}
+
+
 def get_sources(memory_id):
     conn = get_conn()
     rows = conn.execute(
@@ -2592,6 +2641,12 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchall()
                 conn.close()
                 return self._send(200, {"topic": topic_id, "summaries": [dict(r) for r in rows]})
+            if path == "/v1/memories/export-archive":
+                return self._send(200, export_archive(
+                    since=qs.get("since", [None])[0] or None,
+                    workspace_id=qs.get("workspace_id", [None])[0] or None,
+                    limit=int(qs.get("limit", ["200"])[0] or 200),
+                ))
             if path == "/v1/memories/hot":
                 # 热点记忆：按调用次数（access_count）排序——用于可见化/维护，不进注入排序（防缓存抖动）
                 limit = int(qs.get("limit", ["10"])[0])

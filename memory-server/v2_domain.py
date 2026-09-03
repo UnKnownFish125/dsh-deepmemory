@@ -1458,12 +1458,17 @@ class V2Store:
         )
         if target_tier == "archive":
             with self._connect() as conn:
+                # R3：source_refs 列表化——附带 sources 表实际来源行 id（分段后多条全含）；
+                # 无 sources 行时回退旧单元素（documents.source_ref）
+                src_ids = [r["id"] for r in conn.execute(
+                    "SELECT id FROM sources WHERE memory_id=?", (memory_id,)).fetchall()]
+                refs = src_ids if src_ids else ([row["source_ref"]] if row["source_ref"] else [])
                 conn.execute(
                     "INSERT INTO memory_archives "
                     "(id,memory_id,archive_kind,summary,source_refs,period_start,period_end,created_at) "
                     "VALUES (?,?,?,?,?,?,?,?)",
                     (str(uuid.uuid4()), memory_id, "compressed", row["content"],
-                     _json([row["source_ref"]] if row["source_ref"] else []),
+                     _json(refs),
                      row["event_time_start"], row["event_time_end"], now),
                 )
         return self.get_memory(memory_id) | {"revision_version": version}
