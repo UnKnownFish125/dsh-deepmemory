@@ -383,6 +383,25 @@ function redactSensitive(text) {
         if (r && r.id && !seen.has(r.id)) { seen.add(r.id); results.push(r) }
       }
       const sres = { ok: true, data: { results: results }}
+      // G1 轨 A：bias 库恒并——不依赖向量匹配的固定拉取（语义召回会漏 bias）
+      // 约束/契约类偏置恒可见：bias 全量（≤6 importance top-6；超限告警）；回合内冻结同 L2
+      try {
+        const biasres = await http('POST', '/v1/memories/search', {
+          query: query || '偏置约束约定',
+          k: 8,
+          library: 'bias',
+          session_id: sessionId,
+          workspace_id: WORKSPACE,
+        })
+        const biasRows = ((biasres.data && biasres.data.results) || []).filter(function (r) { return r.library === 'bias' })
+          .sort(function (a, b) { return (b.importance || 0) - (a.importance || 0) })
+        if (biasRows.length > 6) console.log('[deepmemory] bias 超限：' + biasRows.length + ' 条（取 importance top-6）')
+        const toMerge = biasRows.slice(0, 6)
+        if (toMerge.length) {
+          const seen2 = new Set(results.map(function (r) { return r.id }))
+          for (const b of toMerge) { if (!seen2.has(b.id)) { seen2.add(b.id); results.push(b) } }
+        }
+      } catch (be) { /* bias 恒并失败不影响主注入 */ }
       // L3：行为触发（用户消息含操作意图词）→ 拉取操作类规则（预算外块）
       let opBlock = ''
       try {
