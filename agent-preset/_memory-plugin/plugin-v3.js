@@ -76,7 +76,9 @@ const userCountBySession = new Map()
   const EXTRACT_SYSTEM = [
     '你是长期记忆抽取器。从对话片段中提取值得长期记住的内容，并做结构化解构。',
     '规则：',
-    '1. memories 只提取：事实(fact)、偏好(preference)、决定(decision)、计划(plan)、事件约定(episode)。忽略闲聊和过程细节。',
+    '1. memories 只提取：事实(fact)、偏好(preference)、决定(decision)、计划(plan)、事件约定(episode)、操作规则(rule)。忽略闲聊和过程细节。',
+    '1b. 单一性铁律：每条记忆的 content 只含一个原子事实/决定/偏好；凡含'和/并且/同时/但'等并列含义的复合内容，拆成多条独立记忆（每条一件事）。',
+    '1c. 操作规则识别：对话中出现用户明确要求持续遵循的操作约定（如重启方式/脚本写法/部署流程/验证步骤/命令模板等）→ type='rule'，且 keywords 填触发词（如重启/部署/脚本/验证/同步/推送/备份 中 2-4 个，分号分隔）。',
     '2. 每条记忆 content 用简洁完整的一句话；key_facts 提取其中的关键实体与主题短语（分号分隔，≤5 个，用于检索）；persona_summary 为面向模型注入的一句话表述（无特殊表述时留空）。',
     '3. domain：项目/技术/工作任务=work，个人生活/习惯/人际=life。scope：仅当前对话=session，当前项目/工作区=workspace，用户个人长期适用=global。**凡是用户/助手在本轮对话中说出或确认的内容（约定、指示、决策、偏好、任务背景）一律 scope=session**，只有明确跨对话/项目级才 workspace，用户长期偏好=global。importance：0-1，偏好与重要约定 0.7+。',
     '4. atoms：把每条记忆拆成独立事实单元（可 0-3 条），每单元含 atom_type（factual 事实/preference 偏好/decision 决定/episodic 事件/planned 计划/relational 关系）、content（独立自包含一句话）、ttl_days（factual=180, preference=60, decision=30, episodic=7, planned=2, relational=90）、decay_type（exponential/linear/step）、importance。',
