@@ -53,6 +53,14 @@ const userCountBySession = new Map()
   let RECALL_K = 5
   const INJECT_BUDGET_CHARS = 2600   // token 预算 1-2K：注入文本（记忆+摘要）上限（约 2000 token，中文 1字≈1token）
   const INJECT_ORDER = 50
+  // L3 行为规则按需注入：操作意图词命中 → 拉取 rule/preference 操作类记忆（预算外 [操作规则] 块）
+  const OPERATION_INTENTS = ['重启','部署','写','脚本','API','RPC','验证','安装','同步','推送','修复','备份','迁移','配置','服务','建设','创建','执行']
+  function detectOperationIntent(text) {
+    if (!text) return false
+    for (const w of OPERATION_INTENTS) { if (String(text).indexOf(w) !== -1) return true }
+    return false
+  }
+
   // 使用指引：固定文本（不随会话/回合变化 → 前缀缓存安全），引导"优先已注入 + 合并调用 + 提前规划"
   const GUIDE = '[记忆使用指引] 以上为当前会话相关记忆（完整、按重要度排序）。' +
     '优先直接基于注入内容作答，不要重复调用检索；仅当存在明确信息缺口时才调用 memory_recall，' +
@@ -373,6 +381,28 @@ function redactSensitive(text) {
         if (r && r.id && !seen.has(r.id)) { seen.add(r.id); results.push(r) }
       }
       const sres = { ok: true, data: { results: results }}
+      // L3：行为触发（用户消息含操作意图词）→ 拉取操作类规则（预算外块）
+      let opBlock = ''
+      try {
+        const userText = String((state.lastUserText && state.lastUserText[sessionId]) || '')
+        if (detectOperationIntent(userText)) {
+          const opres = await http('POST', '/v1/memories/search', {
+            query: userText.slice(0, 120),
+            k: 4,
+            type: 'preference,rule',
+            session_id: sessionId,
+            workspace_id: WORKSPACE,
+          })
+          const opRules = ((opres.data && opres.data.results) || []).filter(function (r) {
+            return detectOperationIntent(String(r.content || '') + String(r.keywords || ''))
+          }).slice(0, 4)
+          if (opRules.length) {
+            opBlock = '[操作规则]\n' + opRules.map(function (r) {
+              return '- [' + r.id + ' ' + (r.scope || '?') + '] ' + String(r.content || '')
+            }).join('\n') + '\n'
+          }
+        }
+      } catch (oe) { /* L3 触发失败不影响主注入 */ }
       // 摘要链注入（compression.inject_summary）：把 topic_summaries 主脉络并入注入
       // （历史压缩后靠它补"过程主脉络"，与 12 条记忆共同覆盖压缩语义）
       let summaryBrief = ''
@@ -394,7 +424,7 @@ function redactSensitive(text) {
         if (!cres.ok) return false
         nextCardText = cardText(cres.data && cres.data.card)
       }
-      let nextText = nextCardText + summaryBrief + formatMemories(results, Math.max(limit || RECALL_K, results.length))
+      let nextText = nextCardText + summaryBrief + opBlock + formatMemories(results, Math.max(limit || RECALL_K, results.length))
       // 预算裁剪：超 INJECT_BUDGET_CHARS 时截断（尾部=低 importance；摘要段在前部保留）
       if (nextText.length > INJECT_BUDGET_CHARS + 300) {
         nextText = nextText.slice(0, INJECT_BUDGET_CHARS + 300) + '\n[^ 预算裁剪 ' + String(nextText.length - INJECT_BUDGET_CHARS - 300) + ' 字符 ^]'
@@ -515,6 +545,8 @@ function redactSensitive(text) {
       if (t === 'user/message') {
         state.userCounts = state.userCounts || {}
         state.userCounts[sid] = (state.userCounts[sid] || 0) + 1
+        state.lastUserText = state.lastUserText || {}
+        state.lastUserText[sid] = String((event.data && event.data.message && event.data.message.content) || '')
         state.turnCounts = state.turnCounts || {}
         state.turnCounts[sid] = (state.turnCounts[sid] || 0) + 1
         // 用户消息到达即启动刷新（assemble 会 await 它）：
