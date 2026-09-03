@@ -43,3 +43,11 @@
 ## 3. 风险与回滚
 - bias 恒并 +3 条注入 → 预算裁剪可能挤掉边界记忆（可接受：bias 优先）
 - 回滚：plugin 单文件回退（.bak-* 已有）
+
+---
+
+## 审核修订 v1.1（GLM 2026-09-03）
+- **N1 核查**：library 校验触发器（documents_v2_validate_insert/update）**生产+测试库均已存在**（含 `library NOT IN (bias,core,eco,project,runtime)` RAISE）——已实证，无需补（GLM 盘漏）
+- 1.1 修正：bias 全量"N 条（现 4 条，会增长）"；上限行为定义：≤6 importance top-6，超限告警
+- 1.2：向量迁移 **literature 先行**（新索引零风险）→ deepmemory 后（维护窗口，**不与夜间批处理同晚**）；jina 缓存三份**统一环境变量**（fastembed cache path）
+- 新增轨 B 去重协议（N4）：知识挂 source_memory_id → 注入时抑制轨 A 同源行（内容哈希去重 + 两段合计总预算）

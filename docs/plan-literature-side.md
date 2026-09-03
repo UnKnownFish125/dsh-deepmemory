@@ -62,3 +62,13 @@
 - 6262 kb-server（kb_query 改向量）
 - agent kb 插件（轨 B 注入 + kb_archive_library 工具）
 - **无 deepmemory 改动**（除已述轨 A——独立方案）
+
+---
+
+## 审核修订 v1.1（GLM 2026-09-03）
+- §0 修正：`literature_update` 工具不存在（那是服务端 PATCH API——工具面仅 add/search/attach/link_evidence 四件）
+- **N2 已实施**：knowledge_items `library/archived/source_memory_id` 列 + library 校验/偏置拒归档触发器（生产库 ALTER+显式迁移 9 列；DDL 同步 SCHEMA——新建库同构）
+- 1.3 过渡策略（N3）：**RRF 融合**——知识向量（新通道）+ deepmemory 透传（旧通道），**知识 ≥50 条后再切纯知识检索**（或保留 deepmemory 显式 fallback）
+- 1.4 轨 B 挂 source_memory_id；两段合计总预算（N4）
+- 错峰保险：deepmemory 批处理未完成信号 → literature 加工推迟（30 分钟 + 信号双保险）
+- 验收：≥20 问（>90% 相关）；锚点验收"原文可定位"（正确性非仅存在）；小笔误 knowledgen→knowledge
