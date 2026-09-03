@@ -88,3 +88,37 @@
 - deepmemory 侧实施：**活跃开发树** `/www/deepseek harness workspace/harness-memory-archive`（勿用落后的 Gitea 克隆），按 B（6240）→ A（6230）推进，与文献库/kb 运维区分
 - 前置独立项（G4，已由 literature 侧完成）：存量库触发器重建（bias scope=global 校验）+ bias 3 条 scope 脏数据修正——deepmemory 生产/测试库均已应用，实施时无需重复
 - literature 侧对接模块：`/www/dsh-literature-repo` 6260 演进
+
+---
+
+## v0.4 修订（2026-09-03 设计确认：原文分段 / 无静默截断 / 三层注入 / 提炼单一性）
+
+### 1. 原文传递（标签-提炼-原文三段结构）
+```
+记忆 = {
+  tags:    [type/library/scope/importance]   ← 标签（检索面）
+  summary: 提炼内容（content——单一原子）     ← 提炼
+  sources: [原文分段...]                     ← 原文（完整、脱敏）
+}
+```
+- **取消 2000/8000 双硬截断**：插件侧 `slice(0,2000)` → 32000 兜底（已实施 0c45d60）；server `_save_source` 分段（>8000 拆 `seq` 连续段，>32000 显式 `truncated=1`）
+- **export-archive**（已实施 6800926）：批量导出 标签-提炼-原文；`since` 增量（R6）；`workspace_id 匹配 OR scope='global'` 过滤（R5）；protected 标记（G2）
+
+### 2. 三层注入（记忆上下文分层）
+| 层 | 内容 | 注入策略 | 预算 |
+|---|---|---|---|
+| L1 | 会话状态/当前目标（state-card） | 每次 | 固定卡片 |
+| L2 | 语义召回（事实/决定/偏好 12-15 条） | 每回合刷新（回合内冻结） | INJECT_BUDGET_CHARS=2600 |
+| L3 | **行为规则**（操作类：重启/部署/脚本等） | **操作意图词命中时触发**（`[操作规则]` 预算外块） | 预算外 |
+
+- L3 已实施（2b72ed1）：`OPERATION_INTENTS` 触发词 + rule/preference 过滤拉取（≤4 条）
+- 规则库来源：extract 抽取时打 `rule` 类型 + `trigger`（keywords）标签（下一项）
+
+### 3. 提炼单一性
+- **一条记忆一个原子**（事实/决定/偏好）；复合内容（"和/并且/同时/但"并列）拆多条——extract prompt 铁律（下一项实施）
+- 注入裁剪：2600 字符预算按重要性裁尾（原子化条数↑不失控）
+
+### 4. 知识入库夜间执行
+- literature 加工管线：**半夜低谷价 + dsh 空闲时段批量 uuapi v4-flash-0731**（已按此设计）
+- deepmemory extract：保持实时（记忆即时性）；模型可选谷价（v4-flash-0731）降本
+- 夜间批处理（03:00）：沉淀/固化/遗忘已首跑成功（5 条降 cold 实证）
