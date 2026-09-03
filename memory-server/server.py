@@ -416,6 +416,10 @@ def run_migrations():
             " created_at REAL NOT NULL, PRIMARY KEY (topic_id, seq))",
             "CREATE INDEX IF NOT EXISTS idx_topic_summaries ON topic_summaries(topic_id, seq)",
         ],
+        8: [
+            "ALTER TABLE sources ADD COLUMN seq INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sources ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0",
+        ],
     }
     conn = get_conn()
     conn.execute(
@@ -1079,10 +1083,23 @@ def _save_source(memory_id, source_text, payload=None):
     if matches:
         protected_id = _record_protected(memory_id, "memory", memory_id, "source", source_text, redacted, matches, payload)
     conn = get_conn()
-    conn.execute(
-        "INSERT INTO sources (memory_id, content, created_at, protected_source_id) VALUES (?,?,?,?)",
-        (int(memory_id), redacted[:8000], time.time(), protected_id),
-    )
+    # v0.4 原文分段：完整优先——>8000 字符拆连续 seq 段（无静默截断）；
+    # >32000 的项目超限段显式标记 truncated=1（不静默丢弃语义）
+    SEG = 8000
+    LIMIT = 32000
+    chunks = [redacted[i:i + SEG] for i in range(0, len(redacted), SEG)]
+    if len(chunks) > (LIMIT // SEG + 1) or len(redacted) > LIMIT:
+        chunks = [redacted[i:i + SEG] for i in range(0, LIMIT, SEG)]
+        chunks.append("[原文超长已截断：共 %d 字符，仅保留前 %d]" % (len(redacted), LIMIT))
+        truncated = 1
+    else:
+        truncated = 0
+    for seq, segment in enumerate(chunks):
+        conn.execute(
+            "INSERT INTO sources (memory_id, content, created_at, protected_source_id, seq, truncated)"
+            " VALUES (?,?,?,?,?,?)",
+            (int(memory_id), segment, time.time(), protected_id, seq, truncated),
+        )
     conn.commit()
     conn.close()
     return [protected_id] if protected_id else []

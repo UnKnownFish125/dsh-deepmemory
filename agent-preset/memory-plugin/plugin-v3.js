@@ -571,7 +571,7 @@ function redactSensitive(text) {
         atoms: rawAtom,
         entities: rawEntities,
         relations: rawRelations,
-        source: redactSensitive(dialog).slice(0, 2000),
+        source: redactSensitive(dialog).slice(0, 32000),   // v0.4：无 2000 截断；超长由 server 分段+truncated 标记
         }
       })
       if (items.length) {
