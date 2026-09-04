@@ -514,7 +514,6 @@ function redactSensitive(text) {
       console.error('[deepmemory] prompt cache refresh failed', String(e))
     }
     const text = (memoryCache.get(sessionId) || '') ? String(memoryCache.get(sessionId) || '') + '\n\n' + GUIDE : ''
-    if (!assembled || !Array.isArray(assembled.sections)) return assembled
     return {
       ...assembled,
       sections: assembled.sections.map((section) => section.name === 'deepmemory' ? { ...section, text: text } : section),
