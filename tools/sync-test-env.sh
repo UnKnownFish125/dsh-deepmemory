@@ -32,7 +32,14 @@ if [ "$DRY" = "--dry-run" ]; then echo "  (dry)"; else
   else
     cp "$PROD_PK" "$TEST_PK"
     echo "  ✓ package.json 已同步（deps/bundles 变更）→ 触发 install"
-    cd /www/dsh-test-home/profiles/web && /usr/local/node/bin/pnpm install --offline=false >/tmp/sync-install.log 2>&1 && echo "  ✓ install OK" || echo "  ⚠ install 失败（看 /tmp/sync-install.log）"
+    cd /www/dsh-test-home/profiles/web && /usr/local/node/bin/pnpm install --offline=false >/tmp/sync-install.log 2>&1
+    if grep -q "ERR_PNPM_IGNORED_BUILDS" /tmp/sync-install.log; then
+      echo "  ✓ install OK（ERR_IGNORED_BUILDS=仅 build scripts 忽略——纯 JS 插件无碍；+$(grep -oE 'added [0-9]+' /tmp/sync-install.log | head -1)）"
+    elif ls /www/dsh-test-home/profiles/web/node_modules >/dev/null 2>&1 && grep -q "done" /tmp/sync-install.log; then
+      echo "  ✓ install OK（$(grep -oE 'added [0-9]+' /tmp/sync-install.log | head -1)）"
+    else
+      echo "  ⚠ install 失败（看 /tmp/sync-install.log）"
+    fi
   fi
 fi
 echo "=== ⑤ 重启测试机 + 断言 ==="
