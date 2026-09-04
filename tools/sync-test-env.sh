@@ -27,11 +27,44 @@ if [ "$DRY" = "--dry-run" ]; then echo "  (dry)"; else
 fi
 echo "=== ④ profile package.json（deps/bundles 变更检测）==="
 if [ "$DRY" = "--dry-run" ]; then echo "  (dry)"; else
+  # 合并语义：生产 deps/bundles 为基线；测试机额外（测试先行验证中的插件）保留
+  MERGED=$(/opt/AstrBot/venv/bin/python3 - <<PYEOF
+import json
+prod=json.load(open("$PROD_PK",encoding="utf-8"))
+test=json.load(open("$TEST_PK",encoding="utf-8")) if __import__("os").path.exists("$TEST_PK") else prod
+pd=dict(prod.get("dependencies",{})); td=dict(test.get("dependencies",{}))
+for k,v in td.items():
+    if k not in pd: pd[k]=v                      # 测试机独有（如测试先行插件）
+pd.update(prod.get("dependencies",{}))
+pb=list(prod.get("dsh",{}).get("profile",{}).get("bundles",[]))
+tb=list(test.get("dsh",{}).get("profile",{}).get("bundles",[]))
+for b in tb:
+    if b not in pb: pb.append(b)                 # 测试机额外 bundle 保留
+# 显式清单：.test-only-plugins（测试机独有——镜像保留，防覆盖丢失）
+import re as _re
+if __import__("pathlib").Path("/www/dsh-test-home/profiles/web/.test-only-plugins").exists():
+    for line in open("/www/dsh-test-home/profiles/web/.test-only-plugins",encoding="utf-8"):
+        line=line.strip()
+        if not line or line.startswith("#"): continue
+        if line not in pd: pd[line]="file:/www/dsh-packages/"+line+".tgz"
+        if line not in pb: pb.append(line)
+# 自愈：node_modules 已装但声明丢失（镜像覆盖过）的插件补回声明
+import pathlib
+nm=pathlib.Path("/www/dsh-test-home/profiles/web/node_modules")
+for d in nm.iterdir():
+    if d.is_dir() and str(d.name).startswith("dsh-") and d.name not in pd and (d/"package.json").exists():
+        pd[d.name]="file:/www/dsh-packages/"+(d.name if not str(d.name).startswith("@") else d.name.split("/")[-1])+".tgz"
+        if d.name not in pb: pb.append(d.name)
+out={"name":prod.get("name","dsh-profile-web"),"private":True,"dependencies":pd,
+     "dsh":{"profile":{"bundles":pb}}, **({k:v for k,v in prod.items() if k not in ("dependencies","dsh","name","private")})}
+json.dump(out,open("$TEST_PK","w",encoding="utf-8"),ensure_ascii=False,indent=2)
+print("deps:",sorted(pd.keys()))
+PYEOF
+)
   if diff -q "$PROD_PK" "$TEST_PK" >/dev/null 2>&1; then
     echo "  ✓ package.json 无差异"
   else
-    cp "$PROD_PK" "$TEST_PK"
-    echo "  ✓ package.json 已同步（deps/bundles 变更）→ 触发 install"
+    echo "  ✓ package.json 已合并（生产基线 + 测试机独有保留）→ $MERGED"
     cd /www/dsh-test-home/profiles/web && /usr/local/node/bin/pnpm install --offline=false >/tmp/sync-install.log 2>&1
     if grep -q "ERR_PNPM_IGNORED_BUILDS" /tmp/sync-install.log; then
       echo "  ✓ install OK（ERR_IGNORED_BUILDS=仅 build scripts 忽略——纯 JS 插件无碍；+$(grep -oE 'added [0-9]+' /tmp/sync-install.log | head -1)）"
