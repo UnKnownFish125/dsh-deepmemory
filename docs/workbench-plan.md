@@ -166,3 +166,43 @@ CREATE TABLE node_links (           -- 节点 ↔ 文档/会话/记忆 关联
 2. 继承注入：**常驻摘要**（100% 回合携带）vs **工具按需**（触发才问）——我推荐**常驻小摘要 + 工具深挖**（关键信息不靠模型主动问）
 3. UI：P2 自绘树 vs 直接扩展 dsh-synapse（树层并入画布）——我推荐**独立自绘**（解耦、清晰）
 4. 导入：AGENTS.md 自动解析（frontmatter 树）——首版手动注册（P3 再自动）——**OK？**
+
+---
+
+# v0.3 修订（GLM 审核 2026-09 落实——放行前补丁）
+
+## R-A 环境基线（§0——补全）
+| 项 | 决定 |
+|---|---|
+| 仓库归属 | **新仓 dsh-workbench**（独立发布/市场；服务+插件+文档同仓） |
+| 服务 | `dsh-workbench.service`（python 服务——**首版独立**，6270 生产 / 6271 测试（62xx 段已占 6230/6240/6250/6260/6263） |
+| db | `data/worktree.db`（独立——与记忆/知识解耦） |
+| 插件（preset） | `_worktree-plugin/plugin-v1.js`（继承注入——生产/测试机同路径） |
+| 前端（DSH client） | `dsh-workbench`（bundles——树+会话卡视图） |
+| 鉴权 | 同 literature 模式（api-token + 回环；同源 /worktree-api 代理） |
+| 部署 | 测试机（3091）先行 → 生产（3081）——两阶段铁律 |
+
+## R-B schema 三修（GLM）
+1. **主键**：`id INTEGER PRIMARY KEY AUTOINCREMENT`（代理键）+ `path TEXT UNIQUE`（路径唯一索引——改名=DELETE+INSERT 新 path（明文"路径不可变，移动=删建重挂"））
+2. **node_links UNIQUE**：`UNIQUE(node_id, kind, ref)`（防重复挂载）
+3. **workspace 维度决策**：**全局单树**（结构=机器级事实——跨工作区恒可见；与 scope='global' 语义一致）；节点 meta 可标注归属工作区（展示用）
+
+## R-C "发消息"API 降级（GLM 实测）
+- **已证实**：`list/create/open/fork/search`（SessionRuntime 类型面）
+- **未证实**：向已有会话注入消息（`session.rpc/api/session.*` 不存在）——**P2 前置 spike（0.5 天）**：验证"给指令"通道（create 带初始指令/或 host 通道）——**证伪则去掉 [给指令] 按钮**（只保留开/停/切换/新建）
+
+## R-M 小修
+- **M1**：首版独立服务（6270）——采纳
+- **M2 order 分配表**（统一——与已部署对齐）：
+  | order | 注入段 | 预算 |
+  |---|---|---|
+  | 45 | 轨 B `[约束前提]`（literature-kb——已部署） | 预算外（≤8 行） |
+  | 46 | `[WORKTREE]` 祖先链摘要（worktree——P1） | ≤500 token |
+  | 50 | 记忆注入 `[长期记忆召回]`（deepmemory——已部署） | 2600 字符 |
+  | 100 | 工具引导（DSH 内建） | 静态块 |
+- **M3**：**每日镜像已挂调度**——`dsh-test-sync.timer`（04:00 daily，Persistent，active——与 03:00 批处理/03:30 加工错峰）——非纯手动（GLM 核验时未见）
+- **🟡**：`created_at` 已入 schema（R-B 版）；`kind` 撞名——**tree kind 'doc' 改名 'contract'**（node_links 枚举 'contract/session/memory'）；验收 #6 标**条件验收**（仅启用 synapse 时）；P2 估 **2-3 天**
+
+## R-D kb 链路（审外发现——已复验）
+- 生产 kb 链路**已恢复**（3081 /lit-api → 全 200：kb/constraints + kb-search；生产 index.js 单服务 6260；6262 unit inactive——**GLM 所见为切换过渡态**）
+- 残留：index.js:43 旧 H1 注释已更新（防误读）
