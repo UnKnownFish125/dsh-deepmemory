@@ -23,6 +23,9 @@ HTTP API (JSON):
   DELETE /v1/memories/<id>
   POST /v1/atoms/add           {memory_id, atom_type, content, importance?, confidence?, ttl_days?, decay_type?}
   GET  /v1/atoms/list          ?memory_id=
+  POST /v1/assertions/<id>/events   {kind: support|contradict|confirm|revoke, origin_id?, note?}  —— 身份服务端解析；confirm 需>=2不同 origin 自动 adopted
+  POST /v1/assertions/<id>/promote  {origin_id?, note?}  —— 服务端身份 + 已>=2 独立确认 → adopted
+  POST /v1/assertions/<id>/revoke   {origin_id?, note?}  —— status→revoked + 事件
 """
 
 import json
@@ -452,6 +455,27 @@ def run_migrations():
             "CREATE INDEX IF NOT EXISTS idx_assertions_conflict ON assertions(conflict_group)",
             "CREATE INDEX IF NOT EXISTS idx_assertions_supersedes ON assertions(supersedes_id)",
         ],
+        10: [
+            # v0.4 语义模型 P1：assertion_events 表（设计稿 DDL）+ 索引。
+            # 幂等（IF NOT EXISTS）；失败（非 duplicate column ALTER）会 raise → 阻止启动。
+            # note：事件审计上下文（请求体 note）——设计稿 DDL 未列，P1 增可空审计列，
+            #      不破坏 UNIQUE(assertion_id, kind, origin_id) 语义。
+            "CREATE TABLE IF NOT EXISTS assertion_events ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " assertion_id INT NOT NULL REFERENCES assertions(id),"
+            " kind TEXT NOT NULL"
+            "   CHECK(kind IN ('support','contradict','confirm','promote','revoke')),"
+            " actor TEXT NOT NULL,"
+            " origin_id TEXT NOT NULL,"
+            " source_id INT REFERENCES sources(id),"
+            " target_event_id INTEGER,"
+            " note TEXT NOT NULL DEFAULT '',"
+            " created_at REAL NOT NULL,"
+            " UNIQUE(assertion_id, kind, origin_id)"
+            ")",
+            "CREATE INDEX IF NOT EXISTS idx_assertion_events_assertion ON assertion_events(assertion_id)",
+            "CREATE INDEX IF NOT EXISTS idx_assertion_events_kind ON assertion_events(kind)",
+        ],
     }
     conn = get_conn()
     conn.execute(
@@ -602,6 +626,212 @@ def _assertion_current_allowed_batch(ids):
             for (s, cg) in statuses
         )
     return out
+
+
+# ---------------------------------------------------------------- v0.4 P1：断言事件/确认/撤销/规则投影
+
+def _resolve_server_actor(body):
+    """服务端身份解析（P1）：actor 恒为受信服务端主体（MEMORY_TRUSTED_USER_ID）。
+
+    不信任请求体 user_id/confirmed（防伪造/自授予——沿用 P0 SYSTEM_ACTOR 思路：单机
+    单用户场景，任何写操作的权威主体都是服务端自身，而非调用方声明的身份）。
+    """
+    return SYSTEM_ACTOR_ID
+
+
+def _resolve_event_origin(body, kind):
+    """事件/确认 origin 解析（P1）：用于"独立确认"去重判定。
+
+    origin 区分不同来证来源（重复抽取/转述/导入同源不重新计数）。由服务端会话/消息
+    身份解析：请求体 origin_id 作为独立来源鉴别器（**非权限凭证**），缺省回落服务端
+    受信主体。防伪：actor 恒为服务端主体；已忽略 body user_id/confirmed。
+    """
+    origin = (body or {}).get("origin_id")
+    if origin is None or not str(origin).strip():
+        return SYSTEM_ACTOR_ID
+    return str(origin).strip()
+
+
+def _count_confirm_origins_on(conn, assertion_id):
+    """同事务内计算独立 confirm 来源数（可见未提交的本次插入，状态判定用）。"""
+    c = conn.execute(
+        "SELECT COUNT(DISTINCT origin_id) c FROM assertion_events"
+        " WHERE assertion_id=? AND kind='confirm'",
+        (int(assertion_id),),
+    ).fetchone()["c"]
+    return int(c or 0)
+
+
+def _confirm_origin_count(assertion_id):
+    """该断言当前不同的 confirm 来源数（独立确认计数，已提交视角）。"""
+    conn = get_conn()
+    try:
+        c = conn.execute(
+            "SELECT COUNT(DISTINCT origin_id) c FROM assertion_events"
+            " WHERE assertion_id=? AND kind='confirm'",
+            (int(assertion_id),),
+        ).fetchone()["c"]
+        return int(c or 0)
+    finally:
+        conn.close()
+
+
+def _sync_rule_projection(assertion_ids=None):
+    """规则投影（简版，P1）：adopted 的 rule 类断言 → documents.rule_crystallized=1 同步标记。
+
+    rule 类断言 = 宿主文档 type='preference'（对齐现有 E2 固化流 / rule_candidates 的目标类型）。
+    列表映射：一次按断言 id 列表将对应文档标记 rule_crystallized=1。幂等；失败 raise。
+    """
+    conn = get_conn()
+    try:
+        sub = ("SELECT a.memory_id FROM assertions a JOIN documents d ON d.id=a.memory_id"
+               " WHERE a.status='adopted' AND d.type='preference'")
+        args = []
+        if assertion_ids:
+            ids = [int(x) for x in assertion_ids if x is not None]
+            if not ids:
+                return 0
+            sub += " AND a.id IN (" + ",".join("?" * len(ids)) + ")"
+            args = ids
+        cur = conn.execute(
+            "UPDATE documents SET rule_crystallized=1 WHERE id IN (" + sub + ")", args)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _record_assertion_event(assertion_id, kind, body=None, note=None):
+    """记录一条 assertion 事件并按 P1 状态机应用变更。幂等（同源重复不重新计数）。
+
+    kind ∈ {support, contradict, confirm, revoke}
+      - confirm：需 >=2 条**不同 origin_id** 的独立确认；第 2 条自动置 status='adopted'。
+      - revoke ：置 status='revoked' + 事件（target_event_id 指向最近确认/晋升事件）。
+      - support / contradict：仅记录事件（冲突组裁决归 P2，不在此改状态）。
+    身份（防伪造）：actor=服务端受信主体；origin=body.origin_id（缺省服务端主体）。
+    UNIQUE(assertion_id,kind,origin_id) → 同源重复（重复抽取/转述/导入）不重新计数。
+    返回 dict；断言不存在时返回 None（调用方映射 404）。
+    """
+    body = dict(body or {})
+    kind = str(kind or "").strip()
+    if kind not in ("support", "contradict", "confirm", "revoke"):
+        raise ValueError("kind must be support|contradict|confirm|revoke")
+    actor = _resolve_server_actor(body)
+    origin = _resolve_event_origin(body, kind)
+    note = str(note if note is not None else body.get("note") or "")
+    now = time.time()
+    conn = get_conn()
+    try:
+        a = conn.execute(
+            "SELECT id, memory_id, status, conflict_group FROM assertions WHERE id=?",
+            (int(assertion_id),),
+        ).fetchone()
+        if not a:
+            return None
+        a_status = a["status"]
+        if kind == "confirm" and a_status in ("revoked", "superseded"):
+            raise ValueError("assertion is %s; cannot confirm a revoked/superseded assertion（撤销不复活）"
+                             % a_status)
+        # revoke 事件应指向确认/规则版本（最近 adopt 事件）
+        target_event_id = None
+        if kind == "revoke":
+            last = conn.execute(
+                "SELECT id FROM assertion_events WHERE assertion_id=? AND kind IN ('confirm','promote')"
+                " ORDER BY id DESC LIMIT 1",
+                (a["id"],),
+            ).fetchone()
+            target_event_id = last["id"] if last else None
+        try:
+            cur = conn.execute(
+                "INSERT INTO assertion_events"
+                " (assertion_id, kind, actor, origin_id, source_id, target_event_id, note, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (a["id"], kind, actor, origin, None, target_event_id, note, now),
+            )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return {"event": None, "status": a_status, "adopted": (a_status == "adopted"),
+                    "duplicate": True,
+                    "detail": "duplicate (assertion_id,kind,origin_id)：同源重复不重新计数"}
+        event_id = cur.lastrowid
+        new_status = a_status
+        adopted = False
+        if kind == "confirm":
+            cnt = _count_confirm_origins_on(conn, a["id"])
+            if cnt >= 2 and a_status in ("unverified", "candidate"):
+                new_status = "adopted"
+                adopted = True
+                conn.execute("UPDATE assertions SET status='adopted' WHERE id=?", (a["id"],))
+        elif kind == "revoke":
+            if a_status != "revoked":
+                new_status = "revoked"
+                conn.execute("UPDATE assertions SET status='revoked' WHERE id=?", (a["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    # 任何成功事件写都令检索缓存失效（P0 原则：写后缓存即失效；P1 confirm/revoke 显式递增）。
+    _bump_semantic_gen()
+    if adopted:
+        _sync_rule_projection([assertion_id])
+    ev = {"id": event_id, "assertion_id": a["id"], "kind": kind, "actor": actor,
+          "origin_id": origin, "note": note, "created_at": now}
+    return {"event": ev, "status": new_status, "adopted": adopted, "duplicate": False,
+            "confirm_origins": _confirm_origin_count(a["id"]) if kind == "confirm" else None}
+
+
+def _promote_assertion(assertion_id, body=None, note=None):
+    """显式晋升：服务端鉴权 actor + 已 >=2 条不同 origin_id 独立确认 → status='adopted'。
+
+    防伪：actor 为服务端受信主体（忽略 body user_id/confirmed）；origin 默认服务端主体。
+    重复 promote 幂等（UNIQUE 命中即返回当前状态）；撤销/替代断言不可 promote（不复活）。
+    """
+    body = dict(body or {})
+    actor = _resolve_server_actor(body)
+    origin = _resolve_event_origin(body, "promote")
+    note = str(note if note is not None else body.get("note") or "")
+    now = time.time()
+    conn = get_conn()
+    try:
+        a = conn.execute(
+            "SELECT id, memory_id, status FROM assertions WHERE id=?",
+            (int(assertion_id),),
+        ).fetchone()
+        if not a:
+            return None
+        a_status = a["status"]
+        if a_status in ("revoked", "superseded"):
+            raise ValueError("assertion is %s; cannot promote a revoked/superseded assertion（撤销不复活）"
+                             % a_status)
+        cnt = _count_confirm_origins_on(conn, a["id"])
+        if cnt < 2:
+            raise ValueError("promote 需要 >=2 条不同 origin_id 的独立确认事件，当前 %d" % cnt)
+        try:
+            cur = conn.execute(
+                "INSERT INTO assertion_events"
+                " (assertion_id, kind, actor, origin_id, source_id, target_event_id, note, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (a["id"], "promote", actor, origin, None, None, note, now),
+            )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            status = conn.execute("SELECT status FROM assertions WHERE id=?", (a["id"],)).fetchone()["status"]
+            return {"event": None, "status": status, "promoted": (status == "adopted"),
+                    "duplicate": True}
+        event_id = cur.lastrowid
+        promoted = False
+        if a_status != "adopted":
+            promoted = True
+            conn.execute("UPDATE assertions SET status='adopted' WHERE id=?", (a["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    _bump_semantic_gen()
+    if promoted:
+        _sync_rule_projection([assertion_id])
+    return {"event": {"id": event_id, "assertion_id": a["id"], "kind": "promote", "actor": actor,
+                      "origin_id": origin, "note": note, "created_at": now},
+            "status": "adopted", "promoted": promoted, "duplicate": False,
+            "confirm_origins": cnt}
 
 
 def get_index():
@@ -3313,6 +3543,31 @@ class Handler(BaseHTTPRequestHandler):
                 if not wid:
                     return self._send(400, {"error": "workspace_id required"})
                 return self._send(200, put_card(wid, body))
+            aparts = [unquote(p) for p in path.strip("/").split("/")]
+            if len(aparts) >= 4 and aparts[1] == "assertions":
+                # v0.4 P1：断言事件/确认/撤销/晋升（身份由服务端解析，忽略 body user_id/confirmed）
+                body = self._read_body()
+                assertion_id = int(aparts[2])
+                action = aparts[3]
+                if action == "events":
+                    kind = str(body.get("kind") or "").strip()
+                    if kind not in ("support", "contradict", "confirm", "revoke"):
+                        return self._send(400, {"error": "kind must be support|contradict|confirm|revoke"})
+                    res = _record_assertion_event(assertion_id, kind, body, note=body.get("note"))
+                    if res is None:
+                        return self._send(404, {"error": "assertion not found"})
+                    return self._send(200, res)
+                if action == "promote":
+                    res = _promote_assertion(assertion_id, body, note=body.get("note"))
+                    if res is None:
+                        return self._send(404, {"error": "assertion not found"})
+                    return self._send(200, res)
+                if action == "revoke":
+                    res = _record_assertion_event(assertion_id, "revoke", body, note=body.get("note"))
+                    if res is None:
+                        return self._send(404, {"error": "assertion not found"})
+                    return self._send(200, res)
+                return self._send(404, {"error": "assertion action not found"})
             if path == "/v1/memories/search":
                 body = self._read_body()
                 results = search_memories(
