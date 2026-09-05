@@ -428,6 +428,30 @@ def run_migrations():
             "ALTER TABLE sources ADD COLUMN seq INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sources ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0",
         ],
+        9: [
+            # v0.4 语义模型 P0：assertions 表（设计稿 DDL）+ 索引。
+            # 迁移幂等（IF NOT EXISTS）；失败（非 duplicate column ALTER）会 raise → 阻止启动。
+            "CREATE TABLE IF NOT EXISTS assertions ("
+            " id INTEGER PRIMARY KEY,"
+            " memory_id INT NOT NULL REFERENCES documents(id),"
+            " subject_id TEXT NOT NULL, predicate TEXT NOT NULL,"
+            " value_json TEXT NOT NULL, polarity TEXT DEFAULT 'positive'"
+            "   CHECK(polarity IN ('positive','negative')),"
+            " conditions_json TEXT DEFAULT '{}',"
+            " valid_from REAL, valid_to REAL, recorded_at REAL NOT NULL,"
+            " status TEXT DEFAULT 'unverified'"
+            "   CHECK(status IN ('unverified','candidate','adopted','disputed','revoked','superseded')),"
+            " conflict_group TEXT, supersedes_id INT REFERENCES assertions(id),"
+            " CHECK(valid_from IS NULL OR valid_to IS NULL OR valid_to >= valid_from)"
+            ")",
+            "CREATE INDEX IF NOT EXISTS idx_assertions_memory ON assertions(memory_id)",
+            "CREATE INDEX IF NOT EXISTS idx_assertions_subject ON assertions(subject_id)",
+            "CREATE INDEX IF NOT EXISTS idx_assertions_predicate ON assertions(predicate)",
+            "CREATE INDEX IF NOT EXISTS idx_assertions_status ON assertions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_assertions_valid ON assertions(valid_from, valid_to)",
+            "CREATE INDEX IF NOT EXISTS idx_assertions_conflict ON assertions(conflict_group)",
+            "CREATE INDEX IF NOT EXISTS idx_assertions_supersedes ON assertions(supersedes_id)",
+        ],
     }
     conn = get_conn()
     conn.execute(
@@ -465,6 +489,10 @@ def run_migrations():
     # idempotent, so it can also repair a database copied during a partial
     # migration without renaming or dropping any legacy object.
     install_v2_schema(conn)
+    # v0.4 P0 存量标记：documents.disputed=1 → 对应 assertion status='disputed'。
+    # 需在 install_v2_schema（补齐 documents.disputed 列）后执行；幂等（NOT EXISTS 防重复）。
+    # P0 只为"已有 disputed"建断言；其余存量记忆不自动生成断言（详见语义模型 P0 范围）。
+    _migrate_legacy_disputed_assertions(conn)
     conn.execute(
         "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?,?)",
         (V2_SCHEMA_VERSION, time.time()),
@@ -473,6 +501,28 @@ def run_migrations():
     if current < V2_SCHEMA_VERSION:
         print(f"migration: schema v{V2_SCHEMA_VERSION} 已应用", flush=True)
     conn.close()
+
+
+def _migrate_legacy_disputed_assertions(conn):
+    """迁移后一次性标记：documents.disputed=1 → status='disputed' 的 assertion。
+
+    幂等（NOT EXISTS 防重复建）；不自动为其余存量记忆建断言（P0 只标记已有 disputed）。
+    失败时 raise → 阻止启动（与"迁移失败阻止启动"纪律一致）。
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+    if "disputed" not in columns or "assertions" not in {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }:
+        return
+    conn.execute(
+        "INSERT INTO assertions"
+        " (memory_id, subject_id, predicate, value_json, polarity, conditions_json,"
+        "  valid_from, valid_to, recorded_at, status, conflict_group, supersedes_id)"
+        " SELECT id, substr(content,1,64), 'is', json_quote(content), 'positive', '{}',"
+        "        created_at, NULL, created_at, 'disputed', NULL, NULL"
+        " FROM documents d"
+        " WHERE disputed=1 AND NOT EXISTS (SELECT 1 FROM assertions a WHERE a.memory_id=d.id)"
+    )
 
 
 def init_db():
@@ -498,6 +548,60 @@ _index_lock = threading.RLock()  # RLock：get_index 持锁触发迁移重建时
 _index = None
 # 检索缓存：{(query,k,session,workspace,domain,type,persona): (ts, results)}
 _search_cache = {}
+
+# v0.4 语义 generation：每次写操作自增，与检索缓存键绑定达成"写后缓存即失效"。
+# 确认/撤销/替代（P1）与断言状态变更都会递增；P0 只在写操作处递增。进程内即可，
+# 重启即清空 _search_cache，因此无需持久化。
+_semantic_generation = 0
+
+
+def _semantic_gen():
+    return _semantic_generation
+
+
+def _bump_semantic_gen():
+    """写操作后调用：递增语义 generation，令相关检索缓存键失效。"""
+    global _semantic_generation
+    _semantic_generation += 1
+    return _semantic_generation
+
+
+def _assertion_current_allowed_batch(ids):
+    """mode=current 门禁（P0）：按断言 status 过滤。
+
+    规则（设计稿 §P0）：
+      - 该记忆**有** assertion → 仅当存在 status='adopted'，或
+        status='unverified' 且无 conflict_group 时才允许召回（current）。
+      - 该记忆**无** assertion（存量/下位兼容） → 仍允许召回，避免破坏存量注入。
+    返回 {memory_id: bool}，用于检索过滤；一次查询批量取，避免 N+1。
+    """
+    ids = [int(x) for x in ids if x is not None]
+    out = {}
+    if not ids:
+        return out
+    qmarks = ",".join("?" * len(ids))
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"SELECT memory_id, status, conflict_group FROM assertions"
+            f" WHERE memory_id IN ({qmarks}) ORDER BY recorded_at DESC, id DESC",
+            ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    by_mem = {}
+    for r in rows:
+        by_mem.setdefault(r["memory_id"], []).append((r["status"], r["conflict_group"]))
+    for mid in ids:
+        statuses = by_mem.get(mid)
+        if not statuses:
+            out[mid] = True  # 无断言（存量）→ 兼容召回
+            continue
+        out[mid] = any(
+            s == "adopted" or (s == "unverified" and not cg)
+            for (s, cg) in statuses
+        )
+    return out
 
 
 def get_index():
@@ -890,13 +994,15 @@ def search_memories(
     persona_id=None,
     library=None,
     include_archived=False,
+    mode="current",
 ):
     if not query or not query.strip():
         return []
     k = max(1, min(int(k), 50))
-    # 检索缓存：相同查询参数组合在 TTL 内直接复用（living memory 检索缓存）
+    # 检索缓存：相同查询参数组合在 TTL 内直接复用（living memory 检索缓存）。
+    # v0.4：键加入 semantic_generation——任一写操作后缓存即失效（语义门禁正确性优先）。
     cache_enabled = cfg_bool("search_cache.enabled", True)
-    cache_key = (query.strip()[:200], k, session_id or "", workspace_id or "", domain or "", type_ or "", persona_id or "", library or "", bool(include_archived))
+    cache_key = (query.strip()[:200], k, session_id or "", workspace_id or "", domain or "", type_ or "", persona_id or "", library or "", bool(include_archived), mode or "current", _semantic_gen())
     if cache_enabled:
         hit = _search_cache.get(cache_key)
         if hit and time.time() - hit[0] < cfg_float("search_cache.ttl_seconds", 45.0):
@@ -907,6 +1013,11 @@ def search_memories(
     gres = graph_search(query, k * 3, include_archived=include_archived)
     fused = rrf_fuse([vres, bres, gres])
     weighted = apply_weighting(fused, include_archived=include_archived)
+    # v0.4 P0 检索门禁：mode=current 时按断言 status 过滤（"有断言→仅 adopted/unverified 无冲突；
+    # 无断言→存量兼容仍召回"）。mode=history/investigate 不应用该门禁。
+    sem_allowed = {}
+    if (mode or "current") == "current":
+        sem_allowed = _assertion_current_allowed_batch([r["id"] for r in weighted])
     out = []
     for r in weighted:
         if not scope_allows(r, session_id, workspace_id):
@@ -923,6 +1034,9 @@ def search_memories(
             continue
         # G1 修复：archive tier 默认不召回（include_archived=true 时放开）
         if not include_archived and r.get("storage_tier") == "archive":
+            continue
+        # v0.4 P0 语义门禁（current）：不合格断言的记忆不注入（无断言存量仍兼容）
+        if sem_allowed and not sem_allowed.get(r["id"], True):
             continue
         item = dict(r)
         if item.get("has_sensitive"):
@@ -991,31 +1105,35 @@ def add_memory(payload):
     search_text = content + (" " + key_facts if key_facts else "")
     vecs = embed_texts([search_text])
     vec = normalize(vecs[0])
-    merge_threshold = cfg_float("fusion_strategy.merge_similarity_threshold", 0.85)
-    # near-duplicate merge: same-meaning memory updates the existing entry
-    top = vector_search(vec, 1)
-    if top:
-        top_id, top_sim = top[0]
-        if top_sim > merge_threshold:
-            conn = get_conn()
-            conn.execute(
-                "UPDATE documents SET content=?, key_facts=?, persona_summary=?,"
-                " canonical_summary=?, importance=MAX(importance, ?),"
-                " last_access_at=?, access_count=access_count+1, has_sensitive=?,"
-                " sensitive_types=? WHERE id=?",
-                (content, key_facts, persona_summary, canonical_summary, importance, now,
-                 int(clean.get("has_sensitive") or 0), json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False), top_id),
-            )
-            conn.commit()
-            conn.close()
-            for field, original, redacted, matches in records:
-                _record_protected(top_id, "memory", top_id, field, original, redacted, matches, payload)
-            _save_source(top_id, payload.get("source") or "", payload)
-            bm = get_bm25()
-            bm.remove(top_id)
-            bm.add(top_id, search_text + " " + (clean.get("keywords") or ""))
-            return {"id": top_id, "uuid": uuid_s, "merged": True,
-                    "sensitive": bool(records), "protected_source_ids": _protected_ids(top_id)}
+    # v0.4 P0：关闭"相似=事实相同"的近重复合并——相似度只发现候选，不直接覆盖/聚合。
+    # 相似记忆保留双条（两条都在），不再更新既有条目后返回 merged=True。
+    if cfg_bool("fusion_strategy.merge_enabled", False):
+        merge_threshold = cfg_float("fusion_strategy.merge_similarity_threshold", 0.85)
+        # near-duplicate merge: same-meaning memory updates the existing entry
+        top = vector_search(vec, 1)
+        if top:
+            top_id, top_sim = top[0]
+            if top_sim > merge_threshold:
+                conn = get_conn()
+                conn.execute(
+                    "UPDATE documents SET content=?, key_facts=?, persona_summary=?,"
+                    " canonical_summary=?, importance=MAX(importance, ?),"
+                    " last_access_at=?, access_count=access_count+1, has_sensitive=?,"
+                    " sensitive_types=? WHERE id=?",
+                    (content, key_facts, persona_summary, canonical_summary, importance, now,
+                     int(clean.get("has_sensitive") or 0), json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False), top_id),
+                )
+                conn.commit()
+                conn.close()
+                for field, original, redacted, matches in records:
+                    _record_protected(top_id, "memory", top_id, field, original, redacted, matches, payload)
+                _save_source(top_id, payload.get("source") or "", payload)
+                bm = get_bm25()
+                bm.remove(top_id)
+                bm.add(top_id, search_text + " " + (clean.get("keywords") or ""))
+                _bump_semantic_gen()
+                return {"id": top_id, "uuid": uuid_s, "merged": True,
+                        "sensitive": bool(records), "protected_source_ids": _protected_ids(top_id)}
     conn = get_conn()
     library = str(clean.get("library") or "runtime")
     if library not in ("bias", "core", "eco", "project", "runtime"):
@@ -1071,8 +1189,51 @@ def add_memory(payload):
         idx.add_with_ids(vec.reshape(1, -1), np.asarray([doc_id], dtype=np.int64))
     save_index()
     get_bm25().add(doc_id, search_text + " " + (clean.get("keywords") or ""))
+    # v0.4 P0：新增记忆自动建 unverified 断言（一条记忆一条断言——
+    # subject=content 摘要 / predicate='is' / value=content；保证新记忆有断言可参与门禁）。
+    _create_assertion_for_memory(doc_id, content, now)
+    _bump_semantic_gen()
     return {"id": doc_id, "uuid": uuid_s, "merged": False,
             "sensitive": bool(records), "protected_source_ids": protected_ids}
+
+
+def _create_assertion_for_memory(memory_id, content, now=None):
+    """为新增记忆创建一条 unverified 断言（简单 1:1 映射，P0 范围）。
+
+    subject_id=content 摘要 / predicate='is' / value=content（value_json 存原文 JSON）。
+    幂等：同一记忆仅建一条（若已存在则跳过）。
+    """
+    now = now if now is not None else time.time()
+    conn = get_conn()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM assertions WHERE memory_id=? LIMIT 1", (int(memory_id),)
+        ).fetchone()
+        if exists:
+            return None
+        conn.execute(
+            "INSERT INTO assertions"
+            " (memory_id, subject_id, predicate, value_json, polarity, conditions_json,"
+            "  valid_from, valid_to, recorded_at, status, conflict_group, supersedes_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                int(memory_id),
+                str(content)[:64],
+                "is",
+                json.dumps(str(content), ensure_ascii=False),
+                "positive",
+                "{}",
+                now,
+                None,
+                now,
+                "unverified",
+                None,
+                None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _protected_ids(memory_id):
@@ -1323,6 +1484,8 @@ def delete_memory(doc_id):
     conn.execute("DELETE FROM memory_archives WHERE memory_id=?", (doc_id,))
     conn.execute("DELETE FROM atoms WHERE memory_id=?", (doc_id,))
     conn.execute("DELETE FROM graph_edges WHERE memory_id=?", (doc_id,))
+    # v0.4 P0：同步清理该记忆的断言（避免孤儿 assertion 残留）。
+    conn.execute("DELETE FROM assertions WHERE memory_id=?", (doc_id,))
     conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
     conn.commit()
     conn.close()
@@ -1331,6 +1494,7 @@ def delete_memory(doc_id):
         idx.remove_ids(np.asarray([doc_id], dtype=np.int64))
     save_index()
     get_bm25().remove(doc_id)
+    _bump_semantic_gen()
     return True
 
 
@@ -1370,6 +1534,7 @@ def update_memory(doc_id, payload):
         bm = get_bm25()
         bm.remove(doc_id)
         bm.add(doc_id, content + " " + str(fields.get("keywords") or ""))
+    _bump_semantic_gen()
     return True
 
 
@@ -1829,8 +1994,9 @@ def _run_decay(decay_rate=0.01, force=False):
             "documents": count_active(),
         }
     protect = cfg_float("access_reinforcement.protect_importance", DECAY_PROTECTED)
-    # 清理参数主读 archiving 组（配置页即改即生效），access_reinforcement.cleanup_* 为兼容回退
-    auto_archive = cfg_bool("archiving.auto_archive_enabled", True)
+    # 清理参数主读 archiving 组（配置页即改即生效），access_reinforcement.cleanup_* 为兼容回退。
+    # v0.4 P0：关闭自动 archive（archive 仅手动）——默认 False，衰减只降重要性、不自动归档。
+    auto_archive = cfg_bool("archiving.auto_archive_enabled", False)
     cleanup_imp = cfg_float(
         "archiving.archive_importance_threshold",
         cfg_float("access_reinforcement.cleanup_importance", DECAY_CLEANUP_IMPORTANCE),
@@ -1887,7 +2053,10 @@ def run_decay(decay_rate=0.01, force=False):
 
 
 def _nightly_tier_forgetting():
-    """夜间遗忘：importance 低于阈值的 active 记忆降 cold；冷置 30 天以上转 archive（收敛检索面）。"""
+    """夜间遗忘：importance 低于阈值的 active 记忆降 cold（保留 cold 层）。
+
+    v0.4 P0：关闭自动 archive——冷置太久转 archive 仅手动触发，不再随夜间自动发生。
+    """
     conn = get_conn()
     now = time.time()
     cold_threshold = float(cfg_float("archiving.cold_importance_threshold", 0.4))
@@ -1898,42 +2067,56 @@ def _nightly_tier_forgetting():
         (now, cold_threshold),
     ).rowcount
     conn.commit()
-    # active 冷置太久的（access 强化过的 last_access_at 推后）
-    moved_archive = conn.execute(
-        "UPDATE documents SET storage_tier='archive', memory_class='compressed_archive', updated_at=?"
-        " WHERE status='active' AND storage_tier='cold' AND ?-COALESCE(last_access_at, created_at) > ?",
-        (now, now, archive_after_days * 86400),
-    ).rowcount
-    conn.commit()
+    # v0.4 P0：自动 archive 已关闭（archive 仅手动）。保留 cold 层，取消自动转 archive。
+    auto_archive = cfg_bool("archiving.auto_archive_enabled", False)
+    moved_archive = 0
+    if auto_archive:
+        # active 冷置太久的（access 强化过的 last_access_at 推后）
+        moved_archive = conn.execute(
+            "UPDATE documents SET storage_tier='archive', memory_class='compressed_archive', updated_at=?"
+            " WHERE status='active' AND storage_tier='cold' AND ?-COALESCE(last_access_at, created_at) > ?",
+            (now, now, archive_after_days * 86400),
+        ).rowcount
+        conn.commit()
     conn.close()
     rebuild_bm25()
     return {"moved_cold": moved_cold, "moved_archive": moved_archive}
 
 
 def _nightly_maintenance():
-    """夜间批处理（默认 03:00，谷时低负载）：遗忘 + 沉淀(LLM 提炼) + 固化(LLM 规则)。"""
+    """夜间批处理（默认 03:00，谷时低负载）。
+
+    v0.4 P0：关闭"相似覆盖/聚合"自动沉淀 与 "出现两次即候选"自动固化——此两类
+    行为改为仅标记、晋升需人工/事件，不再夜间自动执行（手动 /v1/maintenance/* 端点保留）。
+    """
     out = {"forgetting": _nightly_tier_forgetting()}
-    try:
-        if cfg_bool("memory_consolidation.enabled", True) and cfg_bool("memory_consolidation.llm_summarize", True):
-            res = consolidate_memories(similarity=cfg_float("memory_consolidation.semantic_similarity_threshold", 0.92),
-                                       limit_groups=5, dry_run=False)
-            out["consolidate"] = res if isinstance(res, dict) else {"ok": bool(res)}
-    except Exception as exc:
-        out["consolidate_error"] = redact_text(str(exc))[0]
-    try:
-        cands = rule_candidates(min_similar=0.86, min_occur=2, limit=5)
-        if cands.get("candidates"):
-            # LLM 提炼规则（低成本模型），失败则直接按代表记忆固化
-            texts = "\n---\n".join(str(c["representative"]["content"])[:300] for c in cands["candidates"])
-            merged_ids = [r["id"] for c in cands["candidates"] for r in c["similar_ids"]]
-            summary = llm_chat(
-                "以下是用户在对话中被反复确认的偏好/约定（重复出现）。请提炼为一条简洁、可执行的持久规则文本（中文，30字内）：\n" + texts,
-                system="你是记忆固化助手：输出仅规则本身，不要解释。")
-            if summary.get("content") and not summary.get("error"):
-                out["crystallize_note"] = summary["content"]
-            out["crystallize"] = crystallize_rules(merged_ids)
-    except Exception as exc:
-        out["crystallize_error"] = redact_text(str(exc))[0]
+    if cfg_bool("memory_consolidation.auto_run_enabled", False):
+        try:
+            if cfg_bool("memory_consolidation.enabled", True) and cfg_bool("memory_consolidation.llm_summarize", True):
+                res = consolidate_memories(similarity=cfg_float("memory_consolidation.semantic_similarity_threshold", 0.92),
+                                           limit_groups=5, dry_run=False)
+                out["consolidate"] = res if isinstance(res, dict) else {"ok": bool(res)}
+        except Exception as exc:
+            out["consolidate_error"] = redact_text(str(exc))[0]
+    else:
+        out["consolidate"] = "disabled (P0: 相似合并/自动聚合关闭—仅候选标记)"
+    if cfg_bool("rule_crystallization.auto_enabled", False):
+        try:
+            cands = rule_candidates(min_similar=0.86, min_occur=2, limit=5)
+            if cands.get("candidates"):
+                # LLM 提炼规则（低成本模型），失败则直接按代表记忆固化
+                texts = "\n---\n".join(str(c["representative"]["content"])[:300] for c in cands["candidates"])
+                merged_ids = [r["id"] for c in cands["candidates"] for r in c["similar_ids"]]
+                summary = llm_chat(
+                    "以下是用户在对话中被反复确认的偏好/约定（重复出现）。请提炼为一条简洁、可执行的持久规则文本（中文，30字内）：\n" + texts,
+                    system="你是记忆固化助手：输出仅规则本身，不要解释。")
+                if summary.get("content") and not summary.get("error"):
+                    out["crystallize_note"] = summary["content"]
+                out["crystallize"] = crystallize_rules(merged_ids)
+        except Exception as exc:
+            out["crystallize_error"] = redact_text(str(exc))[0]
+    else:
+        out["crystallize"] = "disabled (P0: 两次即候选自动固化关闭—候选仅标记)"
     return out
 
 
@@ -1975,6 +2158,8 @@ def archive_memories(ids):
             get_bm25().remove(int(mid))
     conn.commit()
     conn.close()
+    if done:
+        _bump_semantic_gen()
     return {"archived": done}
 
 
@@ -1995,6 +2180,7 @@ def restore_memory(mid):
     conn.close()
     text = " ".join(x for x in (r["content"], r["key_facts"], r["keywords"]) if x)
     get_bm25().add(r["id"], text)
+    _bump_semantic_gen()
     return True
 
 
@@ -3139,6 +3325,7 @@ class Handler(BaseHTTPRequestHandler):
                     persona_id=body.get("persona_id"),
                     library=body.get("library"),
                     include_archived=bool(body.get("include_archived")),
+                    mode=body.get("mode") or "current",
                 )
                 note_injection(body.get("query"), results)
                 return self._send(200, {"query": body.get("query"), "count": len(results), "results": results})

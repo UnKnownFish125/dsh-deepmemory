@@ -199,10 +199,16 @@
         "default": 0.25
       },
       "merge_similarity_threshold": {
-        "description": "近重复合并阈值",
-        "hint": "新记忆与已有记忆余弦相似度超过该值时合并而非新增",
+        "description": "近重复合并阈值（P0 默认关闭合并）",
+        "hint": "新记忆与已有记忆余弦相似度超过该值时合并而非新增（v0.4 P0 默认 merge_enabled=false——相似仅发现候选，不覆盖/聚合）",
         "type": "float",
         "default": 0.85
+      },
+      "merge_enabled": {
+        "description": "近重复合并开关（v0.4 P0 默认关闭）",
+        "hint": "为兼容旧行为可设 true；P0 语义模型默认 false——相似记忆保留双条，仅为候选标记，不再覆盖既有条目",
+        "type": "bool",
+        "default": false
       },
       "atom_dedup_threshold": {
         "description": "原子查重阈值（Jaccard）",
@@ -307,10 +313,10 @@
     "type": "object",
     "items": {
       "auto_archive_enabled": {
-        "description": "自动归档开关",
-        "hint": "低重要性且过旧的记忆自动移入归档（不参与召回、可恢复）",
+        "description": "自动归档开关（v0.4 P0 默认关闭）",
+        "hint": "低重要性且过旧的记忆自动移入归档（不参与召回、可恢复）。v0.4 P0 语义模型默认关闭自动归档——archive 仅手动触发，保留 cold 层",
         "type": "bool",
-        "default": true
+        "default": false
       },
       "archive_importance_threshold": {
         "description": "归档重要性阈值",
@@ -457,6 +463,12 @@
       "enabled": {
         "description": "启用定期整合",
         "hint": "整合把高度相似的旧记忆合并为一条规范记忆，碎片化的旧条归档",
+        "type": "boolean",
+        "default": false
+      },
+      "auto_run_enabled": {
+        "description": "夜间自动整合（v0.4 P0 默认关闭）",
+        "hint": "v0.4 P0 关闭相似覆盖/聚合——夜间不再自动合并归档；candidates 仅标记，晋升需人工/事件。设为 true 可恢复旧夜间自动整合",
         "type": "boolean",
         "default": false
       },
