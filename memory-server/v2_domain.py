@@ -1089,6 +1089,26 @@ class V2Store:
                 # 本次 purge 事务临时禁用 FK 约束（仅本连接内生效，不改 schema；事务提交后
                 # 新连接经 _connect() 恢复 PRAGMA foreign_keys=ON）。
                 conn.execute("PRAGMA foreign_keys=OFF")
+                # 级联清理全部主体行关联：子表先删（sources→protected_sources→
+                # document_links→memory_archives→atoms→graph_edges→documents），仅删
+                # 本会话记忆的关联（按 memory_id，勿全表）；审计链
+                # (memory_revisions/state_card_revisions/task_events) 保留。
+                conn.execute(
+                    "DELETE FROM sources WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM protected_sources WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM document_links WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM memory_archives WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
+                    (session_id,),
+                )
                 conn.execute("DELETE FROM atoms WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)", (session_id,))
                 conn.execute(
                     "DELETE FROM graph_edges WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",

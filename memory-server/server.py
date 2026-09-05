@@ -235,6 +235,11 @@ def embed_texts(texts):
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    # 开启外键约束：杜绝"删除留孤儿数据"。注意 v2_domain._connect() 已同样开启，
+    # 且 delete_memory/hard purge 为保留不可变审计链（memory_revisions 等经 FK
+    # 引用主体行），会在各自写事务内临时 PRAGMA foreign_keys=OFF（仅本连接，不改
+    # schema；提交后新连接恢复 ON）。
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -1304,9 +1309,21 @@ def delete_memory(doc_id):
     if row is None:
         conn.close()
         return False
-    conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+    # 保留不可变审计链（memory_revisions/state_card_revisions/task_events）——
+    # 审计行经 FK 引用主体行（memory_revisions.memory_id → documents.id 等且
+    # memory_id 为 NOT NULL），保留审计必然留下指向已删主体的引用，因此本写事务
+    # 临时禁用 FK（仅本连接内生效，不改 schema；与 v2 hard purge 一致；提交后
+    # 新连接经 get_conn() 恢复 PRAGMA foreign_keys=ON —— 孤儿是设计）。
+    conn.execute("PRAGMA foreign_keys=OFF")
+    # 级联清理：子表先删（sources→protected_sources→document_links→memory_archives
+    # →atoms→graph_edges→documents），仅删主体记忆的关联（按 memory_id，勿全表）。
+    conn.execute("DELETE FROM sources WHERE memory_id=?", (doc_id,))
+    conn.execute("DELETE FROM protected_sources WHERE memory_id=?", (doc_id,))
+    conn.execute("DELETE FROM document_links WHERE memory_id=?", (doc_id,))
+    conn.execute("DELETE FROM memory_archives WHERE memory_id=?", (doc_id,))
     conn.execute("DELETE FROM atoms WHERE memory_id=?", (doc_id,))
     conn.execute("DELETE FROM graph_edges WHERE memory_id=?", (doc_id,))
+    conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
     conn.commit()
     conn.close()
     idx = get_index()
