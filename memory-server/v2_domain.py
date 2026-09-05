@@ -11,6 +11,8 @@ import sqlite3
 import time
 import uuid
 
+from sensitive import redact_text, sensitivity_types
+
 
 V2_SCHEMA_VERSION = 5
 
@@ -960,7 +962,23 @@ class V2Store:
             for m in memories:
                 if not isinstance(m, dict) or not str(m.get("content") or "").strip():
                     continue
-                content = str(m["content"]).strip()[:500]
+                content = str(m["content"]).strip()
+                # 脱敏：导入写普通 memory 表前统一红act（与 server._save_source 一致的敏感处理），
+                # 避免导入明文 secret 进入 documents.content/key_facts/persona_summary/keywords。
+                redacted = {}
+                matches_all = []
+                for field in ("content", "key_facts", "persona_summary", "keywords"):
+                    raw = str(m.get(field) or "")
+                    if not raw:
+                        redacted[field] = raw
+                        continue
+                    red, ms = redact_text(raw)
+                    redacted[field] = red
+                    matches_all.extend(ms)
+                content = redacted["content"].strip()[:500]
+                det_sens = sensitivity_types(matches_all)
+                has_sensitive = int(bool(det_sens) or bool(m.get("has_sensitive")))
+                sens_types = det_sens or list(m.get("sensitive_types") or [])
                 if mode == "merge":
                     dup = conn.execute(
                         "SELECT id FROM documents WHERE session_id=? AND status='active' AND content=?",
@@ -979,8 +997,8 @@ class V2Store:
                     (
                         str(uuid.uuid4()),
                         content,
-                        str(m.get("key_facts") or ""),
-                        str(m.get("persona_summary") or ""),
+                        redacted["key_facts"],
+                        redacted["persona_summary"],
                         str(m.get("type") or "fact"),
                         str(m.get("domain") or "work"),
                         str(m.get("scope") or "session"),
@@ -990,9 +1008,9 @@ class V2Store:
                         now,
                         now,
                         "active",
-                        str(m.get("keywords") or ""),
-                        int(bool(m.get("has_sensitive"))),
-                        json.dumps(m.get("sensitive_types") or []),
+                        redacted["keywords"],
+                        has_sensitive,
+                        json.dumps(sens_types, ensure_ascii=False),
                         "",
                         "unknown",
                         0.0,
@@ -1060,20 +1078,24 @@ class V2Store:
                 "SELECT COUNT(*) c FROM tasks WHERE session_id=?", (session_id,)
             ).fetchone()["c"]
             if hard:
-                conn.execute(
-                    "DELETE FROM memory_revisions WHERE memory_id IN "
-                    "(SELECT id FROM documents WHERE session_id=?)",
-                    (session_id,),
-                )
+                # 物理删除：移除主体行（documents/atoms/graph_edges/state_cards/tasks），
+                # 但保留不可变审计链（memory_revisions/state_card_revisions/task_events）——
+                # 符合"保留 revisions（审计）仅删除主体行"的语义，purge 不再因
+                # immutable delete trigger（memory/state_card/task_events 的 BEFORE DELETE
+                # RAISE(ABORT)）而必败。
+                #
+                # 审计行经 FK 引用主体行（memory_revisions.memory_id → documents.id 等，
+                # 且 memory_id 为 NOT NULL），保留审计必然留下指向已删主体的引用，因此
+                # 本次 purge 事务临时禁用 FK 约束（仅本连接内生效，不改 schema；事务提交后
+                # 新连接经 _connect() 恢复 PRAGMA foreign_keys=ON）。
+                conn.execute("PRAGMA foreign_keys=OFF")
                 conn.execute("DELETE FROM atoms WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)", (session_id,))
                 conn.execute(
                     "DELETE FROM graph_edges WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
                     (session_id,),
                 )
                 conn.execute("DELETE FROM documents WHERE session_id=?", (session_id,))
-                conn.execute("DELETE FROM state_card_revisions WHERE card_id IN (SELECT id FROM state_cards WHERE session_id=?)", (session_id,))
                 conn.execute("DELETE FROM state_cards WHERE session_id=?", (session_id,))
-                conn.execute("DELETE FROM task_events WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?)", (session_id,))
                 conn.execute("DELETE FROM tasks WHERE session_id=?", (session_id,))
             else:
                 conn.execute(
@@ -1082,8 +1104,11 @@ class V2Store:
                 )
                 # 任务无 archived 状态（v5 状态机不含'archived'）；会话软归档时把进行中/
                 # 待办任务收尾为 completed（保留事件与溯源），避免看板残留未完成项。
+                # 收尾任务为 completed。blocked 任务（blocked=1）当前 status 必为
+                # 'in_progress'（CHECK: blocked = 0 OR status = 'in_progress'）；直接改为
+                # completed 会违反该 CHECK。因此先/同时置 blocked=0 再改 status（合法）。
                 conn.execute(
-                    "UPDATE tasks SET status='completed',version=version+1,updated_at=? "
+                    "UPDATE tasks SET status='completed',blocked=0,version=version+1,updated_at=? "
                     "WHERE session_id=? AND status NOT IN ('completed')",
                     (now, session_id),
                 )

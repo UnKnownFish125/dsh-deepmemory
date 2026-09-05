@@ -76,6 +76,9 @@ MAX_BODY_BYTES = int(os.environ.get("MEMORY_MAX_BODY_BYTES", str(10 * 1024 * 102
 REQUEST_TIMEOUT_SECONDS = float(os.environ.get("MEMORY_REQUEST_TIMEOUT_SECONDS", "30"))
 SECRET_CONFIG_KEYS = frozenset({"embedding.api_key"})
 API_TOKEN_FILE = os.environ.get("MEMORY_API_TOKEN_FILE", os.path.join(DATA_DIR, "api-token"))
+# 服务端生成的身份：敏感审批绑定到该受信主体，不信任请求体 user_id（防自授予/跨用户伪造）。
+# 默认与 harness client 写入受保护源时使用的用户一致（web-plugin/client.js 固定 'dsh-user'）。
+SYSTEM_ACTOR_ID = os.environ.get("MEMORY_TRUSTED_USER_ID", "dsh-user")
 DIM = 512
 
 # weighting: alpha*relevance + beta*importance + gamma*recency (AstrBot formula)
@@ -868,7 +871,8 @@ def scope_allows(r, session_id, workspace_id):
         return bool(workspace_id) and r["workspace_id"] == workspace_id
     if s == "session":
         return bool(session_id) and r["session_id"] == session_id
-    return True
+    # 未知 scope 一律拒绝（默认放行会绕过 workspace/session 隔离）
+    return False
 
 
 def search_memories(
@@ -2380,7 +2384,8 @@ class Handler(BaseHTTPRequestHandler):
             with open(API_TOKEN_FILE, encoding="utf-8") as fh:
                 token = fh.read().strip()
         except FileNotFoundError:
-            pass
+            token = ""
+        # 启动时 _ensure_api_token() 已保证 token 文件存在；此处保持"不匹配即拒绝"的校验。
         if token and self.headers.get("Authorization") != "Bearer " + token:
             self._send(401, {"error": "bearer token required"})
             return True
@@ -2886,8 +2891,10 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/v1/sensitive/approvals", "/v1/sensitive/approve", "/v1/sensitive/authorize"):
                 body = self._read_body()
                 try:
+                    # 身份由服务端生成（固定受信主体），不信任请求体 user_id
+                    # （防敏感审批自授予/跨用户伪造：非法调用者不能再指定任意 user_id）。
                     return self._send(200, grant_sensitive_approval(
-                        body.get("user_id"), body.get("session_id"), body.get("confirmed") is True
+                        SYSTEM_ACTOR_ID, body.get("session_id"), body.get("confirmed") is True
                     ))
                 except ValueError as exc:
                     return self._send(400, {"error": str(exc)})
@@ -3006,7 +3013,9 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._read_body()
                 with _injection_lock:
                     if _last_injection is None: _last_injection = {}
-                    _last_injection["full"] = str(body.get("full") or "")[:6000]
+                    # 注入日志存脱敏后的 full（夜间摘要会用原文进 LLM prompt）：
+                    # 先 redact_text 再截断，防止明文 secret 被后续 prompt 消费。
+                    _last_injection["full"] = redact_text(str(body.get("full") or ""))[0][:6000]
                 return self._send(200, {"saved": True})
             if path == "/v1/topic-summaries/auto":
                 body = self._read_body()
@@ -3184,7 +3193,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": redact_text(str(e))[0]})
 
 
+def _ensure_api_token():
+    """确保 API bearer token 文件存在（鉴权不可选）。
+
+    token 文件缺失则生成强随机 token（0600 权限）并日志提示；已存在则保持不变。
+    保证服务启动后 _reject_browser_origin 永远在"文件存在"的前提下校验，堵住
+    "api-token 文件不存在则不校验"的鉴权绕过。
+    """
+    token = ""
+    try:
+        with open(API_TOKEN_FILE, encoding="utf-8") as fh:
+            token = fh.read().strip()
+    except FileNotFoundError:
+        token = ""
+    if token:
+        return
+    token = secrets.token_urlsafe(48)
+    os.makedirs(os.path.dirname(API_TOKEN_FILE) or ".", exist_ok=True)
+    with open(API_TOKEN_FILE, "w", encoding="utf-8") as fh:
+        fh.write(token + "\n")
+    try:
+        os.chmod(API_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    print(f"[security] API bearer token 文件缺失，已生成：{API_TOKEN_FILE}", flush=True)
+
+
 def main():
+    _ensure_api_token()
     init_db()
     _ = get_index()
     rebuild_bm25()
