@@ -286,15 +286,6 @@ function redactSensitive(text) {
     const llm = ctx.get('llm')
     if (!llm) return null
     const route = await resolveModelRoute(llm, null, null)
-    // 提取是机械 JSON 任务：探测模型 effort 档并压低(low→off)，避免吃到 provider 默认 max 拖死 turn-stopping
-    let effort
-    try {
-      const models = (await llm.listModels(route.provider)) || []
-      const entry = models.find((m) => String(m.id || m.name || '') === route.model)
-      const efforts = ((entry && entry.reasoning && entry.reasoning.efforts) || []).map((e) => e && e.id).filter(Boolean)
-      if (efforts.includes('low')) effort = 'low'
-      else if (efforts.includes('off')) effort = 'off'
-    } catch {}
     let out = ''
     try {
       const stream = llm.stream({
@@ -303,7 +294,6 @@ function redactSensitive(text) {
         system: EXTRACT_SYSTEM,
         messages: [{ role: 'user', content: [{ type: 'text', text: redactSensitive(dialog).slice(0, 8000) }] }],
         temperature: 0.2,
-        ...(effort ? { reasoningEffort: effort } : {}),
         signal: signal || undefined,
       })
       for await (const chunk of stream) {
