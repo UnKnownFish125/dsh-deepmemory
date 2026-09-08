@@ -49,20 +49,26 @@ const userCountBySession = new Map()
     return ''
   }
   // workspace 归属（教训 [668]）：绝不硬编码——按会话解析（DSH_SESSION_ID → workspace.json）
-  let _cachedWs = null
-  function resolveWorkspace() {
-    if (_cachedWs) return _cachedWs
+  // workspace 归属（教训 [668]）：绝不硬编码。
+  // 会话来源优先级：显式 sessionId（工具 exec.agent.id / 事件 payload.agent.id）→ 进程 env → 兜底。
+  // 注意：插件运行在 dsh-web 进程，该进程**没有** DSH_SESSION_ID（只有 DSH_HOME），
+  // 因此必须由调用方传入会话 id，不能只靠 env。
+  const _wsCache = new Map()
+  function resolveWorkspace(sessionId) {
+    const sid = String(sessionId || '').trim() || String(process.env.DSH_SESSION_ID || '').trim()
+    if (!sid) return 'deepseek-harness'   // 仅兜底字符串（非事实）
+    if (_wsCache.has(sid)) return _wsCache.get(sid)
     try {
-      const sid = String(process.env.DSH_SESSION_ID || '').trim()
       const home = String(process.env.DSH_HOME || '/www/dsh/home')
-      if (sid) {
-        const d = JSON.parse(require('fs').readFileSync(home + '/storages/workspace.json', 'utf-8'))
-        const wss = (d.tables && d.tables.workspaces) || {}
-        for (const k of Object.keys(wss)) {
-          if ((wss[k].sessionIds || []).includes(sid)) { _cachedWs = k; return k }
-        }
+      // 注意：本插件是 ESM，require 未定义（会抛 ReferenceError 被下方 catch 吞掉 → 永远兜底）。
+      // 必须使用顶部 import 的 fs。
+      const d = JSON.parse(fs.readFileSync(home + '/storages/workspace.json', 'utf-8'))
+      const wss = (d.tables && d.tables.workspaces) || {}
+      for (const k of Object.keys(wss)) {
+        if ((wss[k].sessionIds || []).includes(sid)) { _wsCache.set(sid, k); return k }
       }
     } catch (e) { /* fallback */ }
+    _wsCache.set(sid, 'deepseek-harness')
     return 'deepseek-harness'   // 仅兜底字符串（非事实）
   }
   let WORKSPACE = 'deepseek-harness'
@@ -407,7 +413,7 @@ function redactSensitive(text) {
           k: perCategory,
           type: types.join(','),
           session_id: sessionId,
-          workspace_id: resolveWorkspace(),
+          workspace_id: resolveWorkspace(sessionId),
         })
         if (!r.ok) return false
         catResults = catResults.concat((r.data && r.data.results) || [])
@@ -427,7 +433,7 @@ function redactSensitive(text) {
           k: 8,
           library: 'bias',
           session_id: sessionId,
-          workspace_id: resolveWorkspace(),
+          workspace_id: resolveWorkspace(sessionId),
         })
         const biasRows = ((biasres.data && biasres.data.results) || []).filter(function (r) { return r.library === 'bias' })
           .sort(function (a, b) { return (b.importance || 0) - (a.importance || 0) })
@@ -448,7 +454,7 @@ function redactSensitive(text) {
             k: 4,
             type: 'preference,rule',
             session_id: sessionId,
-            workspace_id: resolveWorkspace(),
+            workspace_id: resolveWorkspace(sessionId),
           })
           const opRules = ((opres.data && opres.data.results) || []).filter(function (r) {
             return detectOperationIntent(String(r.content || '') + String(r.keywords || ''))
@@ -654,7 +660,7 @@ function redactSensitive(text) {
         domain: m.domain || 'work',
         scope: m.scope || 'workspace',
         importance: typeof m.importance === 'number' ? m.importance : 0.5,
-        workspace_id: resolveWorkspace(),
+        workspace_id: resolveWorkspace(sid),
         session_id: sid,
         dialog_scoped: true,
         topic_id: String(m.topic || '').slice(0, 60),
@@ -710,7 +716,7 @@ function redactSensitive(text) {
           const created = await http('POST', '/v1/v2/tasks', {
             title: title,
             status: status,
-            workspace_id: resolveWorkspace(),
+            workspace_id: resolveWorkspace(sid),
             session_id: sid,
             description: redactSensitive(String(t.description || '')).slice(0, 500),
             blocked: status === 'in_progress' ? Boolean(t.blocked) : false,
@@ -782,9 +788,10 @@ function redactSensitive(text) {
       persona: { type: 'string', description: 'Optional persona id filter. Leave empty for shared memories.' },
     },
     output: { schema: outSchema, render: (args, value) => textRender(value) },
-    async execute(args) {
+    async execute(args, exec) {
       if (!TOOLS_ENABLED) return { count: 0, results: [], error: 'deepmemory tools disabled' }
-      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: resolveWorkspace(), persona_id: String(args.persona || '') })
+      const sid = (exec && exec.agent && exec.agent.id) ? String(exec.agent.id) : ''
+      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: resolveWorkspace(sid), persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, results: [], error: res.error }
       const items = (res.data.results || []).map((r) => ({ id: r.id, content: redactSensitive(r.content), type: r.type, domain: r.domain, scope: r.scope, importance: r.importance, score: r.final_score }))
       return { count: items.length, results: items }
@@ -804,14 +811,15 @@ function redactSensitive(text) {
       persona: { type: 'string', description: 'Optional persona id binding. Leave empty for shared memories.' },
     },
     output: { schema: outSchema, render: (args, value) => textRender(value) },
-    async execute(args) {
+    async execute(args, exec) {
       if (!TOOLS_ENABLED) return { saved: false, error: 'deepmemory tools disabled' }
+      const sid = (exec && exec.agent && exec.agent.id) ? String(exec.agent.id) : ''
       const payload = {
         content: redactSensitive(String(args.content || '')),
         type: args.type || 'fact',
         domain: args.domain || 'work',
         scope: args.scope || 'workspace',
-        workspace_id: String(args.workspace_id || '').trim() || resolveWorkspace(),
+        workspace_id: String(args.workspace_id || '').trim() || resolveWorkspace(sid),
         importance: typeof args.importance === 'number' ? args.importance : 0.6,
         persona_id: String(args.persona || ''),
       }
@@ -830,9 +838,10 @@ function redactSensitive(text) {
       persona: { type: 'string', description: 'Optional persona id filter. Leave empty for shared memories.' },
     },
     output: { schema: outSchema, render: (args, value) => textRender(value) },
-    async execute(args) {
+    async execute(args, exec) {
       if (!TOOLS_ENABLED) return { count: 0, briefing: '', error: 'deepmemory tools disabled' }
-      const res = await http('POST', '/v1/memories/search', { query: String(args.task || ''), k: args.k || 8, workspace_id: resolveWorkspace(), persona_id: String(args.persona || '') })
+      const sid = (exec && exec.agent && exec.agent.id) ? String(exec.agent.id) : ''
+      const res = await http('POST', '/v1/memories/search', { query: String(args.task || ''), k: args.k || 8, workspace_id: resolveWorkspace(sid), persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, briefing: '', error: res.error }
       const lines = (res.data.results || []).map((r) => '- ' + redactSensitive(String(r.content || '')))
       return { count: lines.length, briefing: lines.join('\n') }
