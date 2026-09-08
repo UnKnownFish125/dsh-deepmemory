@@ -29,25 +29,33 @@ export function apply(ctx) {
   const outSchema = { type: 'object', additionalProperties: true }
   const textRender = (value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }]
 
-  // 轨 B：bias 约束前提段注入（从 literature 6260 kb-search library=bias）
-  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
-    // 瀑布链礼仪: 必须把下游结果(上游 await next() 依赖)原样返回, 且不吞下游异常
-    const downstream = next ? await next(assembly, context) : undefined
-    try {
-      const bias = await api('/kb-search', {
-        method: 'POST',
-        // bias 为全局约束库（跨工作区共享），不传 workspace_id（服务端空 ws 返回全部 bias）
-        body: { query: '约束 必须 禁止 绝对路径', k: 6, library: 'bias' },
-      }).catch(() => null)
-      const rows = (bias && bias.results) || []
-      if (!rows.length) return downstream
-      const text = rows.map((r) => `- ${r.summary || r.concept || ''}`).join('\n')
-      if (assembly && typeof assembly.push === 'function') {
-        assembly.push({ role: 'system', content: `[约束前提]（来自 literature bias 库，均须遵守）：\n${text}` })
-      }
-    } catch (e) { /* 轨 B 注入失败不影响主流程 */ }
-    return downstream
-  })
+  // 轨 B：bias 约束前提段注入 —— systemPrompt.context（尾部持久快照，D3 同源机制；
+  // 注：assemble 的 assembly 不是消息数组，push 永远无效——改用 context 注册）
+  const systemPrompt = ctx.get('systemPrompt')
+  if (systemPrompt) {
+    let kbText = ''
+    let kbAt = 0
+    async function refreshKbConstraints() {
+      try {
+        const r = await api('/kb/constraints?workspace_id=deepseek-harness&k=8')
+        const rows = (r && r.constraints) || []
+        kbText = rows.length
+          ? '[约束前提]（来自 literature bias 库，均须遵守）：\n' +
+            rows.map((x) => '- ' + String(x.concept || x.summary || x.content || '')).join('\n')
+          : ''
+        kbAt = Date.now()
+      } catch (e) { /* 拉取失败保持旧文本 */ }
+    }
+    refreshKbConstraints().catch(() => {})
+    ctx.effect(() => systemPrompt.context({
+      name: 'literature-kb',
+      order: 45,
+      text: () => {
+        if (Date.now() - kbAt > 300000) refreshKbConstraints().catch(() => {})
+        return kbText || ''
+      },
+    }))
+  }
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'kb_query',
@@ -56,7 +64,7 @@ export function apply(ctx) {
       query: { type: 'string', required: true, description: 'Concise search keywords.' },
       library: { type: 'string', description: 'bias | core | eco | project | runtime. Empty = all.' },
       k: { type: 'integer', description: 'Max results.', default: 5 },
-      workspace_id: { type: 'string', description: 'Workspace id（宿主工作区 UUID）。留空=不限；写入请按 DSH_SESSION_ID→workspace.json 解析，勿用兜底值。' },
+      workspace_id: { type: 'string', description: 'Workspace id.', default: 'deepseek-harness' },
       mode: { type: 'string', description: 'hybrid|knowledge-only|deepmemory-only|auto', default: 'auto' },
     },
     output: { schema: outSchema, render: textRender },

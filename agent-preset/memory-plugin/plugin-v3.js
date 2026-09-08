@@ -48,6 +48,23 @@ const userCountBySession = new Map()
     }
     return ''
   }
+  // workspace 归属（教训 [668]）：绝不硬编码——按会话解析（DSH_SESSION_ID → workspace.json）
+  let _cachedWs = null
+  function resolveWorkspace() {
+    if (_cachedWs) return _cachedWs
+    try {
+      const sid = String(process.env.DSH_SESSION_ID || '').trim()
+      const home = String(process.env.DSH_HOME || '/www/dsh/home')
+      if (sid) {
+        const d = JSON.parse(require('fs').readFileSync(home + '/storages/workspace.json', 'utf-8'))
+        const wss = (d.tables && d.tables.workspaces) || {}
+        for (const k of Object.keys(wss)) {
+          if ((wss[k].sessionIds || []).includes(sid)) { _cachedWs = k; return k }
+        }
+      }
+    } catch (e) { /* fallback */ }
+    return 'deepseek-harness'   // 仅兜底字符串（非事实）
+  }
   let WORKSPACE = 'deepseek-harness'
   let EXTRACT_THRESHOLD = 4
   let RECALL_K = 5
@@ -288,6 +305,7 @@ function redactSensitive(text) {
     const route = await resolveModelRoute(llm, null, null)
     // 提取是机械 JSON 任务：探测模型 effort 档并压低(low→off)，避免吃到 provider 默认 max 拖死 turn-stopping
     let effort
+    const tProbe = Date.now()
     try {
       const models = (await llm.listModels(route.provider)) || []
       const entry = models.find((m) => String(m.id || m.name || '') === route.model)
@@ -295,6 +313,13 @@ function redactSensitive(text) {
       if (efforts.includes('low')) effort = 'low'
       else if (efforts.includes('off')) effort = 'off'
     } catch {}
+    const probeMs = Date.now() - tProbe
+    // 硬超时 45s：不管慢在哪一层(provider探测/预填/推理/重试)，turn-stopping 最多等这么久，超时放弃本桶
+    let timedSignal = signal || undefined
+    try {
+      timedSignal = AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(45000)])
+    } catch {}
+    const t0 = Date.now()
     let out = ''
     try {
       const stream = llm.stream({
@@ -304,16 +329,17 @@ function redactSensitive(text) {
         messages: [{ role: 'user', content: [{ type: 'text', text: redactSensitive(dialog).slice(0, 8000) }] }],
         temperature: 0.2,
         ...(effort ? { reasoningEffort: effort } : {}),
-        signal: signal || undefined,
+        signal: timedSignal,
       })
       for await (const chunk of stream) {
         if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
         else if (chunk && (chunk.type === 'error' || chunk.type === 'aborted')) break
       }
     } catch (e) {
-      console.error('[deepmemory] extract stream failed', String(e))
+      console.error('[deepmemory] extract stream failed after ' + ((Date.now() - t0) / 1000).toFixed(1) + 's via ' + route.provider + '/' + route.model + ': ' + String(e))
       return null
     }
+    console.log('[deepmemory] extract llm via ' + route.provider + '/' + route.model + (effort ? ' effort=' + effort : '') + ' took ' + ((Date.now() - t0) / 1000).toFixed(1) + 's (probe ' + (probeMs / 1000).toFixed(1) + 's) out=' + out.length + 'ch')
     const start = out.indexOf('{')
     const end = out.lastIndexOf('}')
     if (start < 0 || end <= start) {
@@ -381,7 +407,7 @@ function redactSensitive(text) {
           k: perCategory,
           type: types.join(','),
           session_id: sessionId,
-          workspace_id: WORKSPACE,
+          workspace_id: resolveWorkspace(),
         })
         if (!r.ok) return false
         catResults = catResults.concat((r.data && r.data.results) || [])
@@ -401,7 +427,7 @@ function redactSensitive(text) {
           k: 8,
           library: 'bias',
           session_id: sessionId,
-          workspace_id: WORKSPACE,
+          workspace_id: resolveWorkspace(),
         })
         const biasRows = ((biasres.data && biasres.data.results) || []).filter(function (r) { return r.library === 'bias' })
           .sort(function (a, b) { return (b.importance || 0) - (a.importance || 0) })
@@ -422,7 +448,7 @@ function redactSensitive(text) {
             k: 4,
             type: 'preference,rule',
             session_id: sessionId,
-            workspace_id: WORKSPACE,
+            workspace_id: resolveWorkspace(),
           })
           const opRules = ((opres.data && opres.data.results) || []).filter(function (r) {
             return detectOperationIntent(String(r.content || '') + String(r.keywords || ''))
@@ -628,7 +654,7 @@ function redactSensitive(text) {
         domain: m.domain || 'work',
         scope: m.scope || 'workspace',
         importance: typeof m.importance === 'number' ? m.importance : 0.5,
-        workspace_id: WORKSPACE,
+        workspace_id: resolveWorkspace(),
         session_id: sid,
         dialog_scoped: true,
         topic_id: String(m.topic || '').slice(0, 60),
@@ -684,7 +710,7 @@ function redactSensitive(text) {
           const created = await http('POST', '/v1/v2/tasks', {
             title: title,
             status: status,
-            workspace_id: WORKSPACE,
+            workspace_id: resolveWorkspace(),
             session_id: sid,
             description: redactSensitive(String(t.description || '')).slice(0, 500),
             blocked: status === 'in_progress' ? Boolean(t.blocked) : false,
@@ -758,7 +784,7 @@ function redactSensitive(text) {
     output: { schema: outSchema, render: (args, value) => textRender(value) },
     async execute(args) {
       if (!TOOLS_ENABLED) return { count: 0, results: [], error: 'deepmemory tools disabled' }
-      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: WORKSPACE, persona_id: String(args.persona || '') })
+      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: resolveWorkspace(), persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, results: [], error: res.error }
       const items = (res.data.results || []).map((r) => ({ id: r.id, content: redactSensitive(r.content), type: r.type, domain: r.domain, scope: r.scope, importance: r.importance, score: r.final_score }))
       return { count: items.length, results: items }
@@ -773,6 +799,7 @@ function redactSensitive(text) {
       type: { type: 'string', description: 'fact | preference | decision | episode | plan', default: 'fact' },
       domain: { type: 'string', description: 'work | life', default: 'work' },
       scope: { type: 'string', description: 'session | workspace | global', default: 'workspace' },
+      workspace_id: { type: 'string', description: 'Optional workspace id override (defaults to current session workspace).' },
       importance: { type: 'number', description: 'Importance 0-1.', default: 0.6 },
       persona: { type: 'string', description: 'Optional persona id binding. Leave empty for shared memories.' },
     },
@@ -784,7 +811,7 @@ function redactSensitive(text) {
         type: args.type || 'fact',
         domain: args.domain || 'work',
         scope: args.scope || 'workspace',
-        workspace_id: WORKSPACE,
+        workspace_id: String(args.workspace_id || '').trim() || resolveWorkspace(),
         importance: typeof args.importance === 'number' ? args.importance : 0.6,
         persona_id: String(args.persona || ''),
       }
@@ -805,7 +832,7 @@ function redactSensitive(text) {
     output: { schema: outSchema, render: (args, value) => textRender(value) },
     async execute(args) {
       if (!TOOLS_ENABLED) return { count: 0, briefing: '', error: 'deepmemory tools disabled' }
-      const res = await http('POST', '/v1/memories/search', { query: String(args.task || ''), k: args.k || 8, workspace_id: WORKSPACE, persona_id: String(args.persona || '') })
+      const res = await http('POST', '/v1/memories/search', { query: String(args.task || ''), k: args.k || 8, workspace_id: resolveWorkspace(), persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, briefing: '', error: res.error }
       const lines = (res.data.results || []).map((r) => '- ' + redactSensitive(String(r.content || '')))
       return { count: lines.length, briefing: lines.join('\n') }
