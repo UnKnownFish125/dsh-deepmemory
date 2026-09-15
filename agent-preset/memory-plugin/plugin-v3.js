@@ -714,8 +714,11 @@ function redactSensitive(text) {
     const result = await extract(dialog, payload.signal)
     if (!result) return
     let memoryChanged = false
-    if (result.memories && result.memories.length) {
-      const items = result.memories.filter((m) => m && m.content).map((m) => {
+    // N10：原实现只查 .length —— {"memories":"x"} 是合法 JSON，字符串有 length 却没有
+    // .filter，会抛 TypeError；本代码在 agent/turn-stopping 里运行，异常会把已生成回答的
+    // 回合标成 error。这里加结构守卫（tasks/card 两处原本就已有守卫）。
+    if (Array.isArray(result.memories) && result.memories.length) {
+      const items = result.memories.filter((m) => m && typeof m.content === 'string' && m.content.trim()).map((m) => {
         const rawContent = redactSensitive(m.content)
         const rawKeyFacts = redactSensitive(m.key_facts || '')
         const rawPersona = redactSensitive(m.persona_summary || '')

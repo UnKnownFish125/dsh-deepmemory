@@ -55,6 +55,7 @@
 | N12 Host 代理上游中断无终止处理 | 同上 | `upRes` error/aborted → destroy 下游；`res` close → destroy upstream；error 分支区分 `headersSent` |
 | N13 Host 备用召回未用会话归属解析 | `patch_host_n13_workspace.py` | 在 Host 内实现与 preset 相同的解析（读 `storages/workspace.json` 的 `tables.workspaces[*].sessionIds`）；实测样本会话真实归属为 workspace UUID，而旧逻辑返回 `deepseek-harness` 兜底串 —— **两者不同**，确认修复消除了"其他工作区经 Host 备用召回检索为空/串区"；三处副本一致 + `node --check` |
 | N25 preset 硬编码绝对路径 import `dsh-tools` | `patch_preset_n25_tools_import.py` | 原为静态 import 硬编码 `/usr/local/node/lib/node_modules/…` —— 换机/升级/换安装根会让**整个 preset 加载失败**（所有会话记忆功能一起失效）。改为多候选解析（硬编码路径 + 从 `process.argv[1]` 推导 + `createRequire` 包解析），全失败时降级为"工具不可用、注入/抽取照常"并打印排查提示。四步 preflight 全过：`.mjs` 语法、ESM 冒烟、重启 active、**建会话 `ok:true`**、无降级警告；三处副本 md5 一致 |
+| N10 抽取结果只 `JSON.parse` 不校验结构 | `patch_preset_n10_schema.py` | 复核后收窄：`result.tasks` / `result.card` **原本就有** `Array.isArray` / `typeof` 守卫，**唯一缺口**是 `result.memories` ——`{"memories":"x"}` 是合法 JSON，字符串有 `.length` 却没有 `.filter` → TypeError；该代码在 `agent/turn-stopping` 里，异常会把**已生成回答的回合**标成 error。改为 `Array.isArray` + `content` 非空字符串校验。四步 preflight 全过 |
 
 ### ✅ 已修（仅仓库 P1；生产未部署该特性，故无需上线）
 
@@ -72,7 +73,7 @@
 | **N17 会话级配置多数不被 preset 消费** | 正解是把 preset 的**模块级配置变量**改为按会话解析（避免跨会话污染）。属核心链路重构，改动面覆盖 assemble/抽取/工具注册，草率改会重演「liangshen 事故」（核心链路被改坏 → 所有会话每回合报错）。**必须有完整上下文与专门验证窗口**。 |
 | S05 部署漂移合并 | **反向漂移已消除**（2026-09-15）：仓库与测试机已吸收生产的 `llm_chat` 改动 —— `https://api.deepseek.com/v1`、`deepseek-v4-flash`、`DEEPSEEK_API_KEY`，并清除已除名的促销 ID `deepseek-v4-flash-0731`（见 `patch_server_s05_llmchat_align.py`）；三处副本的 URL 差异清零、配置键差异为零。**仅剩正向决策**：仓库的 P1（含已修的 S06/S07）是否上生产 —— 需拍板；上生产须走完整测试机 preflight + 一次 memory-server 重启 |
 | S18 `add_batch` 非原子 | **判定为设计选择**：`/v1/memories/add_batch` 的契约是"尽量写入 + 逐项返回结果"（`server.py:1581-1591` 会在 HTTP 200 的 `added` 数组里逐项给出 error），调用方（preset `674-678`）据此处理部分失败。改成事务/outbox 会改变对外协议，风险大于收益，故不修；如需强原子应新增独立端点。 |
-| N07 Host `session.events` 兼容 / N08 写卡全量覆盖 / N09 队列丢失 / N10 输出结构校验 / N11 Host 抽取绕过脱敏 / N12 流错误处理 / N13 Host workspace 解析 / N18 无 deadline / N19 任务卡重复 / N23 CSS 未清理 / N24 日志泄漏 / N25 绝对路径依赖 | 按 ROI 排期 |
+| N07 Host `session.events` 兼容 / N08 写卡全量覆盖 / N09 队列丢失 / N11 Host 抽取绕过脱敏 / N18 无 deadline / N19 任务卡重复 | 按 ROI 排期（N10/N12/N13/N23/N24/N25 已完成，见上表） |
 
 ### 流程事故与修复（非 astra 报告项）
 
