@@ -6,7 +6,6 @@
  */
 import http from 'node:http'
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import fs from 'node:fs'
 
 export const name = 'deepmemory'
@@ -392,7 +391,7 @@ export function apply(ctx) {
   // Host settings namespace list, then dispatches settings.plugin.item by key.
   // Deepmemory keeps its actual config in memory-server, so this empty section
   // is only the discovery contract for the browser-owned configuration card.
-  ctx.settings.register(settingsNamespace('deepmemory'), z.object({}))
+  ctx.settings.register('deepmemory', z.object({}))
 
   const cardBuckets = new Map()
   const cardRuns = new Set()

@@ -193,12 +193,61 @@ async function api(method, path, body) {
     const opts = { method, headers: { 'Content-Type': 'application/json' } }
     if (body !== undefined && body !== null) opts.body = JSON.stringify(body)
     const res = await fetch('/mem-api' + path, opts)
-    if (!res.ok) return { error: 'HTTP ' + res.status }
+    if (!res.ok) {
+      // N21：保留后端 error/code/details——否则授权过期、版本冲突、保存失败
+      // 在 UI 上只能看到 "HTTP 500"，无法给出可执行提示
+      let detail = ''
+      let payload = null
+      try {
+        payload = await res.clone().json()
+        detail = String((payload && (payload.error || payload.message)) || '')
+      } catch (e) {
+        try { detail = String((await res.clone().text()) || '').slice(0, 300) } catch (e2) { /* ignore */ }
+      }
+      return {
+        error: detail || ('HTTP ' + res.status),
+        status: res.status,
+        code: (payload && payload.code) || '',
+        details: payload,
+      }
+    }
     return await res.json()
   } catch (e) {
     return { error: String((e && e.message) || e) }
   }
 }
+
+// N20：ListEditor 必须定义在模块级——若定义在 MemoryPanel 内部，
+// 每次 render 都会产生新的函数身份，React 会把它当成新组件类型并卸载重建，
+// 导致编辑列表时每输入一个字符就丢焦点。
+function ListEditor(props) {
+  const items = props.items
+  const setItems = props.setItems
+  const addLabel = props.addLabel
+  const t = props.t || function (k) { return k }
+  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+    items.map(function (item, i) {
+      return React.createElement('div', { key: String(i), style: { display: 'flex', gap: 6, alignItems: 'center' } },
+        React.createElement('input', {
+          className: 'dsh-mem-input',
+          value: item,
+          onChange: function (e) {
+            setItems(items.map(function (x, j) { return j === i ? e.target.value : x }))
+          },
+        }),
+        React.createElement('button', {
+          className: 'dsh-mem-del', title: t('delete'),
+          onClick: function () { setItems(items.filter(function (_, j) { return j !== i })) },
+        }, '✕'),
+      )
+    }),
+    React.createElement('button', {
+      className: 'dsh-mem-btn', style: { alignSelf: 'flex-start' },
+      onClick: function () { setItems(items.concat([''])) },
+    }, '+ ' + addLabel),
+  )
+}
+
 
 
 // ── 全局任务看板（侧栏按钮 → 浮层窗口）──────────────────────────
@@ -1167,33 +1216,6 @@ function apply(ctx) {
     if (card && card.next_steps && card.next_steps.length) cardLines.push({ k: '下一步', v: card.next_steps.join('；') })
     if (card && card.in_progress && card.in_progress.length) cardLines.push({ k: '进行中', v: card.in_progress.join('；') })
 
-    function ListEditor(props) {
-      const items = props.items
-      const setItems = props.setItems
-      const addLabel = props.addLabel
-      return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-        items.map(function (item, i) {
-          return React.createElement('div', { key: String(i), style: { display: 'flex', gap: 6, alignItems: 'center' } },
-            React.createElement('input', {
-              className: 'dsh-mem-input',
-              value: item,
-              onChange: function (e) {
-                setItems(items.map(function (x, j) { return j === i ? e.target.value : x }))
-              },
-            }),
-            React.createElement('button', {
-              className: 'dsh-mem-del', title: t('delete'),
-              onClick: function () { setItems(items.filter(function (_, j) { return j !== i })) },
-            }, '✕'),
-          )
-        }),
-        React.createElement('button', {
-          className: 'dsh-mem-btn', style: { alignSelf: 'flex-start' },
-          onClick: function () { setItems(items.concat([''])) },
-        }, '+ ' + addLabel),
-      )
-    }
-
     function renderCardEditor() {
       const d = cardDraft
       return React.createElement('div', { className: 'dsh-mem-box', style: { borderColor: 'var(--dsw-alias-brand-primary, #4c8dff)' } },
@@ -1219,15 +1241,15 @@ function apply(ctx) {
           ),
           React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
             React.createElement('span', { className: 'dsh-mem-cfg-label' }, '关键决定'),
-            React.createElement(ListEditor, { items: d.key_decisions, addLabel: '决定', setItems: function (v) { setCardDraft(Object.assign({}, d, { key_decisions: v })) } }),
+            React.createElement(ListEditor, { t: t, items: d.key_decisions, addLabel: '决定', setItems: function (v) { setCardDraft(Object.assign({}, d, { key_decisions: v })) } }),
           ),
           React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
             React.createElement('span', { className: 'dsh-mem-cfg-label' }, '进行中'),
-            React.createElement(ListEditor, { items: d.in_progress, addLabel: '事项', setItems: function (v) { setCardDraft(Object.assign({}, d, { in_progress: v })) } }),
+            React.createElement(ListEditor, { t: t, items: d.in_progress, addLabel: '事项', setItems: function (v) { setCardDraft(Object.assign({}, d, { in_progress: v })) } }),
           ),
           React.createElement('div', { className: 'dsh-mem-cfg-item', style: { padding: 0, borderTop: 'none' } },
             React.createElement('span', { className: 'dsh-mem-cfg-label' }, '下一步'),
-            React.createElement(ListEditor, { items: d.next_steps, addLabel: '步骤', setItems: function (v) { setCardDraft(Object.assign({}, d, { next_steps: v })) } }),
+            React.createElement(ListEditor, { t: t, items: d.next_steps, addLabel: '步骤', setItems: function (v) { setCardDraft(Object.assign({}, d, { next_steps: v })) } }),
           ),
         ),
       )

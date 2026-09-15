@@ -29,6 +29,9 @@ const userCountBySession = new Map()
   const CARD_KIND = config.preset_mode === 'daily' ? 'daily' : 'task'
   const buckets = new Map()
   const enabledCache = new Map()
+  // N04：enabledCache 的时间戳（配合 TTL，避免"界面已关闭但 preset 永久用旧值"）
+  const enabledCacheAt = new Map()
+  const ENABLED_TTL_MS = 5000
   const memoryCache = new Map()
   const recentBySession = new Map()
   const initializedSessions = new Set()
@@ -213,16 +216,22 @@ function redactSensitive(text) {
 
   async function isEnabled(sessionId) {
     if (!sessionId) return true
-    if (enabledCache.has(sessionId)) return enabledCache.get(sessionId)
+    // N04：缓存加 TTL——原来首次读取后永久缓存，UI 关闭开关后 preset 不再复查
+    const cachedAt = enabledCacheAt.get(sessionId) || 0
+    if (enabledCache.has(sessionId) && Date.now() - cachedAt < ENABLED_TTL_MS) {
+      return enabledCache.get(sessionId)
+    }
     const res = await http('GET', '/v1/settings/session_enabled:' + encodeURIComponent(sessionId))
     const val = res.ok && res.data && typeof res.data.value === 'boolean' ? res.data.value : true
     enabledCache.set(sessionId, val)
+    enabledCacheAt.set(sessionId, Date.now())
     return val
   }
 
   async function setEnabled(sessionId, value) {
     if (!sessionId) return
     enabledCache.set(sessionId, value)
+    enabledCacheAt.set(sessionId, Date.now())
     await http('POST', '/v1/settings/set', { key: 'session_enabled:' + sessionId, value: value })
   }
 
@@ -266,7 +275,7 @@ function redactSensitive(text) {
       })
       groups.push('[' + title + ']\n' + lines.join('\n'))
     }
-    pushGroup('规则与偏好', byType(function (r) { return r.type === 'preference' }))
+    pushGroup('规则与偏好', byType(function (r) { return r.type === 'preference' || r.type === 'rule' }))
     pushGroup('决定与目标', byType(function (r) { return r.type === 'decision' || r.type === 'goal' || r.type === 'plan' }))
     pushGroup('事实与事件', byType(function (r) { return r.type === 'fact' || r.type === 'episode' }))
     if (!groups.length) {
@@ -302,7 +311,7 @@ function redactSensitive(text) {
         if (chosen) return { provider: p, model: chosen.id || chosen.name }
       } catch {}
     }
-    return { provider: provider || 'uuapi', model: model || 'deepseek-v4-flash' }
+    return { provider: provider || 'deepseek-official', model: model || 'deepseek-v4-flash' }
   }
 
   async function extract(dialog, signal) {
@@ -484,8 +493,13 @@ function redactSensitive(text) {
       let nextCardText = ''
       if (INJECT_CARD) {
         const cres = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sessionId))
-        if (!cres.ok) return false
-        nextCardText = cardText(cres.data && cres.data.card)
+        // N06：状态卡是可选增强——新会话无卡(404)或卡接口暂时失败，
+        // 都不得丢弃已经检索成功的记忆
+        if (cres.ok) {
+          nextCardText = cardText(cres.data && cres.data.card)
+        } else {
+          state.cardSkipped = (state.cardSkipped || 0) + 1
+        }
       }
       let nextText = nextCardText + summaryBrief + opBlock + formatMemories(results, Math.max(limit || RECALL_K, results.length))
       // 预算裁剪：超 INJECT_BUDGET_CHARS 时截断（尾部=低 importance；摘要段在前部保留）
@@ -572,9 +586,13 @@ function redactSensitive(text) {
         // 跟随压缩：DSH 压缩摘要存入 topic_summaries（零额外 LLM——复用压缩下发的 summary 文本；
         // 压缩剪哪段、摘要覆盖哪段——记忆注入已读链，压缩语义双覆盖）
         try {
-          const cmsg = (event.data || {}).message || {}
+          // N14：0.1.5 契约的摘要正文在 data.summary（ContentBlock[]），
+          // 旧字段 data.message.content 仅作兼容回退
+          const cdata = event.data || {}
           let ctxt = ''
-          const ccontent = cmsg.content
+          const ccontent = (cdata.summary !== undefined && cdata.summary !== null)
+            ? cdata.summary
+            : ((cdata.message || {}).content)
           if (Array.isArray(ccontent)) {
             for (const b of ccontent) {
               if (b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string') ctxt += b.text
@@ -596,6 +614,12 @@ function redactSensitive(text) {
       }
       if (t !== 'user/message' && t !== 'assistant/message') return
       if (!sid || enabledCache.get(sid) === false) return
+      // N01：跳过合成输入（runtime context / 技能 / 工具转述等 source.kind!=='user'），
+      // 否则我们注入的记忆会被当成"用户新消息"再次抽取，形成记忆自我强化/污染循环
+      if (t === 'user/message') {
+        const _src = (event.data && event.data.source) || null
+        if (_src && _src.kind && _src.kind !== 'user') return
+      }
       const data = event.data || {}
       const msg = t === 'user/message' ? data : (data.message || {})
       let text = ''
@@ -610,12 +634,10 @@ function redactSensitive(text) {
         state.userCounts = state.userCounts || {}
         state.userCounts[sid] = (state.userCounts[sid] || 0) + 1
         state.lastUserText = state.lastUserText || {}
-        state.lastUserText[sid] = String((event.data && event.data.message && event.data.message.content) || '')
+        // N03a：content 就在 event.data 上（与上方 msg 同源）；旧写法 data.message.content 恒为空串
+        state.lastUserText[sid] = String(text || '')
         state.turnCounts = state.turnCounts || {}
         state.turnCounts[sid] = (state.turnCounts[sid] || 0) + 1
-        // 用户消息到达即启动刷新（assemble 会 await 它）：
-        // 保证本回合首请求已带新注入（miss=首请求允许），回合内不再切换
-        ensureSessionRefresh(sid)
       }
       if (text && text.trim()) {
         let bucket = buckets.get(sid)
@@ -629,6 +651,9 @@ function redactSensitive(text) {
         // 按长度累计（触发摘要链/上下文刷新用）
         recentBytes.set(sid, (recentBytes.get(sid) || 0) + text.length)
       }
+      // N03b：先把本轮文本写入 recent/lastUserText，再启动刷新——
+      // 否则检索 query 会用上一轮文本（新问题匹配旧记忆）
+      if (t === 'user/message') ensureSessionRefresh(sid)
     } catch (e) {}
   })
 
@@ -791,7 +816,7 @@ function redactSensitive(text) {
     async execute(args, exec) {
       if (!TOOLS_ENABLED) return { count: 0, results: [], error: 'deepmemory tools disabled' }
       const sid = (exec && exec.agent && exec.agent.id) ? String(exec.agent.id) : ''
-      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, workspace_id: resolveWorkspace(sid), persona_id: String(args.persona || '') })
+      const res = await http('POST', '/v1/memories/search', { query: String(args.query || ''), k: args.k || 5, session_id: sid, workspace_id: resolveWorkspace(sid), persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, results: [], error: res.error }
       const items = (res.data.results || []).map((r) => ({ id: r.id, content: redactSensitive(r.content), type: r.type, domain: r.domain, scope: r.scope, importance: r.importance, score: r.final_score }))
       return { count: items.length, results: items }
@@ -820,6 +845,8 @@ function redactSensitive(text) {
         domain: args.domain || 'work',
         scope: args.scope || 'workspace',
         workspace_id: String(args.workspace_id || '').trim() || resolveWorkspace(sid),
+        // N05b：scope=session 时后端要求 session_id 非空且一致，否则记忆"存了找不到"
+        session_id: sid,
         importance: typeof args.importance === 'number' ? args.importance : 0.6,
         persona_id: String(args.persona || ''),
       }
@@ -841,7 +868,7 @@ function redactSensitive(text) {
     async execute(args, exec) {
       if (!TOOLS_ENABLED) return { count: 0, briefing: '', error: 'deepmemory tools disabled' }
       const sid = (exec && exec.agent && exec.agent.id) ? String(exec.agent.id) : ''
-      const res = await http('POST', '/v1/memories/search', { query: String(args.task || ''), k: args.k || 8, workspace_id: resolveWorkspace(sid), persona_id: String(args.persona || '') })
+      const res = await http('POST', '/v1/memories/search', { query: String(args.task || ''), k: args.k || 8, session_id: sid, workspace_id: resolveWorkspace(sid), persona_id: String(args.persona || '') })
       if (!res.ok) return { count: 0, briefing: '', error: res.error }
       const lines = (res.data.results || []).map((r) => '- ' + redactSensitive(String(r.content || '')))
       return { count: lines.length, briefing: lines.join('\n') }

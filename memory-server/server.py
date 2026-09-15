@@ -114,26 +114,97 @@ def get_embed_config():
     return cfg
 
 
+def _index_remove_ids(ids):
+    """S12：从 FAISS 索引移除若干 id（与 BM25 的 remove 配对，防死向量残留）。"""
+    ids = [int(i) for i in ids if i is not None]
+    if not ids:
+        return 0
+    try:
+        idx = get_index()
+        with _index_lock:
+            idx.remove_ids(np.asarray(ids, dtype=np.int64))
+        save_index()
+        return len(ids)
+    except Exception:
+        return 0
+
+
+def _index_add_texts(pairs):
+    """S12：把 (id, text) 重新编码并加回 FAISS（恢复记忆时补向量）。
+
+    幂等：先 remove_ids 再 add_with_ids，避免重复 id 堆积。
+    """
+    pairs = [(int(i), str(t or "")) for i, t in pairs if i is not None]
+    pairs = [p for p in pairs if p[0]]
+    if not pairs:
+        return 0
+    try:
+        vecs = embed_texts([t if t.strip() else " " for _i, t in pairs])
+        if not vecs or len(vecs) != len(pairs):
+            return 0
+        mat = np.vstack([normalize(np.asarray(v, dtype=np.float32)) for v in vecs]).astype(np.float32)
+        ids = np.asarray([i for i, _t in pairs], dtype=np.int64)
+        idx = get_index()
+        with _index_lock:
+            idx.remove_ids(ids)
+            idx.add_with_ids(mat, ids)
+        save_index()
+        return len(pairs)
+    except Exception:
+        return 0
+
+
+def _embed_model_label():
+    """S16：/v1/embeddings 响应的 model 字段必须反映实际生效的 provider/model。"""
+    try:
+        cfg = get_embed_config()
+        if (cfg.get("provider") or "local").strip().lower() == "api":
+            return cfg.get("api_model") or "api-embedding"
+        return cfg.get("local_model") or "BAAI/bge-small-zh-v1.5"
+    except Exception:
+        return "unknown"
+
+
+def _embed_fingerprint():
+    """S02：当前生效的嵌入模型身份（provider:model）。
+
+    维度相同不代表向量空间相同——切换同维模型必须能识别出来。
+    """
+    try:
+        cfg = get_embed_config()
+        provider = (cfg.get("provider") or "local").strip().lower()
+        if provider == "api":
+            return "api:" + str(cfg.get("api_model") or "")
+        return "local:" + str(cfg.get("local_model") or "")
+    except Exception:
+        return "unknown"
+
+
+def get_embed_meta():
+    """返回 (dim, fp)。fp 缺失（旧 dim.json）时返回 None。"""
+    try:
+        with open(DIM_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return int(data["dim"]), (data.get("fp") or None)
+    except Exception:
+        return DIM, None
+
+
 def get_embed_dim():
     """当前嵌入向量维度：首次由模型输出确定并持久化，默认 512 兼容旧库。"""
-    try:
-        with open(DIM_PATH, encoding="utf-8") as fh:
-            return int(json.load(fh)["dim"])
-    except Exception:
-        return DIM
+    return get_embed_meta()[0]
 
 
-def set_embed_dim(dim):
+def set_embed_dim(dim, fp=None):
+    """写入维度 + 模型指纹。任一变化都要落盘（否则同维换模型无法被发现）。"""
     dim = int(dim)
-    try:
-        with open(DIM_PATH, encoding="utf-8") as fh:
-            if json.load(fh).get("dim") == dim:
-                return
-    except Exception:
-        pass
+    fp = fp or _embed_fingerprint()
+    cur_dim, cur_fp = get_embed_meta()
+    if cur_dim == dim and cur_fp == fp:
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(DIM_PATH, "w", encoding="utf-8") as fh:
-        json.dump({"dim": dim}, fh)
+        json.dump({"dim": dim, "fp": fp}, fh)
 
 
 def get_model():
@@ -187,7 +258,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _embed_api(texts):
-    """OpenAI 兼容 /v1/embeddings（provider=api）。"""
+    """OpenAI 兼容 /v1/embeddings（provider=api）。分批发送，避免单请求过大。"""
     cfg = get_embed_config()
     base = (cfg.get("api_base_url") or "").rstrip("/")
     key = cfg.get("api_key") or os.environ.get("EMBED_API_KEY", "")
@@ -197,27 +268,46 @@ def _embed_api(texts):
             "embedding provider=api 需要 api_base_url 与 api_key（或环境变量 EMBED_API_KEY）"
         )
     base = _validate_embedding_destination(base)
-    body = json.dumps({"model": model, "input": texts}).encode("utf-8")
-    req = urllib.request.Request(
-        base + "/embeddings",
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + key,
-        },
-    )
+    # 分批大小：env MEMBED_API_BATCH 可调（默认 32），必须是正整数
+    try:
+        batch = int(os.environ.get("MEMBED_API_BATCH", "32"))
+    except ValueError:
+        batch = 32
+    if batch <= 0:
+        batch = 32
     opener = urllib.request.build_opener(_NoRedirect)
-    with opener.open(req, timeout=60) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
     out = []
-    for item in sorted(payload["data"], key=lambda x: x.get("index", 0)):
-        out.append(np.asarray(item["embedding"], dtype=np.float32))
+    total = len(texts)
+    for start in range(0, total, batch):
+        chunk = texts[start:start + batch]
+        body = json.dumps({"model": model, "input": chunk}).encode("utf-8")
+        req = urllib.request.Request(
+            base + "/embeddings",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + key,
+            },
+        )
+        try:
+            with opener.open(req, timeout=180) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                "embedding API 第 %d 批失败（offset=%d, size=%d, total=%d）: %s"
+                % (start // batch + 1, start, len(chunk), total, e)
+            ) from e
+        items = sorted(payload.get("data") or [], key=lambda x: x.get("index", 0))
+        if len(items) != len(chunk):
+            raise RuntimeError(
+                "embedding API 返回条数不符：期望 %d，实际 %d（offset=%d）"
+                % (len(chunk), len(items), start)
+            )
+        out.extend(np.asarray(it["embedding"], dtype=np.float32) for it in items)
     if not out:
         raise RuntimeError("embedding API 返回空结果")
     return out
-
-
 def embed_texts(texts):
     texts = [str(t or "") for t in texts]
     if not texts:
@@ -229,7 +319,7 @@ def embed_texts(texts):
         model = get_model()
         vecs = [np.asarray(v, dtype=np.float32) for v in model.embed(texts)]
     if vecs:
-        set_embed_dim(vecs[0].shape[0])
+        set_embed_dim(vecs[0].shape[0], _embed_fingerprint())
     return vecs
 
 
@@ -843,8 +933,14 @@ def get_index():
             if os.path.exists(INDEX_PATH):
                 if has_dim_meta:
                     _index = faiss.read_index(INDEX_PATH)
-                    if _index.d != dim:
-                        # 嵌入维度切换（如 local→api 或模型更换）：按新维度影子重建
+                    _dim_meta, _fp_meta = get_embed_meta()
+                    _fp_now = _embed_fingerprint()
+                    if _fp_meta is None:
+                        # S02 兼容：旧 dim.json 无指纹 —— 视为匹配并补写，
+                        # 不触发全量重建（否则升级瞬间会产生 10 分钟级重建）
+                        set_embed_dim(_index.d, _fp_now)
+                    elif _index.d != dim or _fp_meta != _fp_now:
+                        # 维度或**模型身份**变化：影子重建（同维换模型也会走这里）
                         _index = None
                         _rebuild_indexes_internal()
                         _index = faiss.read_index(INDEX_PATH)
@@ -1055,11 +1151,14 @@ def normalize(vec):
 
 
 def vector_search(query_vec, k):
-    idx = get_index()
-    if idx.ntotal == 0:
-        return []
     q = np.asarray([normalize(query_vec)], dtype=np.float32)
-    scores, ids = idx.search(q, min(k, idx.ntotal))
+    # S04：FAISS mutable index 不支持与 add/remove 并发；search 必须与写入同锁。
+    # _index_lock 是 RLock，get_index() 内部再取同一把锁不会死锁。
+    with _index_lock:
+        idx = get_index()
+        if idx.ntotal == 0:
+            return []
+        scores, ids = idx.search(q, min(k, idx.ntotal))
     out = []
     seen = set()
     for i in range(len(ids[0])):
@@ -1179,9 +1278,10 @@ def apply_weighting(fused, now=None, include_archived=False):
         importance = max(0.0, min(1.0, float(r["importance"] or 0.5)))
         ref = max(float(r["created_at"] or now), float(r["last_access_at"] or 0))
         days_old = max(0.0, (now - ref) / 86400.0)
-        recency = math.exp(-DECAY_RATE * days_old)
+        # S08：使用本函数读入的配置值（此前误用全局常量，导致配置页调参不生效）
+        recency = math.exp(-decay_rate * days_old)
         norm = rrf / max_score
-        final = ALPHA * norm + BETA * importance + GAMMA * recency
+        final = alpha * norm + beta * importance + gamma * recency
         # 偏好/高重要性记忆保底：relevance 弱时不被语义不匹配淹没（用户约定、校验规则类记忆保持曝光）
         mtype = str(r["type"] or "")
         if mtype == "preference" and importance >= 0.7:
@@ -2096,9 +2196,12 @@ def set_config_values(payload):
     if changed_embedding:
         # 嵌入配置变更：清空索引缓存并删除维度元数据，
         # 下次访问按新配置自动确定维度并重建索引
-        global _index
+        global _index, _embed_model
         with _index_lock:
             _index = None
+        # S02：本地模型单例必须一并失效，否则切 local_model 后仍用旧模型编码
+        with _embed_lock:
+            _embed_model = None
         try:
             os.remove(DIM_PATH)
         except FileNotFoundError:
@@ -2261,6 +2364,9 @@ def _run_decay(decay_rate=0.01, force=False):
     for mid in archived_ids:
         conn.execute("UPDATE documents SET status='archived' WHERE id=?", (mid,))
         get_bm25().remove(mid)
+    if archived_ids:
+        # S12：自动归档同样要清 FAISS
+        _index_remove_ids(archived_ids)
     # expire atoms past their TTL
     conn.execute(
         "UPDATE atoms SET status='expired' WHERE status='active' AND expires_at>0 AND expires_at<?",
@@ -2336,7 +2442,9 @@ def _nightly_maintenance():
             if cands.get("candidates"):
                 # LLM 提炼规则（低成本模型），失败则直接按代表记忆固化
                 texts = "\n---\n".join(str(c["representative"]["content"])[:300] for c in cands["candidates"])
-                merged_ids = [r["id"] for c in cands["candidates"] for r in c["similar_ids"]]
+                # S09b：similar_ids 是整数 id 列表（见 rule_candidates 的 "similar_ids": [g["id"] ...]），
+                # 此前按字典取 r["id"] 会 TypeError
+                merged_ids = [int(mid) for c in cands["candidates"] for mid in c["similar_ids"]]
                 summary = llm_chat(
                     "以下是用户在对话中被反复确认的偏好/约定（重复出现）。请提炼为一条简洁、可执行的持久规则文本（中文，30字内）：\n" + texts,
                     system="你是记忆固化助手：输出仅规则本身，不要解释。")
@@ -2378,6 +2486,7 @@ def archive_memories(ids):
     now = time.time()
     conn = get_conn()
     done = 0
+    removed_ids = []
     for mid in ids:
         cur = conn.execute(
             "UPDATE documents SET status='archived', last_access_at=? WHERE id=? AND status='active'",
@@ -2385,9 +2494,13 @@ def archive_memories(ids):
         )
         if cur.rowcount:
             done += 1
+            removed_ids.append(int(mid))
             get_bm25().remove(int(mid))
     conn.commit()
     conn.close()
+    if removed_ids:
+        # S12：同步从 FAISS 移除，避免死向量长期占据 k*3 候选位
+        _index_remove_ids(removed_ids)
     if done:
         _bump_semantic_gen()
     return {"archived": done}
@@ -2410,6 +2523,8 @@ def restore_memory(mid):
     conn.close()
     text = " ".join(x for x in (r["content"], r["key_facts"], r["keywords"]) if x)
     get_bm25().add(r["id"], text)
+    # S12：恢复时必须补回 FAISS 向量——否则"归档→重建→恢复"后该记忆永久缺失语义召回
+    _index_add_texts([(r["id"], text)])
     _bump_semantic_gen()
     return True
 
@@ -2448,8 +2563,36 @@ def list_backups():
     return out
 
 
+def _valid_backup_name(name):
+    """S01：备份名严格白名单 + realpath 直接子目录校验（防路径穿越/符号链接逃逸）。
+
+    create_backup() 生成的格式恒为 backup-YYYYMMDD-HHMMSS，故白名单完全兼容。
+    """
+    if not name or not isinstance(name, str):
+        return False
+    if not name.startswith("backup-"):
+        return False
+    parts = name[len("backup-"):].split("-")
+    if len(parts) != 2:
+        return False
+    date_part, time_part = parts
+    if not (len(date_part) == 8 and date_part.isdigit()):
+        return False
+    if not (len(time_part) == 6 and time_part.isdigit()):
+        return False
+    try:
+        base = os.path.realpath(BACKUP_DIR)
+        target = os.path.realpath(os.path.join(BACKUP_DIR, name))
+    except Exception:
+        return False
+    return os.path.dirname(target) == base
+
+
 def restore_backup(name):
+    # S01：与删除路径同一白名单校验
     safe = os.path.basename(name)
+    if not _valid_backup_name(safe):
+        return False
     src = os.path.join(BACKUP_DIR, safe)
     if not os.path.isfile(os.path.join(src, "memory.db")):
         return False
@@ -2514,30 +2657,40 @@ def rebuild_indexes():
     return _rebuild_indexes_internal()
 
 
-def rule_candidates(min_similar=0.86, min_occur=2, limit=20):
-    """L0 固化候选（E1）：type=preference 记忆中语义相似 （重复抽取的同约定）>=min_occur 次 -> 候选。"""
+def rule_candidates(min_similar=0.86, min_occur=2, limit=20, max_scan=400):
+    """L0 固化候选（E1）：type=preference 记忆中语义相似 >=min_occur 次 -> 候选。
+
+    性能约束：一次性批量 embedding + 单次矩阵乘。
+    （原实现对每一对都调用 embed_texts，api provider 下 O(n²) 次 HTTP 必然超时；
+    max_scan 进一步约束扫描规模。）
+    """
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, content, importance, workspace_id FROM documents"
         " WHERE status='active' AND type='preference' AND COALESCE(rule_crystallized,0)=0"
-        " ORDER BY importance DESC").fetchall()
+        " ORDER BY importance DESC LIMIT ?", (int(max_scan),)).fetchall()
     conn.close()
     if not rows:
         return {"candidates": [], "note": "no preference memories"}
+    texts = [str(r["content"] or "")[:200] for r in rows]
+    vecs = embed_texts(texts)
+    if not vecs or len(vecs) != len(rows):
+        return {"candidates": [], "note": "embedding unavailable"}
+    mat = np.vstack([normalize(np.asarray(v, dtype=np.float32)) for v in vecs]).astype(np.float32)
+    sims = mat @ mat.T
     cands = []
-    for i, a in enumerate(rows):
-        va = embed_texts([str(a["content"])[:200]])
-        if not va:
+    used = set()
+    for i in range(len(rows)):
+        if i in used:
             continue
-        group = [a]
-        for b in rows[i + 1:]:
-            vb = embed_texts([str(b["content"])[:200]])
-            if not vb:
+        group = [rows[i]]
+        for j in range(i + 1, len(rows)):
+            if j in used:
                 continue
-            sim = float(np.dot(normalize(va[0]), normalize(vb[0])))
-            if sim >= min_similar:
-                group.append(b)
-        if len(group) >= min_occur:
+            if float(sims[i, j]) >= min_similar:
+                group.append(rows[j])
+                used.add(j)
+        if len(group) >= max(2, int(min_occur)):
             cands.append({
                 "representative": dict(group[0]),
                 "occurrences": len(group),
@@ -2660,6 +2813,8 @@ def consolidate_memories(similarity=None, limit_groups=None, dry_run=False):
         for g in rest:
             conn.execute("UPDATE documents SET status='archived' WHERE id=?", (g["id"],))
             get_bm25().remove(g["id"])
+        # S12：合并归档的记忆也要从 FAISS 移除
+        _index_remove_ids([g["id"] for g in rest])
         merged += len(rest)
     conn.commit()
     conn.close()
@@ -3370,7 +3525,8 @@ class Handler(BaseHTTPRequestHandler):
                             {"object": "embedding", "index": i, "embedding": v.tolist()}
                             for i, v in enumerate(vecs)
                         ],
-                        "model": "bge-small-zh-v1.5",
+                        # S16：不再硬编码旧模型名（bge-m3 迁移后曾谎报 bge-small-zh-v1.5）
+                        "model": _embed_model_label(),
                     },
                 )
             if path == "/v1/maintenance/decay":
@@ -3404,7 +3560,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/maintenance/rule-candidates":
                 body = self._read_body()
                 return self._send(200, rule_candidates(
-                    similarity=float(body.get("similarity") or 0.86),
+                    # S09a：形参名是 min_similar（此前传 similarity= 必然 TypeError 500）
+                    min_similar=float(body.get("similarity") or 0.86),
                     min_occur=int(body.get("min_occur") or 2),
                 ))
             if path == "/v1/maintenance/crystallize":
@@ -3633,9 +3790,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             path = urlparse(self.path).path
             if path.startswith("/v1/backups/"):
-                name = os.path.basename(path.rsplit("/", 1)[-1])
+                # S01：先校验名称（拒绝 ""/"."/".." 及任何越界形态），再落盘操作
+                name = path.rsplit("/", 1)[-1]
+                if not _valid_backup_name(name):
+                    return self._send(400, {"error": "invalid backup name"})
                 src = os.path.join(BACKUP_DIR, name)
-                if not name or not os.path.isdir(src):
+                if not os.path.isdir(src):
                     return self._send(404, {"error": "backup not found"})
                 shutil.rmtree(src)
                 return self._send(200, {"deleted": name})
