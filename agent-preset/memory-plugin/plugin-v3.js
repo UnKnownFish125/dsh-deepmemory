@@ -836,26 +836,102 @@ function redactSensitive(text) {
       }
     }
     // AI 任务板更新：仅明确的 tasks 输出才落盘
+    // N19 幂等：建卡前先按 workspace+session 拉已有任务，同 title 卡只做状态
+    // transition（后端状态机逐级推进），不再无条件 POST 新卡 —— 否则同一任务
+    // todo→completed 会再建一张卡，旧卡永远留在活动列表。后端无去重/唯一约束
+    // （source_message_id 仅存储），故去重必须在客户端完成。
     if (result.tasks && Array.isArray(result.tasks) && result.tasks.length) {
       try {
+        const TASK_EDGES = {
+          draft: ['planned'], planned: ['todo'], todo: ['in_progress'],
+          in_progress: ['review', 'failed'], review: ['completed', 'failed'],
+          failed: ['draft', 'todo', 'in_progress'], completed: [],
+        }
+        const taskPath = (from, to) => { // BFS 最短合法转移路径（不含起点，含终点）
+          if (from === to) return []
+          const prev = {}; prev[from] = null
+          const queue = [from]
+          while (queue.length) {
+            const cur = queue.shift()
+            for (const nxt of (TASK_EDGES[cur] || [])) {
+              if (nxt in prev) continue
+              prev[nxt] = cur
+              if (nxt === to) {
+                const path = []
+                let p = to
+                while (p !== null) { path.unshift(p); p = prev[p] }
+                return path.slice(1)
+              }
+              queue.push(nxt)
+            }
+          }
+          return null
+        }
+        const normTitle = (s) => redactSensitive(String(s || '')).trim().slice(0, 120)
+        const board = await http('GET', '/v1/v2/tasks?workspace_id=' + encodeURIComponent(resolveWorkspace(sid))
+          + '&session_id=' + encodeURIComponent(sid) + '&limit=200')
+        const existing = (board.ok && board.data && Array.isArray(board.data.tasks)) ? board.data.tasks : []
         for (const t of result.tasks.slice(0, 5)) {
-          const title = redactSensitive(String(t && t.title || '')).trim().slice(0, 120)
+          const title = normTitle(t && t.title)
           if (!title) continue
           const status = ['planned', 'todo', 'in_progress', 'completed', 'failed'].includes(t.status) ? t.status : 'todo'
-          const created = await http('POST', '/v1/v2/tasks', {
-            title: title,
-            status: status,
-            workspace_id: resolveWorkspace(sid),
-            session_id: sid,
-            description: redactSensitive(String(t.description || '')).slice(0, 500),
-            blocked: status === 'in_progress' ? Boolean(t.blocked) : false,
-            block_reason: redactSensitive(String(t.reason || t.block_reason || '')),
-          })
-          if (created.ok) {
-            console.log('[deepmemory] AI task created: ' + title + ' [' + status + ']')
-          } else {
-            console.log('[deepmemory] AI task create failed: ' + (created.error || 'unknown'))
+          const reason = redactSensitive(String(t.reason || t.block_reason || '')).slice(0, 200)
+          const matched = existing.find((x) => x && normTitle(x.title) === title)
+          if (!matched) {
+            const created = await http('POST', '/v1/v2/tasks', {
+              title: title,
+              status: status,
+              workspace_id: resolveWorkspace(sid),
+              session_id: sid,
+              description: redactSensitive(String(t.description || '')).slice(0, 500),
+              blocked: status === 'in_progress' ? Boolean(t.blocked) : false,
+              block_reason: reason,
+            })
+            if (created.ok) {
+              console.log('[deepmemory] AI task created: ' + title + ' [' + status + ']')
+            } else {
+              console.log('[deepmemory] AI task create failed: ' + (created.error || 'unknown'))
+            }
+            continue
           }
+          // 已有同 title 卡：completed 是吸收态、状态未变则跳过（幂等）
+          if (matched.status === 'completed' || matched.status === status) {
+            console.log('[deepmemory] AI task exists: ' + title + ' [' + matched.status + ']')
+            continue
+          }
+          const path = taskPath(String(matched.status), status)
+          if (!path) {
+            console.log('[deepmemory] AI task no path: ' + matched.status + '->' + status + ' for ' + title)
+            continue
+          }
+          let cur = matched
+          // blocked 卡要关闭（completed/failed）必须先解锁（后端约束）
+          if (cur.blocked && (status === 'completed' || status === 'failed')) {
+            const un = await http('POST', '/v1/v2/tasks/' + encodeURIComponent(cur.id) + '/blocked', {
+              blocked: false, expected_version: Number(cur.version || 1),
+            })
+            if (!(un.ok && un.data && un.data.task)) {
+              console.log('[deepmemory] AI task unblock failed: ' + (un.error || 'unknown'))
+              continue
+            }
+            cur = un.data.task
+          }
+          let moved = true
+          for (const stepTo of path) {
+            const tr = await http('POST', '/v1/v2/tasks/' + encodeURIComponent(cur.id) + '/transition', {
+              to_status: stepTo,
+              expected_version: Number(cur.version || 1),
+              reason: reason || ('progress to ' + stepTo),
+              actor: 'main_agent',
+            })
+            if (!(tr.ok && tr.data && tr.data.task)) {
+              moved = false
+              console.log('[deepmemory] AI task transition ' + stepTo + ' failed: ' + (tr.error || 'unknown'))
+              break
+            }
+            cur = tr.data.task
+          }
+          if (moved) console.log('[deepmemory] AI task updated: ' + title + ' [' + matched.status + ' -> ' + cur.status + ']')
         }
       } catch (e) {
         console.log('[deepmemory] AI tasks write failed: ' + String(e))
