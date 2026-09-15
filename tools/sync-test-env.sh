@@ -57,6 +57,35 @@ for d in nm.iterdir():
         if d.name not in pb: pb.append(d.name)
 out={"name":prod.get("name","dsh-profile-web"),"private":True,"dependencies":pd,
      "dsh":{"profile":{"bundles":pb}}, **({k:v for k,v in prod.items() if k not in ("dependencies","dsh","name","private")})}
+# ── 收尾守卫（2026-09-15 事故修复）────────────────────────────────
+# 事故：生产 bundles 里的 dsh-better-sidebar / dsh-video-preview 被直接带进测试机 bundles，
+# 但测试机并未安装；同时"自愈"分支把无 dsh.bundle 声明的插件（dsh-reasoning-guard /
+# dsh-anysearch）也塞进 bundles → dsh-app-boot 报 "cannot resolve profile bundle" 或
+# "declares no dsh.bundle" → 测试机完全起不来。
+# 守卫规则：bundle 必须「可解析」且「声明了 dsh.bundle」；deps 必须可解析；写盘前备份。
+import pathlib as _pl, shutil as _sh, time as _time
+_nm = _pl.Path("/www/dsh-test-home/profiles/web/node_modules")
+def _bundle_ok(name):
+    if str(name).startswith("@deepseek-ai/"):
+        return True                     # 官方基础 bundle 由安装根解析，不在 profile node_modules 下
+    p = _nm / str(name) / "package.json"
+    if not p.exists():
+        return False
+    try:
+        return bool((json.load(open(p, encoding="utf-8")).get("dsh") or {}).get("bundle"))
+    except Exception:
+        return False
+_dropped = [b for b in pb if not _bundle_ok(b)]
+pb = [b for b in pb if _bundle_ok(b)]
+_dep_dropped = [k for k in pd if not (str(k).startswith("@deepseek-ai/") or (_nm / str(k)).exists())]
+for _k in _dep_dropped:
+    pd.pop(_k, None)
+if _dropped or _dep_dropped:
+    print("  守卫剔除 → bundle:", _dropped, "| deps:", _dep_dropped)
+try:
+    _sh.copy2("$TEST_PK", "$TEST_PK.bak-sync-" + _time.strftime("%Y%m%d-%H%M%S"))
+except Exception:
+    pass
 json.dump(out,open("$TEST_PK","w",encoding="utf-8"),ensure_ascii=False,indent=2)
 print("deps:",sorted(pd.keys()))
 PYEOF
