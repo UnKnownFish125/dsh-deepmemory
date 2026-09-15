@@ -708,11 +708,22 @@ function redactSensitive(text) {
     if (!sid || !(await isEnabled(sid))) return
     const bucket = buckets.get(sid)
     if (!bucket || bucket.length < EXTRACT_THRESHOLD) return
-    buckets.delete(sid)
-    const dialog = bucket.map((m) => (m.role === 'user' ? '用户: ' : '助手: ') + m.text).join('\n')
-    console.log('[deepmemory] extracting from ' + bucket.length + ' messages...')
+    // N09：原实现在 LLM 调用前就 buckets.delete(sid)，抽取超时/解析失败直接 return
+    // → 整桶消息永久丢失。改为「抽取成功后」才消费本批消息，失败保留桶等下一轮重试。
+    const batch = bucket.slice()
+    const dialog = batch.map((m) => (m.role === 'user' ? '用户: ' : '助手: ') + m.text).join('\n')
+    console.log('[deepmemory] extracting from ' + batch.length + ' messages...')
     const result = await extract(dialog, payload.signal)
-    if (!result) return
+    if (!result) {
+      console.error('[deepmemory] extract failed; keep bucket for retry (' + batch.length + ' messages)')
+      return
+    }
+    // 抽取成功：只消费本批消息；抽取期间新入桶的消息保留，下一轮再抽
+    if (buckets.get(sid) === bucket) {
+      const rest = bucket.filter((m) => batch.indexOf(m) < 0)
+      if (rest.length) buckets.set(sid, rest)
+      else buckets.delete(sid)
+    }
     let memoryChanged = false
     // N10：原实现只查 .length —— {"memories":"x"} 是合法 JSON，字符串有 length 却没有
     // .filter，会抛 TypeError；本代码在 agent/turn-stopping 里运行，异常会把已生成回答的
@@ -746,9 +757,23 @@ function redactSensitive(text) {
       if (items.length) {
         const res = await http('POST', '/v1/memories/add_batch', { items: items })
         if (res.ok) {
-          memoryChanged = true
-          state.extractCount += items.length
-          console.log('[deepmemory] extracted ' + items.length + ' memories (total ' + state.extractCount + '): ' + JSON.stringify((res.data && res.data.added) || []).slice(0, 400))
+          // N09：add_batch 即使 HTTP 200，也会在 added 数组里逐项返回 error（见 server.py add_batch）。
+          // 原实现按 items.length 全计成功 → 部分写失败被宣告成功。这里逐项核对，只计真正成功的条目。
+          const added = res.data && Array.isArray(res.data.added) ? res.data.added : null
+          if (!added) {
+            console.log('[deepmemory] extracted 0/' + items.length + ' memories (unexpected add_batch response shape)')
+          } else {
+            const failed = added.filter((x) => x && x.error)
+            const okCount = added.length - failed.length
+            state.extractCount += okCount
+            if (okCount > 0) memoryChanged = true
+            // 只打数量与错误摘要，不打记忆正文
+            console.log('[deepmemory] extracted ' + okCount + '/' + items.length + ' memories (total ' + state.extractCount + ')'
+              + (failed.length ? '; failed=' + failed.length + ' firstError=' + JSON.stringify(String((failed[0] && failed[0].error) || '').slice(0, 120)) : ''))
+            if (failed.length) {
+              console.error('[deepmemory] add_batch partial failure: ' + failed.length + '/' + added.length + ' items rejected (session ' + sid.slice(0, 12) + ', ' + items.length + ' sent)')
+            }
+          }
         }
       }
     }
@@ -757,14 +782,45 @@ function redactSensitive(text) {
       try {
         const cur = await http('GET', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid))
         const existing = cur.ok && cur.data && cur.data.card ? cur.data.card : null
+        // N08：原实现只用了旧卡的 version，payload 里没出现的字段被写成空串/[]，
+        // 会清空旧的目标/方案/决定（模型只给出 next_steps 这类合法增量时尤其致命）。
+        // 这里区分「字段缺省」与「显式给出」：缺省/null/空值/类型不符 → 保留旧值。
+        const oldPayload = (existing && existing.payload) || {}
+        const keepStr = (k) => redactSensitive(String(oldPayload[k] || ''))
+        const keepArr = (k) => Array.isArray(oldPayload[k])
+          ? oldPayload[k].slice(0, 4).map((x) => redactSensitive(String(x)).trim()).filter(Boolean)
+          : []
+        const pickStr = (k) => {
+          const v = result.card[k]
+          if (typeof v !== 'string' && typeof v !== 'number') return keepStr(k)
+          const s = redactSensitive(String(v)).trim()
+          return s ? s : keepStr(k)
+        }
+        const pickArr = (k) => {
+          const v = result.card[k]
+          if (!Array.isArray(v)) return keepArr(k)
+          const clean = v.slice(0, 4).map((x) => redactSensitive(String(x)).trim()).filter(Boolean)
+          return clean.length ? clean : keepArr(k)
+        }
+        // key_decisions 的提示词语义是「追加新决定」：与旧卡合并去重，保留最近 4 条
+        const pickDecisions = () => {
+          const v = result.card.key_decisions
+          const incoming = Array.isArray(v) ? v : []
+          const merged = []
+          for (const x of keepArr('key_decisions').concat(incoming)) {
+            const s = redactSensitive(String(x)).trim()
+            if (s && merged.indexOf(s) < 0) merged.push(s)
+          }
+          return merged.slice(-4)
+        }
         const put = await http('PUT', '/v1/v2/cards/' + CARD_KIND + '/' + encodeURIComponent(sid), {
           expected_version: existing ? Number(existing.version || 0) : 0,
           payload: {
-            goal: redactSensitive(String(result.card.goal || '')),
-            current_plan: redactSensitive(String(result.card.current_plan || '')),
-            key_decisions: Array.isArray(result.card.key_decisions) ? result.card.key_decisions.slice(0, 4).map((x)=>redactSensitive(String(x))) : [],
-            in_progress: Array.isArray(result.card.in_progress) ? result.card.in_progress.slice(0, 4).map((x)=>redactSensitive(String(x))) : [],
-            next_steps: Array.isArray(result.card.next_steps) ? result.card.next_steps.slice(0, 4).map((x)=>redactSensitive(String(x))) : [],
+            goal: pickStr('goal'),
+            current_plan: pickStr('current_plan'),
+            key_decisions: pickDecisions(),
+            in_progress: pickArr('in_progress'),
+            next_steps: pickArr('next_steps'),
           },
           actor: 'main_agent',
           reason: 'AI turn-stopping state card sync',
