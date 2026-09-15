@@ -15,7 +15,46 @@
 //  - daily importance decay with access reinforcement (server-side)
 
 import fs from 'node:fs'
-import { defineTool } from '/usr/local/node/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tools/lib/index.js'
+import { createRequire } from 'node:module'
+
+// N25：不再用硬编码绝对路径 **静态** import dsh-tools——静态解析失败会让整个 preset
+// 加载失败（换机 / DSH 升级 / 清理旧安装 / 换安装根都会触发），届时所有会话的记忆注入
+// 与抽取一起失效。改为多候选解析，并允许降级为"工具不可用、其余功能正常"。
+const TOOLS_MODULE_CANDIDATES = [
+  '/usr/local/node/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tools/lib/index.js',
+]
+try {
+  // 从正在运行的 dsh 入口推导同构路径：process.argv[1] ≈ .../@deepseek-ai/dsh/lib/bin.js
+  const bin = String(process.argv[1] || '')
+  const m = bin.match(/^(.*)[/\\]lib[/\\]bin\.js$/)
+  if (m && m[1]) TOOLS_MODULE_CANDIDATES.push(m[1] + '/node_modules/@deepseek-ai/dsh-tools/lib/index.js')
+} catch (e) { /* 推导失败无妨 */ }
+try {
+  const req = createRequire(import.meta.url)
+  TOOLS_MODULE_CANDIDATES.push(req.resolve('@deepseek-ai/dsh-tools'))
+} catch (e) { /* 包解析不可用无妨 */ }
+
+let defineTool = null
+let defineToolSource = ''
+for (const spec of TOOLS_MODULE_CANDIDATES) {
+  try {
+    const mod = await import(spec)
+    if (mod && typeof mod.defineTool === 'function') {
+      defineTool = mod.defineTool
+      defineToolSource = spec
+      break
+    }
+  } catch (e) { /* 试下一个候选 */ }
+}
+if (!defineTool) {
+  console.warn('[deepmemory] N25: dsh-tools 解析失败（已尝试 ' + TOOLS_MODULE_CANDIDATES.length
+    + ' 个候选）：memory_recall / memory_save / memory_briefing 工具将不可用；'
+    + '记忆注入、抽取与状态卡不受影响。请检查 DSH 安装根。候选：'
+    + JSON.stringify(TOOLS_MODULE_CANDIDATES))
+  defineTool = function degraded(spec) {
+    return Object.assign({}, spec || {}, { __degraded: true })
+  }
+}
 
 export const name = 'deepmemory'
 
@@ -881,9 +920,10 @@ function redactSensitive(text) {
     },
   })
 
-  ctx.effect(() => ctx.tools.register(recallTool))
-  ctx.effect(() => ctx.tools.register(saveTool))
-  ctx.effect(() => ctx.tools.register(briefingTool))
+  // N25：降级时（dsh-tools 不可用）跳过注册，避免注册非法定义导致 preset 抛错
+  if (!recallTool.__degraded) ctx.effect(() => ctx.tools.register(recallTool))
+  if (!saveTool.__degraded) ctx.effect(() => ctx.tools.register(saveTool))
+  if (!briefingTool.__degraded) ctx.effect(() => ctx.tools.register(briefingTool))
 
   loadConfig().then(() => console.log('[deepmemory] ready (preset plugin P2: relations + cross-turn query + graph route)'))
 }

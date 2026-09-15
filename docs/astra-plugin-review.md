@@ -54,6 +54,7 @@
 | N24 preset 把未验证的模型输出写进 journal | 同上 | 改为只记长度/结构诊断（`hasOpenBrace`/`firstChar`/错误类型），不落正文 |
 | N12 Host 代理上游中断无终止处理 | 同上 | `upRes` error/aborted → destroy 下游；`res` close → destroy upstream；error 分支区分 `headersSent` |
 | N13 Host 备用召回未用会话归属解析 | `patch_host_n13_workspace.py` | 在 Host 内实现与 preset 相同的解析（读 `storages/workspace.json` 的 `tables.workspaces[*].sessionIds`）；实测样本会话真实归属为 workspace UUID，而旧逻辑返回 `deepseek-harness` 兜底串 —— **两者不同**，确认修复消除了"其他工作区经 Host 备用召回检索为空/串区"；三处副本一致 + `node --check` |
+| N25 preset 硬编码绝对路径 import `dsh-tools` | `patch_preset_n25_tools_import.py` | 原为静态 import 硬编码 `/usr/local/node/lib/node_modules/…` —— 换机/升级/换安装根会让**整个 preset 加载失败**（所有会话记忆功能一起失效）。改为多候选解析（硬编码路径 + 从 `process.argv[1]` 推导 + `createRequire` 包解析），全失败时降级为"工具不可用、注入/抽取照常"并打印排查提示。四步 preflight 全过：`.mjs` 语法、ESM 冒烟、重启 active、**建会话 `ok:true`**、无降级警告；三处副本 md5 一致 |
 
 ### ✅ 已修（仅仓库 P1；生产未部署该特性，故无需上线）
 
