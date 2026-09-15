@@ -246,3 +246,18 @@ cat /www/deepmemory-v063-deploy/memory-server/data/dim.json   # 期望 {"dim":10
 ### 11.4 `/mem-api/*` 是泛代理（P1 上生产后的新增暴露面）
 Host 插件把 `/mem-api/*` 无条件转发到 memory-server：任意 method + path，**自动注入 token、去掉 Origin**（`index.js:717-736`）。P1 上线后 `POST /mem-api/v1/assertions/<id>/{promote,revoke}` 从 web 同源可达，且 `origin_id` 由调用方给定 → 持 token 者可自导自演"两个 origin 确认"触发 auto-adopt，或 revoke 使某条记忆从 `mode=current` 召回中消失。
 **当前无消费方调用**（preset/Host/client 的 `assertion` 引用计数均为 0），属"上线后新增"而非现存漏洞。
+
+---
+
+## 十二、N01 过滤逻辑的独立验证（最高风险项，已排除）
+
+N01 的修复是「跳过 `source.kind` 存在且 ≠ `'user'` 的输入」，目的在切断"注入的记忆被当作用户输入再抽取回库"的自污染循环。**但它有误伤风险**：若真实用户消息的 `source.kind` 不是 `'user'`，就会导致**记忆完全不抽取** —— 比原缺陷更严重。已独立验证：
+
+| 消息来源 | 构造点 | `source` | 过滤后的行为 |
+|---|---|---|---|
+| **合成 runtime context**（assemble 时注入的记忆） | `dsh-agent-loop` 的 `project()`（`lib/index.js:340-352`） | `{ kind: "plugin", plugin: SOURCE }`（sections 非空时另带 `form:"snapshot", sections`） | ✅ **正确跳过**（这正是要切断的自污染路径） |
+| **真实用户输入** | `dsh-acp/lib/index.js:833` | `{ kind: "user" }` | ✅ **正常处理**（`kind !== 'user'` 为 false） |
+| 无 `source` 字段的消息 | — | 无 | ✅ **不过滤**（`_src` 为 null）—— 保守设计，宁可多抽也不误杀 |
+
+判定条件：`if (_src && _src.kind && _src.kind !== 'user') return`
+**结论：N01 不会误伤真实用户消息**；且对"没有 source"的消息采取放行策略，不存在"静默全不抽取"的失败模式。
