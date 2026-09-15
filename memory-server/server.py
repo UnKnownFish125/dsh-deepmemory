@@ -2257,10 +2257,14 @@ def _is_secret_config_key(key):
     """
     if key in SECRET_CONFIG_KEYS:
         return True
-    if isinstance(key, str) and key.startswith("session."):
-        parts = key.split(".", 2)
-        if len(parts) == 3 and parts[2] in SECRET_CONFIG_KEYS:
-            return True
+    if isinstance(key, str):
+        # S14b：会话级键形如 session.<sid>.<secret>，而 sid 本身可能含点，
+        # split(".", 2) 会错位导致漏屏蔽 → 改为按「以 .<secret> 结尾」判定
+        # （对抗性复核实测：session_id="a.b" 时原实现可回显 embedding.api_key）
+        if key.startswith("session."):
+            for _secret in SECRET_CONFIG_KEYS:
+                if key.endswith("." + _secret):
+                    return True
     return False
 
 
