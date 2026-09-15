@@ -58,6 +58,9 @@
 | N10 抽取结果只 `JSON.parse` 不校验结构 | `patch_preset_n10_schema.py` | 复核后收窄：`result.tasks` / `result.card` **原本就有** `Array.isArray` / `typeof` 守卫，**唯一缺口**是 `result.memories` ——`{"memories":"x"}` 是合法 JSON，字符串有 `.length` 却没有 `.filter` → TypeError；该代码在 `agent/turn-stopping` 里，异常会把**已生成回答的回合**标成 error。改为 `Array.isArray` + `content` 非空字符串校验。四步 preflight 全过 |
 | N18（Host 侧）两个 LLM 流无超时/取消 | `patch_host_n18_timeout.py` | Host 的 `summarizeGroup()`（整合摘要）与 `extractSessionCard()`（状态卡提取）直接 `llm.stream({...})`，**完全没有 signal** —— 上游卡住时 `agent/turn-stopping` 会无限期挂住。加 `hostTimeoutSignal(60s)` 并给两处流传 signal（preset 侧同类调用早已有 `AbortSignal.any([signal, timeout(45s)])`，此处是补齐纪律）。三处副本 md5 一致 + `node --check` + 测试机重启 active 无错误 |
 | N11 Host 抽取绕过脱敏（凭据原值出网） | `patch_host_n11_redact.py` | Host 把**原始对话文本**直接送 LLM（`extractSessionCard` 的 dialog 来自真实消息、`summarizeGroup` 的正文拼 12000 字符），而 Host **完全没有**脱敏函数；preset 对应路径是显式 `redactSensitive(dialog)`。存储端脱敏无法撤销**已发生的出网**。修复：把 preset 同源的 `redactSensitive`（10 条规则）复制进 Host，并在两个出网点脱敏。**功能自测通过**：`token:`→`[REDACTED:<secret>]`、`Bearer sk-`→`[REDACTED:api-key]`、`password:`→`[REDACTED:<secret>]`；三处副本一致 + 测试机 active |
+| N07 Host 读 0.1.5 已移除的 `session.events` | `patch_host_n07_session_api.py` | 0.1.5 的 Session **无 `events` getter**（只有 `snapshotEvents()`），另有一处走 `sessionPersistence.inspect`（0.1.5 无此方法）→ **Host 5 轮状态卡 cadence 从未执行**（实测 6 小时 journal 中 Host 侧 cadence 日志 0 条）。修复：新增 `sessionEventList()` 统一封装 —— `snapshotEvents()` 优先、`session.events` 仅旧版回退、**全程 try/catch 返回空数组**（该代码在 `agent/turn-stopping`，抛错会炸回合）。三处 md5 `b48dc77d…` 一致 + `node --check` + 测试机重启无错误。⚠️ cadence 端到端需真实 5 轮对话，测试机无活跃会话，**未端到端验证** |
+| N08 写卡整包替换清空旧字段 | `patch_preset_n08_n09.py` | preset 只 GET 旧卡取 `version`，payload 五字段一律 `String(x\|\|'')`/非数组→`[]`；而服务端 `put_state_card` 是**整包替换**（`v2_domain.py:1220-1223`）。**live 实证**（测试后端 6240）：全字段写入后按"只给 next_steps"的增量 PUT → GET 只剩 `{"next_steps":["n2"]}`，goal/方案/决定**全部消失**；提示词规则 7 却写"增量更新、追加" → 声称与行为不符。修复：区分「字段缺省」与「显式给出」（缺省/空值/类型不符一律保留旧值），`key_decisions` 追加合并去重保留最近 4 条 |
+| N09 抽取先丢队列 / 200 即全成功 | 同上 | (a) `buckets.delete(sid)` 在 `await extract()` **之前**，而 `extract` 在流失败/无 JSON/解析失败时均 `return null` → **整桶永久丢失**；改为抽取成功后才消费本批（保留抽取期间新入桶的消息，失败保留桶待重试）。(b) 只看 `res.ok` 就按 `items.length` 计数；**live 实证**：混入一条 `library:"bogus"` → HTTP 200 但 `added` 里带 `{"error":…}`；改为逐项核对只计成功项，失败仅打数量与前 120 字错误摘要（并删除原来打印 added 正文的日志）。三处 md5 `66340d07…` 一致；单测 N08 6 例 / N09a 4 例 / N09b 3 例全通过 |
 
 ### ✅ 已修（仅仓库 P1；生产未部署该特性，故无需上线）
 
@@ -75,7 +78,7 @@
 | **N17 会话级配置多数不被 preset 消费** | 正解是把 preset 的**模块级配置变量**改为按会话解析（避免跨会话污染）。属核心链路重构，改动面覆盖 assemble/抽取/工具注册，草率改会重演「liangshen 事故」（核心链路被改坏 → 所有会话每回合报错）。**必须有完整上下文与专门验证窗口**。 |
 | S05 部署漂移合并 | **反向漂移已消除**（2026-09-15）：仓库与测试机已吸收生产的 `llm_chat` 改动 —— `https://api.deepseek.com/v1`、`deepseek-v4-flash`、`DEEPSEEK_API_KEY`，并清除已除名的促销 ID `deepseek-v4-flash-0731`（见 `patch_server_s05_llmchat_align.py`）；三处副本的 URL 差异清零、配置键差异为零。**仅剩正向决策**：仓库的 P1（含已修的 S06/S07）是否上生产 —— 需拍板；上生产须走完整测试机 preflight + 一次 memory-server 重启 |
 | S18 `add_batch` 非原子 | **判定为设计选择**：`/v1/memories/add_batch` 的契约是"尽量写入 + 逐项返回结果"（`server.py:1581-1591` 会在 HTTP 200 的 `added` 数组里逐项给出 error），调用方（preset `674-678`）据此处理部分失败。改成事务/outbox 会改变对外协议，风险大于收益，故不修；如需强原子应新增独立端点。 |
-| N07 Host `session.events` 兼容 / N08 写卡全量覆盖 / N09 队列丢失 / N11 Host 抽取绕过脱敏 / N18 无 deadline / N19 任务卡重复 | 按 ROI 排期（N10/N12/N13/N23/N24/N25 已完成，见上表） |
+| N19 任务卡幂等 | **剩余唯一排期项**。其余同类项均已完成（N07/N08/N09/N10/N11/N12/N13/N18/N23/N24/N25，见上表）。N19 需要跨端改动（后端 tasks API 加幂等键 + preset 调用方），尚未开始 |
 
 ### 流程事故与修复（非 astra 报告项）
 
