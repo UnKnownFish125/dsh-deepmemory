@@ -476,3 +476,23 @@ for lbl,p in (('PROD','/www/deepmemory-v063-deploy/memory-server/data/memory.db'
 | 身份/输入 | 断言不存在 → `None`（→404）；非法 kind → ValueError（→400）；空 `origin_id` 回落服务端主体并同源去重；`actor` 恒为 `dsh-user`（伪造 `user_id`/`confirmed`/`actor` 均无效）；`_bump_semantic_gen` 每次成功写入恰好 +1（重复事件不递增） |
 
 > 说明：`_record_assertion_event` / `_promote_assertion` 抛出的 `ValueError` 在 `do_POST` 的 `except (ValueError, json.JSONDecodeError)`（`server.py:3897`）里映射为 **HTTP 400**，因此「确认已撤销断言」「promote 不足 2 条」在线上表现为 400 而非 500；`int(aparts[2])` 的非数字 id 同样落这个分支（实测 `/v1/assertions/abc/events` → 400，非 500）。
+
+---
+
+## 附：主 agent 复核 —— C1 已补做（真实 HTTP 端到端）
+
+本文档 §① 指出「测试库 `assertion_events` = 0 行 → 该链路从未被真实调用过，只有路由存在性证据 + 内存态状态机验证」。**主 agent 随后在测试机 6240 上用真实 HTTP 补齐了 C1**（真实服务进程 + 真实 SQLite）：
+
+| 步骤 | 请求 | 服务端实际响应 |
+|---|---|---|
+| 1 | `POST /v1/assertions/1/events {kind:confirm, origin_id:probe-a}` | `status:"unverified"`, `adopted:false`, `confirm_origins:1` |
+| 2 | 同上但 `origin_id:probe-b`（不同源） | **`status:"adopted"`, `adopted:true`, `confirm_origins:2`** ← 状态机核心成立 |
+| 3 | 重复 `origin_id:probe-a` | `duplicate:true`, `event:null`，未重复计数 ← UNIQUE 约束生效 |
+| 4 | `POST /v1/assertions/1/revoke` | `status:"revoked"` + 事件落库 |
+| 5 | 撤销后再 confirm（`origin_id:probe-c`） | **HTTP 400** `"assertion is revoked; cannot confirm a revoked/superseded assertion（撤销不复活）"` ← **S07 核心保护真实生效** |
+| 6 | 库内核对 | 状态 `revoked`；事件 3 条（confirm×2 不同源 + revoke×1） |
+
+**结论**：三条主路径（2 源晋升 / 同源幂等 / 撤销保护）在**真实服务**上验证通过，C1 缺口已补齐。
+**测试数据已清理**：删除 3 条测试事件、断言 `id=1` 恢复 `unverified`、`assertion_events` 回到 0 行。
+
+**仍未覆盖**：`POST /promote` 路径（本次未单独打，但同一函数族、且其门禁已在内存态覆盖）；`/mem-api` 泛代理下的可达性（属 dsh-web 侧改动，需重启窗口）。
