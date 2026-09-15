@@ -115,8 +115,29 @@ function hostTimeoutSignal(ms) {
   return undefined
 }
 
+// N11：与 preset 同源的敏感信息脱敏。Host 原先直接送原始对话给 LLM，
+// 对话含凭据时会原值出网（存储端脱敏无法撤销已发生的出网）。
+function redactSensitive(text) {
+  if (typeof text !== 'string' || !text) return text || ''
+  let out = text
+  const replacers = [
+    [/gh[pousr]_[A-Za-z0-9_]{20,}/g, '[REDACTED:git-token]'],
+    [/github_pat_[A-Za-z0-9_]{20,}/g, '[REDACTED:git-token]'],
+    [/sk-[A-Za-z0-9_-]{16,}/g, '[REDACTED:api-key]'],
+    [/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED:api-key]'],
+    [/AKIA[0-9A-Z]{16}/g, '[REDACTED:aws-key]'],
+    [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED:jwt]'],
+    [/((?:token|key|secret|password|passwd|pwd)\s*[:=]\s*)[^\s;,}\]]+/gi, '$1[REDACTED:<secret>]'],
+    [/\b(Bearer\s+)[A-Za-z0-9._~+\/=-]{12,}/gi, '$1[REDACTED:<token>]'],
+    [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED:private-key]'],
+  ]
+  for (const [re, replacement] of replacers) out = out.replace(re, replacement)
+  return out
+}
+
 async function summarizeGroup(llm, route, group) {
-  const source = [group.primary_content].concat(group.contents || []).filter(Boolean)
+  // N11：整合摘要同样是出网调用，正文先脱敏
+  const source = [group.primary_content].concat(group.contents || []).filter(Boolean).map((x) => redactSensitive(String(x)))
   let output = ''
   const stream = llm.stream({
     provider: route.provider,
@@ -138,6 +159,8 @@ async function summarizeGroup(llm, route, group) {
 
 async function extractSessionCard(llm, dialog, existingCard, route = null) {
   const r = route || await resolveModelRoute(llm, {})
+  // N11：出网前统一脱敏（原实现把真实对话原样送模型；preset 对应路径为 redactSensitive(dialog)）
+  dialog = redactSensitive(String(dialog || ''))
   let lastError = ''
   for (let attempt = 0; attempt < 2; attempt++) {
     let output = ''
