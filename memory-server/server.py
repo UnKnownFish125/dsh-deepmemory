@@ -607,6 +607,10 @@ def run_migrations():
     # 需在 install_v2_schema（补齐 documents.disputed 列）后执行；幂等（NOT EXISTS 防重复）。
     # P0 只为"已有 disputed"建断言；其余存量记忆不自动生成断言（详见语义模型 P0 范围）。
     _migrate_legacy_disputed_assertions(conn)
+    # S06：清理孤儿 assertion_events（历史版本删断言时漏删的）。
+    # assertions.id 是可复用的 INTEGER PRIMARY KEY，孤儿事件会让复用同一 id 的
+    # 新断言继承旧主体的确认计数（_count_confirm_origins_on 按 assertion_id 统计）。
+    _purge_orphan_assertion_events(conn)
     conn.execute(
         "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?,?)",
         (V2_SCHEMA_VERSION, time.time()),
@@ -615,6 +619,26 @@ def run_migrations():
     if current < V2_SCHEMA_VERSION:
         print(f"migration: schema v{V2_SCHEMA_VERSION} 已应用", flush=True)
     conn.close()
+
+
+def _purge_orphan_assertion_events(conn):
+    """S06：清理孤儿 assertion_events（其 assertion_id 已不存在）。
+
+    删除断言时若漏删事件、或历史版本留存的孤儿，都会让后续复用同一 id 的新断言
+    "继承"旧确认（_count_confirm_origins_on 按 assertion_id 计数）。幂等，可在启动时安全执行。
+    """
+    try:
+        cur = conn.execute(
+            "DELETE FROM assertion_events WHERE assertion_id NOT IN (SELECT id FROM assertions)"
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0
 
 
 def _migrate_legacy_disputed_assertions(conn):
@@ -812,6 +836,11 @@ def _record_assertion_event(assertion_id, kind, body=None, note=None):
     now = time.time()
     conn = get_conn()
     try:
+        # S07：首次读之前取写锁，避免「读校验 → 并发 revoke 提交 → 按旧状态 UPDATE」复活断言
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            pass
         a = conn.execute(
             "SELECT id, memory_id, status, conflict_group FROM assertions WHERE id=?",
             (int(assertion_id),),
@@ -849,13 +878,32 @@ def _record_assertion_event(assertion_id, kind, body=None, note=None):
         if kind == "confirm":
             cnt = _count_confirm_origins_on(conn, a["id"])
             if cnt >= 2 and a_status in ("unverified", "candidate"):
-                new_status = "adopted"
-                adopted = True
-                conn.execute("UPDATE assertions SET status='adopted' WHERE id=?", (a["id"],))
+                # S07：状态 CAS —— 只有当前状态仍是我们读到的那个才晋升
+                _cur = conn.execute(
+                    "UPDATE assertions SET status='adopted' WHERE id=? AND status=?",
+                    (a["id"], a_status),
+                )
+                if _cur.rowcount:
+                    new_status = "adopted"
+                    adopted = True
+                else:
+                    _row = conn.execute(
+                        "SELECT status FROM assertions WHERE id=?", (a["id"],)
+                    ).fetchone()
+                    new_status = _row["status"] if _row else a_status
+                    if new_status in ("revoked", "superseded"):
+                        raise ValueError(
+                            "assertion is %s; cannot confirm a revoked/superseded assertion"
+                            "（并发撤销，已放弃晋升）" % new_status
+                        )
         elif kind == "revoke":
             if a_status != "revoked":
-                new_status = "revoked"
-                conn.execute("UPDATE assertions SET status='revoked' WHERE id=?", (a["id"],))
+                _cur = conn.execute(
+                    "UPDATE assertions SET status='revoked' WHERE id=? AND status=?",
+                    (a["id"], a_status),
+                )
+                if _cur.rowcount:
+                    new_status = "revoked"
         conn.commit()
     finally:
         conn.close()
@@ -882,6 +930,11 @@ def _promote_assertion(assertion_id, body=None, note=None):
     now = time.time()
     conn = get_conn()
     try:
+        # S07：同 _record_assertion_event——首次读之前取写锁
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            pass
         a = conn.execute(
             "SELECT id, memory_id, status FROM assertions WHERE id=?",
             (int(assertion_id),),
@@ -910,8 +963,23 @@ def _promote_assertion(assertion_id, body=None, note=None):
         event_id = cur.lastrowid
         promoted = False
         if a_status != "adopted":
-            promoted = True
-            conn.execute("UPDATE assertions SET status='adopted' WHERE id=?", (a["id"],))
+            # S07：状态 CAS（防止并发 revoke 后被 promote 复活）
+            _cur = conn.execute(
+                "UPDATE assertions SET status='adopted' WHERE id=? AND status=?",
+                (a["id"], a_status),
+            )
+            if _cur.rowcount:
+                promoted = True
+            else:
+                _row = conn.execute(
+                    "SELECT status FROM assertions WHERE id=?", (a["id"],)
+                ).fetchone()
+                _now_status = _row["status"] if _row else a_status
+                if _now_status in ("revoked", "superseded"):
+                    raise ValueError(
+                        "assertion is %s; cannot promote a revoked/superseded assertion"
+                        "（并发撤销，已放弃晋升）" % _now_status
+                    )
         conn.commit()
     finally:
         conn.close()
@@ -1820,6 +1888,14 @@ def delete_memory(doc_id):
     conn.execute("DELETE FROM atoms WHERE memory_id=?", (doc_id,))
     conn.execute("DELETE FROM graph_edges WHERE memory_id=?", (doc_id,))
     # v0.4 P0：同步清理该记忆的断言（避免孤儿 assertion 残留）。
+    # S06：本函数在 FK 关闭的窗口内删断言，若不显式删事件会留下孤儿
+    # （assertion_events.assertion_id 不再存在）；断言 id 是可复用的 INTEGER PRIMARY KEY，
+    # 新断言一旦复用该 id 就会继承旧主体的确认事件。
+    conn.execute(
+        "DELETE FROM assertion_events WHERE assertion_id IN"
+        " (SELECT id FROM assertions WHERE memory_id=?)",
+        (doc_id,),
+    )
     conn.execute("DELETE FROM assertions WHERE memory_id=?", (doc_id,))
     conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
     conn.commit()
