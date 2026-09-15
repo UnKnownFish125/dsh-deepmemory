@@ -250,9 +250,26 @@ function memoryCompletionText(card, results, limit) {
   return sections.join('\n')
 }
 
+/* N07-HOST-SESSION-EVENTS: 0.1.5 Session 没有 `events` getter；snapshotEvents() 返回冻结数组。
+   任何取不到事件的情况都退化为空数组，绝不抛错（本文件跑在
+   agent/turn-stopping 钩子里，抛错会炸掉整个回合）。 */
+function sessionEventList(session) {
+  if (!session) return []
+  try {
+    if (typeof session.snapshotEvents === 'function') {
+      const events = session.snapshotEvents()
+      return Array.isArray(events) ? events : []
+    }
+    if (Array.isArray(session.events)) return session.events
+  } catch (error) {
+    return []
+  }
+  return []
+}
+
 function latestMemoryQuery(agent) {
   const parts = []
-  const events = agent && agent.session && agent.session.events ? agent.session.events : []
+  const events = sessionEventList(agent && agent.session)
   for (let index = events.length - 1; index >= 0 && parts.length < 6; index--) {
     const event = events[index]
     const text = eventText(event).trim()
@@ -264,7 +281,7 @@ function latestMemoryQuery(agent) {
 function cadenceCompactionRange(agent, cadenceTurn, retainTurns = 3) {
   const turnBySeq = new Map()
   let currentTurn = 0
-  for (const event of agent.session.events) {
+  for (const event of sessionEventList(agent && agent.session)) {
     if (event.type === 'turn/start') currentTurn = Number((event.data && event.data.turn) || currentTurn)
     turnBySeq.set(event.seq, currentTurn)
   }
@@ -280,12 +297,30 @@ function cadenceCompactionRange(agent, cadenceTurn, retainTurns = 3) {
 }
 
 async function sessionEvents(ctx, sessionId) {
-  const agent = ctx.get('agents')?.get(sessionId)
-  if (agent && agent.session) return agent.session.events
+  let agent
+  try {
+    agent = ctx.get('agents')?.get(sessionId)
+  } catch (error) {
+    agent = undefined
+  }
+  if (agent && agent.session) return sessionEventList(agent.session)
   const persistence = ctx.get('sessionPersistence')
-  if (!persistence) return null
-  const inspection = await persistence.inspect(sessionId)
-  return inspection && inspection.events
+  if (!persistence || typeof persistence.open !== 'function') return null
+  /* 0.1.5 只有 open/read/close（没有 inspect）：读句柄拿全量事件后必须关闭。 */
+  let handle
+  try {
+    handle = await persistence.open(sessionId, 'read')
+    const slice = await handle.read(0)
+    return (slice && slice.events) || []
+  } catch (error) {
+    return null
+  } finally {
+    if (handle) {
+      try {
+        await handle.close()
+      } catch (error) {}
+    }
+  }
 }
 
 async function initializeStateCard(ctx, sessionId, kind) {
@@ -571,7 +606,7 @@ export function apply(ctx) {
           let input = consumed
           if (!input.length) {
             input = []
-            for (const event of agent.session.events) {
+            for (const event of sessionEventList(agent && agent.session)) {
               const text = eventText(event).trim()
               if (text) input.push({ role: event.type === 'user/message' ? '用户' : '助手', text: text.slice(0, 1200) })
             }
