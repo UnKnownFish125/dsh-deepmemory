@@ -3012,6 +3012,10 @@ def apply_consolidation(groups):
         for mid in archived:
             conn.execute("UPDATE documents SET status='archived' WHERE id=?", (mid,))
             get_bm25().remove(mid)
+        # S12c：apply_consolidation 同样要清 FAISS（原实现只摘 BM25 → 死向量长期
+        # 占据 k*3 候选位且不自愈）。此处是 host 合并流程的必经路径。
+        if archived:
+            _index_remove_ids(archived)
         done += len(archived)
     conn.commit()
     conn.close()
