@@ -2558,18 +2558,34 @@ def create_backup():
     name = "backup-" + time.strftime("%Y%m%d-%H%M%S")
     dest = os.path.join(BACKUP_DIR, name)
     os.makedirs(dest, exist_ok=True)
-    conn = get_conn()
-    try:
-        bconn = sqlite3.connect(os.path.join(dest, "memory.db"))
-        conn.backup(bconn)
-        bconn.close()
-    finally:
-        conn.close()
-    if os.path.exists(INDEX_PATH):
-        shutil.copy2(INDEX_PATH, os.path.join(dest, "memory.faiss"))
-    docs = count_active()
+    # S17：DB 在线备份、索引复制、计数放进同一个 _index_lock 窗口——
+    # 原实现先备份 DB 再另行复制 FAISS，并发写入会产生"DB 与索引不配套"的备份。
+    fingerprint = None
+    with _index_lock:
+        conn = get_conn()
+        try:
+            bconn = sqlite3.connect(os.path.join(dest, "memory.db"))
+            conn.backup(bconn)
+            bconn.close()
+        finally:
+            conn.close()
+        if os.path.exists(INDEX_PATH):
+            shutil.copy2(INDEX_PATH, os.path.join(dest, "memory.faiss"))
+        docs = count_active()
+        try:
+            _c = get_conn()
+            _r = _c.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM documents WHERE status='active'"
+            ).fetchone()
+            _c.close()
+            fingerprint = {"count": int(_r[0]), "max_id": int(_r[1])}
+        except Exception:
+            fingerprint = None
     with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8") as fh:
-        json.dump({"name": name, "created_at": time.time(), "documents": docs}, fh, ensure_ascii=False)
+        json.dump(
+            {"name": name, "created_at": time.time(), "documents": docs, "fingerprint": fingerprint},
+            fh, ensure_ascii=False,
+        )
     return {"name": name, "documents": docs}
 
 
@@ -2661,16 +2677,45 @@ def _rebuild_indexes_internal():
         vecs = embed_texts(["warmup"])
         d = vecs[0].shape[0] if vecs else DIM
         tmp = faiss.IndexIDMap(faiss.IndexFlatL2(d))
-    shadow_path = INDEX_PATH + ".shadow"
-    faiss.write_index(tmp, shadow_path)
-    os.replace(shadow_path, INDEX_PATH)
+    # S03：唯一临时文件名——原固定 ".shadow" 会被并发重建互相覆盖/移走
+    shadow_path = INDEX_PATH + ".shadow-" + str(os.getpid()) + "-" + uuid.uuid4().hex[:8]
+    try:
+        faiss.write_index(tmp, shadow_path)
+        os.replace(shadow_path, INDEX_PATH)
+    finally:
+        if os.path.exists(shadow_path):
+            try:
+                os.remove(shadow_path)
+            except OSError:
+                pass
     global _index
     with _index_lock:
         _index = None
     rebuild_bm25()
+    # S03：重建期间的新增/修改会落在旧索引上（重建耗时可达分钟级）。
+    # 发布后回读 DB 指纹比对，不一致即显式标注 stale，提示需要再跑一次重建。
+    fingerprint_now = None
+    try:
+        _c = get_conn()
+        _r = _c.execute(
+            "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM documents WHERE status='active'"
+        ).fetchone()
+        _c.close()
+        fingerprint_now = {"count": int(_r[0]), "max_id": int(_r[1])}
+    except Exception:
+        fingerprint_now = None
+    stale = bool(fingerprint_now and fingerprint_now != fingerprint)
+    if stale:
+        print(
+            "[rebuild] WARN fingerprint changed during rebuild: %s -> %s（需要再次重建以纳入增量）"
+            % (fingerprint, fingerprint_now),
+            flush=True,
+        )
     return {
         "rebuilt": True,
         "fingerprint": fingerprint,
+        "fingerprint_now": fingerprint_now,
+        "stale": stale,
         "index_before": old_ntotal,
         "index_after": tmp.ntotal,
     }

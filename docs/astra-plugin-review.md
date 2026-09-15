@@ -32,6 +32,8 @@
 | S10 检索缓存键截断 200 字符 | 同上 | 改用完整 query 的 SHA-256（消除前缀碰撞导致的错误复用） |
 | S14 session 级密钥绕过屏蔽 | 同上 | 测试机实测：写入 session 级 secret 后 `GET /v1/config` **不回显**、`/v1/settings/<key>` 返回 **404**，全局 `embedding.api_key` 仍屏蔽（探测数据已清理） |
 | S13 衰减按总年龄重复扣减 | 同上 | 改为按 `max(ref, 上次衰减时刻)` 的增量计算（遗忘速度不再随调度频率变化） |
+| S03 影子重建竞态 | `patch_server_s03_s17.py` | 唯一临时文件名（pid+uuid）+ `finally` 清理；发布前回读 DB 指纹比对，不一致则返回 `stale: true` 并打 WARN |
+| S17 备份/恢复缺少统一快照 | 同上 | DB 在线备份 + 索引复制 + 计数放进同一 `_index_lock` 窗口；manifest 记录 `fingerprint{count,max_id}`（测试机实测 manifest 含该字段，备份含 db+faiss+manifest） |
 
 ### ⏸️ 代码已就位，待重启 dsh-web 生效（批次 2 + 批次 4）
 
@@ -55,7 +57,8 @@
 |---|---|
 | **N17 会话级配置多数不被 preset 消费** | 正解是把 preset 的**模块级配置变量**改为按会话解析（避免跨会话污染）。属核心链路重构，改动面覆盖 assemble/抽取/工具注册，草率改会重演「liangshen 事故」（核心链路被改坏 → 所有会话每回合报错）。**必须有完整上下文与专门验证窗口**。 |
 | S06/S07（仅仓库 P1：断言 ID 复用继承旧确认、并发 revoke 后被复活） | 生产未部署 P1，属**合并 P1 前的强制前置项** |
-| S03 影子重建竞态 / S05 部署漂移合并 / S17 备份快照 / S18 batch 非原子 | 按 ROI 排期 |
+| S05 部署漂移合并 | 单独一次做（生产已用 DeepSeek 官方网关、仓库仍旧 uuapi.io；仓库有 P1、生产无），合并 P1 前必须先修 S06/S07 |
+| S18 `add_batch` 非原子 | **判定为设计选择**：`/v1/memories/add_batch` 的契约是"尽量写入 + 逐项返回结果"（`server.py:1581-1591` 会在 HTTP 200 的 `added` 数组里逐项给出 error），调用方（preset `674-678`）据此处理部分失败。改成事务/outbox 会改变对外协议，风险大于收益，故不修；如需强原子应新增独立端点。 |
 | N07 Host `session.events` 兼容 / N08 写卡全量覆盖 / N09 队列丢失 / N10 输出结构校验 / N11 Host 抽取绕过脱敏 / N12 流错误处理 / N13 Host workspace 解析 / N18 无 deadline / N19 任务卡重复 / N23 CSS 未清理 / N24 日志泄漏 / N25 绝对路径依赖 | 按 ROI 排期 |
 
 ### 流程事故与修复（非 astra 报告项）
