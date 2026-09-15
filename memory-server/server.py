@@ -1153,27 +1153,28 @@ def _credentials_map():
 
 
 def llm_chat(prompt, model=None, system=None, provider=None, api_key=None):
-    """夜间批处理 LLM 提炼（低成本默认：uuapi/deepseek-v4-flash-0731，谷时批处理）。
+    """夜间批处理 LLM 提炼（DeepSeek 官方 API；实际模型由配置中心覆盖，默认 deepseek-v4-flash）。
 
-    provider=http 兼容 endpoints；key 来自 .credentials.yaml refs.UUAPI_GPT_API_KEY。
+    S05：与生产运行态对齐（原为 uuapi.io + 已除名的促销 ID deepseek-v4-flash-0731）。
+    provider=http 兼容 endpoints；key 来自 .credentials.yaml refs.DEEPSEEK_API_KEY。
     """
-    model = model or "deepseek-v4-flash-0731"
+    model = model or "deepseek-v4-flash"
     credentials = _credentials_map()
-    key = api_key or credentials.get("UUAPI_API_KEY") or credentials.get("UUAPI_GPT_API_KEY") or ""
+    key = api_key or credentials.get("DEEPSEEK_API_KEY") or ""
     if not key:
-        return {"error": "no api key (refs.UUAPI_API_KEY)"}
-    base = (provider or "https://uuapi.io/v1").rstrip("/")
+        return {"error": "no api key (refs.DEEPSEEK_API_KEY)"}
+    base = (provider or "https://api.deepseek.com/v1").rstrip("/")
     url = base + "/chat/completions"
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     body = {"model": model, "messages": messages, "max_tokens": 512, "temperature": 0.3}
-    # 模型链 fallback：0731 波动（502）时回落 deepseek-v4-flash（同价/稍差，保证批处理可用）
+    # S05：与生产对齐——官方 ID 已收敛，不再引用已除名的促销 ID
     model_chain = []
     if model:
         model_chain.append(model)
-    for m in ("deepseek-v4-flash", "deepseek-v4-flash-0731"):
+    for m in ("deepseek-v4-flash",):
         if m and m not in model_chain:
             model_chain.append(m)
     last_err = None

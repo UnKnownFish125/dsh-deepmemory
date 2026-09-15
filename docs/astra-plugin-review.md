@@ -65,7 +65,7 @@
 | 条目 | 为何缓做 |
 |---|---|
 | **N17 会话级配置多数不被 preset 消费** | 正解是把 preset 的**模块级配置变量**改为按会话解析（避免跨会话污染）。属核心链路重构，改动面覆盖 assemble/抽取/工具注册，草率改会重演「liangshen 事故」（核心链路被改坏 → 所有会话每回合报错）。**必须有完整上下文与专门验证窗口**。 |
-| S05 部署漂移合并 | 单独一次做（生产已用 DeepSeek 官方网关、仓库仍旧 uuapi.io；仓库有 P1、生产无）。**S06/S07 前置已完成**（见上方「仅仓库 P1」小节），可进入合并方案设计 |
+| S05 部署漂移合并 | **反向漂移已消除**（2026-09-15）：仓库与测试机已吸收生产的 `llm_chat` 改动 —— `https://api.deepseek.com/v1`、`deepseek-v4-flash`、`DEEPSEEK_API_KEY`，并清除已除名的促销 ID `deepseek-v4-flash-0731`（见 `patch_server_s05_llmchat_align.py`）；三处副本的 URL 差异清零、配置键差异为零。**仅剩正向决策**：仓库的 P1（含已修的 S06/S07）是否上生产 —— 需拍板；上生产须走完整测试机 preflight + 一次 memory-server 重启 |
 | S18 `add_batch` 非原子 | **判定为设计选择**：`/v1/memories/add_batch` 的契约是"尽量写入 + 逐项返回结果"（`server.py:1581-1591` 会在 HTTP 200 的 `added` 数组里逐项给出 error），调用方（preset `674-678`）据此处理部分失败。改成事务/outbox 会改变对外协议，风险大于收益，故不修；如需强原子应新增独立端点。 |
 | N07 Host `session.events` 兼容 / N08 写卡全量覆盖 / N09 队列丢失 / N10 输出结构校验 / N11 Host 抽取绕过脱敏 / N12 流错误处理 / N13 Host workspace 解析 / N18 无 deadline / N19 任务卡重复 / N23 CSS 未清理 / N24 日志泄漏 / N25 绝对路径依赖 | 按 ROI 排期 |
 
