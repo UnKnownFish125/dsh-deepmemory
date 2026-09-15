@@ -3847,7 +3847,21 @@ class Handler(BaseHTTPRequestHandler):
                 key = body.get("key") or ""
                 if not key:
                     return self._send(400, {"error": "key required"})
-                return self._send(200, set_setting(key, body.get("value")))
+                _res = set_setting(key, body.get("value"))
+                # G3：/v1/settings/set 是 /v1/config 之外的旁路。若改了 embedding 相关键，
+                # 必须同样失效索引与 dim.json —— 否则搜索路径的 set_embed_dim 会用新模型
+                # 覆写 dim.json 的 fp，指纹证据被抹平 → 同维换模型静默不重建（重启也不重建）。
+                if "embedding" in key:
+                    global _index, _embed_model
+                    with _index_lock:
+                        _index = None
+                    with _embed_lock:
+                        _embed_model = None
+                    try:
+                        os.remove(DIM_PATH)
+                    except FileNotFoundError:
+                        pass
+                return self._send(200, _res)
             if path == "/v1/cards/upsert":
                 body = self._read_body()
                 wid = body.get("workspace_id") or ""
