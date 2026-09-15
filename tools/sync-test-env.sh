@@ -80,6 +80,11 @@ pb = [b for b in pb if _bundle_ok(b)]
 _dep_dropped = [k for k in pd if not (str(k).startswith("@deepseek-ai/") or (_nm / str(k)).exists())]
 for _k in _dep_dropped:
     pd.pop(_k, None)
+# 关键：out 在守卫之前就已构造（持有旧的 pb/pd 列表对象），必须显式回写过滤结果，
+# 否则守卫只是"看起来生效"，写盘的仍是未过滤列表
+# —— 这正是 2026-09-15 二次把测试机搞挂的根因（漂移副本仍带 dsh-better-sidebar）
+out["dsh"]["profile"]["bundles"] = pb
+out["dependencies"] = pd
 if _dropped or _dep_dropped:
     print("  守卫剔除 → bundle:", _dropped, "| deps:", _dep_dropped)
 try:
