@@ -11,6 +11,56 @@
 
 ---
 
+## 修复状态（2026-09-15 晚更新）
+
+补丁脚本统一放在 `/www/scripts/`，均幂等、可重复执行，每处改动留 `.bak-*` 备份。
+
+### ✅ 已上生产并验证（批次 1 + 批次 3）
+
+| 条目 | 补丁脚本 | 生产验证证据 |
+|---|---|---|
+| S01 备份删除路径穿越 | `patch_backup_name_validation.py` | `..` `.` `%2e%2e` `../../etc` `backup-evil` 全 400；正常创建/删除 200；11 份备份与 data 完好 |
+| S02 模型身份指纹 | `patch_server_s02_fingerprint.py` | `dim.json` 写入 `fp=api:bge-m3`；指纹一致不重建、**同维换模型触发重建**；旧库无 fp 时补写不重建 |
+| S04 FAISS 检索持锁 | `patch_server_batch3.py` | 检索 200、无死锁（`_index_lock` 为 RLock） |
+| S08 权重/衰减配置生效 | 同上 | 改用函数内读入的局部变量 |
+| S09a 接口参数名 | 同上 | `rule-candidates` 稳定 500 → 200 |
+| S09b `similar_ids` 整数下标 | 同上 | 同上 |
+| S12 归档/恢复向量同步 | `patch_server_s12_vectors.py` | 归档 `ntotal` 10643→10642、恢复 →10643 |
+| S16 embeddings 真实模型名 | `patch_server_batch3.py` | 响应 `model=bge-m3`、1024 维 |
+| （额外）`rule_candidates` O(n²) embedding | `patch_rule_candidates_perf.py` | **120s 超时 → 5.3s 返回**（批量 embedding + 单次矩阵乘 + `max_scan`） |
+
+### ⏸️ 代码已就位，待重启 dsh-web 生效（批次 2 + 批次 4）
+
+| 条目 | 补丁脚本 | 验证状态 |
+|---|---|---|
+| N01 合成输入过滤（切断记忆自污染循环） | `patch_preset_batch2.py` | 测试机四步 preflight 通过（语法、ESM 冒烟、建会话 `ok:true`、无 preset 报错） |
+| N03 `lastUserText` 取值 + 入队时序 | 同上 | 同上 |
+| N05 工具检索/保存/briefing 补 `session_id` | 同上 | 同上 |
+| N06 无卡 404 降级，不丢弃已检索记忆 | 同上 | 同上 |
+| N14 compaction 摘要改读 `data.summary` | 同上 | 同上 |
+| N15 `rule` 并入规则分组 | 同上 | 同上 |
+| N04 会话开关缓存 TTL | `patch_preset_n04_enabled_ttl.py` | `node --check` + ESM 冒烟 + 三处副本 md5 一致 |
+| N20 `ListEditor` 提升到模块级（输入不再丢焦点） | `patch_client_batch4.py` | `node --check` + 三处一致 |
+| N21 `api()` 保留后端 error/code/status | 同上 | 同上 |
+| N16 会话配置只提交 dirty 键 | `patch_client_n16_n22.py` | `node --check` + 三处一致 |
+| N22 原文标注来源数量、保留完整列表 | 同上 | 同上 |
+
+### ⬜ 未做（按优先级排序，需专门窗口）
+
+| 条目 | 为何缓做 |
+|---|---|
+| **N17 会话级配置多数不被 preset 消费** | 正解是把 preset 的**模块级配置变量**改为按会话解析（避免跨会话污染）。属核心链路重构，改动面覆盖 assemble/抽取/工具注册，草率改会重演「liangshen 事故」（核心链路被改坏 → 所有会话每回合报错）。**必须有完整上下文与专门验证窗口**。 |
+| S06/S07（仅仓库 P1：断言 ID 复用继承旧确认、并发 revoke 后被复活） | 生产未部署 P1，属**合并 P1 前的强制前置项** |
+| S03 影子重建竞态 / S05 部署漂移合并 / S10 缓存键截断 / S13 衰减频率依赖 / S14 session 密钥绕过 / S15 L2→cos 平方 / S17 备份快照 / S18 batch 非原子 | 按 ROI 排期 |
+| N07 Host `session.events` 兼容 / N08 写卡全量覆盖 / N09 队列丢失 / N10 输出结构校验 / N11 Host 抽取绕过脱敏 / N12 流错误处理 / N13 Host workspace 解析 / N18 无 deadline / N19 任务卡重复 / N23 CSS 未清理 / N24 日志泄漏 / N25 绝对路径依赖 | 按 ROI 排期 |
+
+### 流程事故与修复（非 astra 报告项）
+
+- **`sync-test-env.sh` 会搞挂测试机**：合并逻辑把生产 bundles 里测试机未安装的包、以及无 `dsh.bundle` 声明的插件（`dsh-reasoning-guard` / `dsh-anysearch`）写进测试机 bundles → `dsh-app-boot` 报 `cannot resolve profile bundle` / `declares no dsh.bundle` → dsh-test 起不来。已加「可解析 + 声明 `dsh.bundle`」双重守卫 + 写盘前备份，实跑验证通过。
+- **教训**：`@deepseek-ai/*` 基础 bundle 由安装根解析，**不在** profile 的 `node_modules` 下，不能按文件存在性判断。
+
+---
+
 ## 🔴 严重
 
 ### S01 备份删除接受 `.` / `..`，可清空整套数据 ✅已复核

@@ -766,6 +766,8 @@ function apply(ctx) {
     const sessionId = props.sessionId || ''
     const [schema, setSchema] = React.useState(null)
     const [values, setValues] = React.useState({})
+    // N16：载入时的原始值（用于只提交真正被改过的键）
+    const [originalValues, setOriginalValues] = React.useState({})
     const [loaded, setLoaded] = React.useState(false)
     const [overrides, setOverrides] = React.useState([])
     const [busy, setBusy] = React.useState(false)
@@ -778,7 +780,7 @@ function apply(ctx) {
       const mres = await api('GET', '/v1/models')
       setOverrides(sessionId && vres.overrides ? vres.overrides : [])
       if (sres && sres.schema) setSchema(sres.schema)
-      if (vres && vres.config) setValues(vres.config)
+      if (vres && vres.config) { setValues(vres.config); setOriginalValues(Object.assign({}, vres.config)) }
       if (mres && Array.isArray(mres.providers)) setModels(mres.providers)
       setLoaded(true)
     }
@@ -787,11 +789,18 @@ function apply(ctx) {
 
     async function save() {
       setBusy(true)
+      // N16：只提交「与载入值不同」的键。原实现把 defaults+overrides 的合并结果
+      // 全部写回 session override —— 改一项就锁死所有当前默认值，此后全局默认变更
+      // 该会话不再继承，reset 出来的默认值下次保存又被写回。
+      const dirtyKeys = Object.keys(values).filter(function (key) {
+        try { return JSON.stringify(values[key]) !== JSON.stringify((originalValues || {})[key]) } catch (e) { return true }
+      })
       const res = sessionId
-        ? await Promise.all(Object.keys(values).map(function (key) { return api('POST', '/v1/config/session/set', { session_id: sessionId, key: key, value: values[key] }) })).then(function (items) { const failed = items.find(function (item) { return item && item.error }); return failed ? { error: failed.error } : { saved: items.length } })
+        ? await Promise.all(dirtyKeys.map(function (key) { return api('POST', '/v1/config/session/set', { session_id: sessionId, key: key, value: values[key] }) })).then(function (items) { const failed = items.find(function (item) { return item && item.error }); return failed ? { error: failed.error } : { saved: items.length } })
         : await api('POST', '/v1/config', values)
       setBusy(false)
       if (res && res.error) { setMsg(t('cfgFail') + res.error); return }
+      if (sessionId) setOriginalValues(Object.assign({}, values))
       setMsg(t('cfgSaved').replace('N', String(res ? res.saved : 0)))
     }
 
@@ -1113,7 +1122,15 @@ function apply(ctx) {
       const res = await api('GET', '/v1/memories/' + encodeURIComponent(String(id)) + '/source')
       const list = res && Array.isArray(res.sources) ? res.sources : []
       const first = list[0]
-      setSrc({ id: id, loading: false, sourceId: first?.protected_source_id || first?.id, text: first?.content || null, needsAuth: !!first?.needs_auth })
+      // N22：原实现只显示 list[0]，多来源/分段证据在 UI 上完全不可达，容易被误当完整原文。
+      // 这里保留完整列表，并在只显示第一条时明确标注来源数量。
+      const prefix = list.length > 1 ? '（共 ' + list.length + ' 个来源，下方仅显示第 1 个）\n\n' : ''
+      setSrc({
+        id: id, loading: false, sources: list,
+        sourceId: first?.protected_source_id || first?.id,
+        text: first?.content ? prefix + first.content : (first?.content || null),
+        needsAuth: !!first?.needs_auth,
+      })
     }
 
     async function requestApproval() {
