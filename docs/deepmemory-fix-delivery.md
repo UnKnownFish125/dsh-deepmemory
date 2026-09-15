@@ -215,8 +215,34 @@ cat /www/deepmemory-v063-deploy/memory-server/data/dim.json   # 期望 {"dim":10
 
 | 项 | 状态 |
 |---|---|
-| N07 Host 读 0.1.5 已移除的 `session.events`（Host 5 轮状态卡 cadence 从未执行） | 处理中 |
-| N08 写卡全量覆盖 / N09 抽取先丢队列 | 处理中 |
-| S05 正向（P1 上生产） | 决策材料整理中 |
-| N17 preset 配置按会话解析 | 待专门窗口 |
-| N19 任务卡幂等 | 未开始 |
+| N07 Host 读 0.1.5 已移除的 `session.events`（Host 5 轮状态卡 cadence 从未执行） | ✅ 已完成并提交（`patch_host_n07_session_api.py`）；⚠️ cadence 未做真实回合端到端验证 |
+| N08 写卡全量覆盖 / N09 抽取先丢队列 | ✅ 已完成并提交（`patch_preset_n08_n09.py`，含 live 探针实证） |
+| S05 正向（P1 上生产） | 决策材料就绪（`s05-p1-deployment-decision.md`）；**P1 状态机已由主 agent 用真实 HTTP E2E 验证** |
+| N17 preset 配置按会话解析 | 方案就绪（`n17-session-config-plan.md`）；待专门窗口，建议先做 P0 |
+| N19 任务卡幂等 | 未开始（剩余唯一排期项，需跨端改动） |
+
+---
+
+## 十一、部署拓扑与隐患（2026-09-16 核实，重要）
+
+### 11.1 preset 有两个副本，只有一个在生产链路上
+| 文件 | 行数 | 挂载者 |
+|---|---|---|
+| `/www/dsh/home/.agent-presets/_memory-plugin/plugin-v3.js` | 988（含全部补丁） | **`harness-memory-task`**（"任务工作模式"，`settings.yaml:16` 的 **default**）→ `agent.cordis.yml:249` 挂 `../_memory-plugin/plugin-v3.js` |
+| `/www/dsh/home/.agent-presets/harness-memory/memory-plugin/plugin-v3.js` | 610（9/8，**0 补丁**） | `harness-memory`（"记忆增强模式"）→ `agent.cordis.yml:299` 挂 `./memory-plugin/plugin-v3.js` |
+
+**结论**：本次 20 项修复落在**生产默认 preset 实际加载的文件**上 ✓。
+**待决**：另一个 preset（记忆增强模式）用自带旧副本，二者差异 506 行（不同功能集，**不可直接覆盖**）；若该 preset 仍在使用，需单独评估同步。
+
+### 11.2 测试机曾指向生产库（已修）
+- `http://127.0.0.1:6240/v1/config` 的 `deepmemory.server_url` 原为 **`http://127.0.0.1:6230`（生产）** → 测试实例的 preset 会写生产数据。
+- **已改为 `http://127.0.0.1:6240`** 并复核；生产侧 `server_url` 未被误改（仍 6230）。
+- 影响范围：在此之前的"测试机验证"若涉及**数据写入**则不可信；本次的 P1 E2E 是 `curl` 直连 6240（改的是测试库、已清理），**未受影响**。
+
+### 11.3 profile 符号链接指向（确认加载哪一份）
+- `profiles/web/node_modules/dsh-deepmemory` 是指向 profile 内 `.pnpm/...schemastery@3.18.1/...` 的符号链接 = **本次修改的文件** ✓
+- 另有 **两份只读旧副本**未被同步（不影响运行，仅作排障时勿被误导）：`.pnpm/...schemastery@3.18.2/.../index.js`（9/10 旧版）、`node_modules/.ignored/dsh-deepmemory/index.js`（9/1 旧版）。
+
+### 11.4 `/mem-api/*` 是泛代理（P1 上生产后的新增暴露面）
+Host 插件把 `/mem-api/*` 无条件转发到 memory-server：任意 method + path，**自动注入 token、去掉 Origin**（`index.js:717-736`）。P1 上线后 `POST /mem-api/v1/assertions/<id>/{promote,revoke}` 从 web 同源可达，且 `origin_id` 由调用方给定 → 持 token 者可自导自演"两个 origin 确认"触发 auto-adopt，或 revoke 使某条记忆从 `mode=current` 召回中消失。
+**当前无消费方调用**（preset/Host/client 的 `assertion` 引用计数均为 0），属"上线后新增"而非现存漏洞。
