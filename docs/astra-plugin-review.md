@@ -50,6 +50,9 @@
 | N21 `api()` 保留后端 error/code/status | 同上 | 同上 |
 | N16 会话配置只提交 dirty 键 | `patch_client_n16_n22.py` | `node --check` + 三处一致 |
 | N22 原文标注来源数量、保留完整列表 | 同上 | 同上 |
+| N23 client 插入的 `<style>` 未随卸载清理（HMR 累积） | `patch_n23_n24_n12.py` | `node --check`；测试机 ESM 冒烟 + 重启 active |
+| N24 preset 把未验证的模型输出写进 journal | 同上 | 改为只记长度/结构诊断（`hasOpenBrace`/`firstChar`/错误类型），不落正文 |
+| N12 Host 代理上游中断无终止处理 | 同上 | `upRes` error/aborted → destroy 下游；`res` close → destroy upstream；error 分支区分 `headersSent` |
 
 ### ✅ 已修（仅仓库 P1；生产未部署该特性，故无需上线）
 
