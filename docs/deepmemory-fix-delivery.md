@@ -186,3 +186,37 @@ cat /www/deepmemory-v063-deploy/memory-server/data/dim.json   # 期望 {"dim":10
 - N01 生效后：注入的记忆**不再**被当作新用户输入重复抽取（journal 中不会因注入内容触发抽取）
 - N17 **未修**，会话级配置仍可能不生效 —— 属已知
 - N14 生效后：压缩后 `topic_summaries` 应有新写入（此前恒空）
+
+---
+
+## 八、一键验收工具
+
+```bash
+/opt/AstrBot/venv/bin/python3 /www/scripts/verify_deepmemory_copies.py
+```
+
+核对四组副本一致性 + 关键修复标记齐全性 + 六个服务健康 + 生产记忆服务自检（检索 HTTP、`dim.json` 指纹）。全部通过时退出码 0。
+
+**注意内建的两条正确预期**（避免误报）：
+- `memory-server.py` 分**两组**比较：生产版**不含 P1**（assertion 事件机制），与含 P1 的测试机/两 clone **本来就不同**，不是不一致；
+- 标记用的是短前缀（如 `N13：`），改注释文字不会让检查失效。
+
+## 九、重启生效链路预检（已确认）
+
+| 检查项 | 结果 |
+|---|---|
+| Host/client 加载方式 | profile `dsh.profile.bundles` 含 `dsh-deepmemory`、`dependencies` 有它 —— 由 profile bundle 加载，**改部署件即改生效文件** |
+| 部署件 = 仓库内容 | `index.js` md5 完全相同（当时 `ce77166015c1`） |
+| preset 加载路径 | `/www/dsh/home/.agent-presets/_memory-plugin/plugin-v3.js`（agent.cordis.yml 的相对路径行） |
+
+**附带结论**：生产 profile 的 bundles 含 `dsh-better-sidebar`、`dsh-video-preview`、`@huanlin/dsh-plugin-better-sidebar-plugin-office`、`dsh-pet-dfeiyu-mo`，而**测试机都没装** —— 这正是 `sync-test-env.sh` 必须做「可解析 + 声明 `dsh.bundle`」过滤的原因（2026-09-15 两次测试机起不来都源于此）。
+
+## 十、进行中 / 未完成
+
+| 项 | 状态 |
+|---|---|
+| N07 Host 读 0.1.5 已移除的 `session.events`（Host 5 轮状态卡 cadence 从未执行） | 处理中 |
+| N08 写卡全量覆盖 / N09 抽取先丢队列 | 处理中 |
+| S05 正向（P1 上生产） | 决策材料整理中 |
+| N17 preset 配置按会话解析 | 待专门窗口 |
+| N19 任务卡幂等 | 未开始 |
