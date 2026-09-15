@@ -1168,7 +1168,9 @@ def vector_search(query_vec, k):
         seen.add(doc_id)
         dist = float(scores[0][i])
         # unit vectors: L2^2 = 2(1-cos)
-        cos_sim = max(0.0, 1.0 - (dist * dist) / 2.0)
+        # S15：IndexFlatL2 的 scores 已是 L2²（dist 就是它），再平方一次会算错
+        # （真 cos=0.8 会被算成 0.92，旧 merge 模式阈值判断随之过宽）
+        cos_sim = max(0.0, 1.0 - dist / 2.0)
         out.append((doc_id, cos_sim))
     return out
 
@@ -1332,7 +1334,10 @@ def search_memories(
     # 检索缓存：相同查询参数组合在 TTL 内直接复用（living memory 检索缓存）。
     # v0.4：键加入 semantic_generation——任一写操作后缓存即失效（语义门禁正确性优先）。
     cache_enabled = cfg_bool("search_cache.enabled", True)
-    cache_key = (query.strip()[:200], k, session_id or "", workspace_id or "", domain or "", type_ or "", persona_id or "", library or "", bool(include_archived), mode or "current", _semantic_gen())
+    # S10：原来用 query[:200] 截断做键 —— 前缀相同、后缀不同的两个查询会互相命中，
+    # 复用错误的检索结果（底层 embedding 本来接收的是完整 query）。改用完整 query 的 hash。
+    _qkey = query.strip()
+    cache_key = (hashlib.sha256(_qkey.encode("utf-8")).hexdigest() if _qkey else "", k, session_id or "", workspace_id or "", domain or "", type_ or "", persona_id or "", library or "", bool(include_archived), mode or "current", _semantic_gen())
     if cache_enabled:
         hit = _search_cache.get(cache_key)
         if hit and time.time() - hit[0] < cfg_float("search_cache.ttl_seconds", 45.0):
@@ -2167,6 +2172,21 @@ def get_config_schema():
         return {}
 
 
+def _is_secret_config_key(key):
+    """S14：判断（已剥掉 deepmemory. 前缀的）配置键是否敏感。
+
+    session.<sid>.<secret> 形式的会话级覆盖必须与全局 <secret> 同等屏蔽，
+    否则可经 GET /v1/config（defaults 或其它会话读取）回显凭据。
+    """
+    if key in SECRET_CONFIG_KEYS:
+        return True
+    if isinstance(key, str) and key.startswith("session."):
+        parts = key.split(".", 2)
+        if len(parts) == 3 and parts[2] in SECRET_CONFIG_KEYS:
+            return True
+    return False
+
+
 def get_config_values(include_secrets=False):
     conn = get_conn()
     rows = conn.execute(
@@ -2176,7 +2196,8 @@ def get_config_values(include_secrets=False):
     out = {}
     for r in rows:
         key = r["key"][len("deepmemory."):]
-        if not include_secrets and key in SECRET_CONFIG_KEYS:
+        # S14：session.<sid>.<secret> 形式同样要屏蔽（原实现只认全局键名）
+        if not include_secrets and _is_secret_config_key(key):
             continue
         try:
             out[key] = json.loads(r["value"])
@@ -2352,7 +2373,10 @@ def _run_decay(decay_rate=0.01, force=False):
         created = float(r["created_at"] or now)
         accessed = float(r["last_access_at"] or now)
         ref = created + ref_weight * (accessed - created)
-        days = max(0.0, (now - ref) / 86400.0)
+        # S13：只按"距上次衰减"的增量扣减。原实现用距参考点的**总年龄**，每运行一次
+        # 就再乘一次指数，导致遗忘速度随调度频率变化（每天跑 vs 每 6 小时跑差异巨大）。
+        base = max(ref, last) if last else ref
+        days = max(0.0, (now - base) / 86400.0)
         if days <= 0:
             continue
         new_imp = imp * math.exp(-decay_rate * days)
@@ -3169,7 +3193,7 @@ class Handler(BaseHTTPRequestHandler):
                     "sensitivity_types": json.loads(source["sensitivity_types"] or "[]")}})
             if path.startswith("/v1/settings/"):
                 key = unquote(path[len("/v1/settings/"):])
-                if key.startswith("deepmemory.") and key[len("deepmemory."):] in SECRET_CONFIG_KEYS:
+                if key.startswith("deepmemory.") and _is_secret_config_key(key[len("deepmemory."):]):
                     return self._send(404, {"error": "setting not found"})
                 return self._send(200, {"key": key, "value": get_setting(key)})
             if path.startswith("/v1/cards/"):
