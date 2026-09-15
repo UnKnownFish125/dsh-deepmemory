@@ -400,12 +400,35 @@ export function apply(ctx) {
   const hostMemoryInitialized = new Set()
   const hostMemoryRefreshes = new Map()
 
+  // N13：与 preset 的 resolveWorkspace 同一套解析——按 sessionId 在
+  // storages/workspace.json 的 tables.workspaces[*].sessionIds 中找真实归属。
+  // 原实现直接拿 config.workspace 或兜底字符串，会让备用召回在其他工作区里检索为空
+  // 或串到别的工作区。解析失败返回空串，由调用方决定回退。
+  const hostWsCache = new Map()
+  function resolveHostWorkspace(sessionId) {
+    const sid = String(sessionId || '').trim()
+    if (!sid) return ''
+    if (hostWsCache.has(sid)) return hostWsCache.get(sid)
+    let found = ''
+    try {
+      const home = String(process.env.DSH_HOME || '/www/dsh/home')
+      const d = JSON.parse(fs.readFileSync(home + '/storages/workspace.json', 'utf-8'))
+      const wss = (d.tables && d.tables.workspaces) || {}
+      for (const k of Object.keys(wss)) {
+        if ((wss[k].sessionIds || []).includes(sid)) { found = String(k); break }
+      }
+    } catch (e) { /* 解析失败 → 空串，调用方回退 */ }
+    hostWsCache.set(sid, found)
+    return found
+  }
+
   async function refreshHostMemory(agent, config) {
     const sessionId = String(agent.session.id)
     if (hostMemoryRefreshes.has(sessionId)) return hostMemoryRefreshes.get(sessionId)
     const refresh = (async () => {
       const limit = Math.max(1, Math.min(20, Number(config['context_automation.memory_completion_k'] || 5)))
-      const workspaceId = String(config.workspace || 'deepseek-harness')
+      // N13：优先按会话真实归属解析（与 preset 一致）；解析为空才回退配置/兜底字符串
+      const workspaceId = resolveHostWorkspace(sessionId) || String(config.workspace || 'deepseek-harness')
       const search = await memoryRequest('POST', '/v1/memories/search', {
         query: latestMemoryQuery(agent),
         k: limit,

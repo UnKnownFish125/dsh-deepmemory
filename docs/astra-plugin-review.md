@@ -53,6 +53,7 @@
 | N23 client 插入的 `<style>` 未随卸载清理（HMR 累积） | `patch_n23_n24_n12.py` | `node --check`；测试机 ESM 冒烟 + 重启 active |
 | N24 preset 把未验证的模型输出写进 journal | 同上 | 改为只记长度/结构诊断（`hasOpenBrace`/`firstChar`/错误类型），不落正文 |
 | N12 Host 代理上游中断无终止处理 | 同上 | `upRes` error/aborted → destroy 下游；`res` close → destroy upstream；error 分支区分 `headersSent` |
+| N13 Host 备用召回未用会话归属解析 | `patch_host_n13_workspace.py` | 在 Host 内实现与 preset 相同的解析（读 `storages/workspace.json` 的 `tables.workspaces[*].sessionIds`）；实测样本会话真实归属为 workspace UUID，而旧逻辑返回 `deepseek-harness` 兜底串 —— **两者不同**，确认修复消除了"其他工作区经 Host 备用召回检索为空/串区"；三处副本一致 + `node --check` |
 
 ### ✅ 已修（仅仓库 P1；生产未部署该特性，故无需上线）
 
