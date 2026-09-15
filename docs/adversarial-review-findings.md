@@ -63,7 +63,10 @@
 | 项 | 处置 |
 |---|---|
 | **S14 解析器缺口** | ✅ 已修（`patch_server_s14b_secret_key.py`）：原 `key.split(".", 2)` 假定 sid 不含点 → `session.a.b.embedding.api_key` 不被屏蔽（实测 `/v1/config` 明文回显、`/v1/settings` 200）。改为按 `.<secret>` 后缀判定。测试机复测：回显 **0**、settings **404**；生产已重启加载 |
+| **G1 `apply_consolidation` 缺 FAISS 配对** | ✅ 已修（`patch_server_g1_consolidation_faiss.py`）：循环后 `_index_remove_ids(archived)`。4 处副本标记各 1、`py_compile`、两侧重启后检索 200。⚠️ **未做功能实测**（需真跑一次合并归档、会改数据），正确性来自与 `_run_decay`/`archive_memories` 既有配对模式同构 |
+| **G3 `/v1/settings/set` 旁路抹平指纹** | ✅ 已修（`patch_server_g3_settings_bypass.py`）：命中含 `embedding` 的键时执行与 `/v1/config` 相同的失效动作（清 `_index`、清 `_embed_model`、删 `dim.json`）。两侧重启后 `dim.json` 完好、检索 200。⚠️ **未做功能实测**（触发会真删 `dim.json` 引发 ~10 分钟级重建），正确性由逐行同构保证 |
 | **N01 误伤风险** | ✅ 双重验证排除（主 agent 读 DSH 源码 + 复核用线上日志，结论一致） |
+| **G2 `v2_domain.purge_session` 不碰 FAISS/BM25** | ⬜ **仍未修**（需按 session 收集 ids 后调用 `_index_remove_ids` + BM25 移除；跨模块改动，留待后续） |
 | **`harness-memory` preset 缺补丁** | ⬜ 待决策：该 preset 挂自带 610 行副本（9/8，0 补丁），选"记忆增强模式"的会话重启也拿不到修复 |
 | **副本漂移** | ⬜ 记录：`_memory-plugin`(66340d07) == 测试机 == `dsh-deepmemory/agent-preset/memory-plugin`；但 `harness-memory-archive/agent-preset/memory-plugin`(902a7ff5)、`dsh-deepmemory/agent-preset/_memory-plugin`(27fdd5f8)、`deepmemory-v063-deploy/agent-preset/memory-plugin`(89266caa, 590 行) 各不相同且**不在验收工具的核对组里** |
 
