@@ -104,12 +104,24 @@ async function resolveModelRoute(llm, preferred) {
   return { provider: preferredProvider || 'uuapi', model: preferredModel || 'deepseek-v4-flash', source: 'fallback' }
 }
 
+// N18：Host 的两个 LLM 流（整合摘要 / 状态卡提取）原先**没有任何超时或取消** ——
+// 上游卡住时 agent/turn-stopping 会长时间挂住。统一给一个硬超时。
+function hostTimeoutSignal(ms) {
+  try {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      return AbortSignal.timeout(ms)
+    }
+  } catch (e) { /* 老运行时无 AbortSignal.timeout：退化为无超时 */ }
+  return undefined
+}
+
 async function summarizeGroup(llm, route, group) {
   const source = [group.primary_content].concat(group.contents || []).filter(Boolean)
   let output = ''
   const stream = llm.stream({
     provider: route.provider,
     model: route.model,
+    signal: hostTimeoutSignal(60000),
     system: '你是长期记忆整合器。将同组记忆合并为一段准确、自包含、无重复的规范摘要。保留事实、决定、约束和时间关系，不添加新信息。只输出摘要正文。',
     messages: [{ role: 'user', content: [{ type: 'text', text: source.map((text, index) => `${index + 1}. ${text}`).join('\n').slice(0, 12000) }] }],
     temperature: 0.1,
@@ -133,6 +145,7 @@ async function extractSessionCard(llm, dialog, existingCard, route = null) {
       const stream = llm.stream({
         provider: r.provider,
         model: r.model,
+        signal: hostTimeoutSignal(60000),
         system: [
           '你是会话状态卡提取器。根据对话片段提取当前会话状态。',
           '只输出一个 JSON 对象，不要 markdown：',

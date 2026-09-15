@@ -56,6 +56,7 @@
 | N13 Host 备用召回未用会话归属解析 | `patch_host_n13_workspace.py` | 在 Host 内实现与 preset 相同的解析（读 `storages/workspace.json` 的 `tables.workspaces[*].sessionIds`）；实测样本会话真实归属为 workspace UUID，而旧逻辑返回 `deepseek-harness` 兜底串 —— **两者不同**，确认修复消除了"其他工作区经 Host 备用召回检索为空/串区"；三处副本一致 + `node --check` |
 | N25 preset 硬编码绝对路径 import `dsh-tools` | `patch_preset_n25_tools_import.py` | 原为静态 import 硬编码 `/usr/local/node/lib/node_modules/…` —— 换机/升级/换安装根会让**整个 preset 加载失败**（所有会话记忆功能一起失效）。改为多候选解析（硬编码路径 + 从 `process.argv[1]` 推导 + `createRequire` 包解析），全失败时降级为"工具不可用、注入/抽取照常"并打印排查提示。四步 preflight 全过：`.mjs` 语法、ESM 冒烟、重启 active、**建会话 `ok:true`**、无降级警告；三处副本 md5 一致 |
 | N10 抽取结果只 `JSON.parse` 不校验结构 | `patch_preset_n10_schema.py` | 复核后收窄：`result.tasks` / `result.card` **原本就有** `Array.isArray` / `typeof` 守卫，**唯一缺口**是 `result.memories` ——`{"memories":"x"}` 是合法 JSON，字符串有 `.length` 却没有 `.filter` → TypeError；该代码在 `agent/turn-stopping` 里，异常会把**已生成回答的回合**标成 error。改为 `Array.isArray` + `content` 非空字符串校验。四步 preflight 全过 |
+| N18（Host 侧）两个 LLM 流无超时/取消 | `patch_host_n18_timeout.py` | Host 的 `summarizeGroup()`（整合摘要）与 `extractSessionCard()`（状态卡提取）直接 `llm.stream({...})`，**完全没有 signal** —— 上游卡住时 `agent/turn-stopping` 会无限期挂住。加 `hostTimeoutSignal(60s)` 并给两处流传 signal（preset 侧同类调用早已有 `AbortSignal.any([signal, timeout(45s)])`，此处是补齐纪律）。三处副本 md5 一致 + `node --check` + 测试机重启 active 无错误 |
 
 ### ✅ 已修（仅仓库 P1；生产未部署该特性，故无需上线）
 
