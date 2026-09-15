@@ -51,13 +51,21 @@
 | N16 会话配置只提交 dirty 键 | `patch_client_n16_n22.py` | `node --check` + 三处一致 |
 | N22 原文标注来源数量、保留完整列表 | 同上 | 同上 |
 
+### ✅ 已修（仅仓库 P1；生产未部署该特性，故无需上线）
+
+| 条目 | 补丁脚本 | 验证 |
+|---|---|---|
+| S06 断言 ID 复用继承旧确认 | `patch_server_s06_s07_p1.py` + `patch_server_s06_hook.py` | 测试机（FK OFF 窗口）注入孤儿事件 → 孤儿数 1 → `_purge_orphan_assertion_events` 返回 1 → 孤儿数 0；删除断言时已级联删事件。**反向印证**：正常路径直接插孤儿会被 FK 拒绝，说明孤儿只可能来自 `delete_memory` 的 FK OFF 窗口——与分析一致 |
+| S07 confirm/promote 与 revoke 并发复活 | `patch_server_s06_s07_p1.py` | 首次 SELECT 前 `BEGIN IMMEDIATE`（2 处）、状态更新带 CAS `WHERE id=? AND status=?` + rowcount 检查（2 处）；读校验与写之间不再有窗口 |
+
+> 补丁对无 P1 的副本（生产部署件）自动跳过。
+
 ### ⬜ 未做（按优先级排序，需专门窗口）
 
 | 条目 | 为何缓做 |
 |---|---|
 | **N17 会话级配置多数不被 preset 消费** | 正解是把 preset 的**模块级配置变量**改为按会话解析（避免跨会话污染）。属核心链路重构，改动面覆盖 assemble/抽取/工具注册，草率改会重演「liangshen 事故」（核心链路被改坏 → 所有会话每回合报错）。**必须有完整上下文与专门验证窗口**。 |
-| S06/S07（仅仓库 P1：断言 ID 复用继承旧确认、并发 revoke 后被复活） | 生产未部署 P1，属**合并 P1 前的强制前置项** |
-| S05 部署漂移合并 | 单独一次做（生产已用 DeepSeek 官方网关、仓库仍旧 uuapi.io；仓库有 P1、生产无），合并 P1 前必须先修 S06/S07 |
+| S05 部署漂移合并 | 单独一次做（生产已用 DeepSeek 官方网关、仓库仍旧 uuapi.io；仓库有 P1、生产无）。**S06/S07 前置已完成**（见上方「仅仓库 P1」小节），可进入合并方案设计 |
 | S18 `add_batch` 非原子 | **判定为设计选择**：`/v1/memories/add_batch` 的契约是"尽量写入 + 逐项返回结果"（`server.py:1581-1591` 会在 HTTP 200 的 `added` 数组里逐项给出 error），调用方（preset `674-678`）据此处理部分失败。改成事务/outbox 会改变对外协议，风险大于收益，故不修；如需强原子应新增独立端点。 |
 | N07 Host `session.events` 兼容 / N08 写卡全量覆盖 / N09 队列丢失 / N10 输出结构校验 / N11 Host 抽取绕过脱敏 / N12 流错误处理 / N13 Host workspace 解析 / N18 无 deadline / N19 任务卡重复 / N23 CSS 未清理 / N24 日志泄漏 / N25 绝对路径依赖 | 按 ROI 排期 |
 
