@@ -680,16 +680,24 @@ export function apply(ctx) {
         },
         (upRes) => {
           res.writeHead(upRes.statusCode ?? 502, upRes.headers)
+          // N12：上游中断/出错时终止下游，避免响应流悬置与未处理流错误
+          upRes.on('error', () => { try { res.destroy() } catch (e) {} })
+          upRes.on('aborted', () => { try { res.destroy() } catch (e) {} })
+          res.on('close', () => { if (!res.writableEnded) { try { upRes.destroy() } catch (e) {} } })
           upRes.pipe(res)
         },
       )
       upstream.on('timeout', () => upstream.destroy(new Error('memory-server request timeout')))
       upstream.on('error', (error) => {
         try {
+          // N12：已发头时不能再次 writeHead —— 直接终止连接
+          if (res.headersSent) { res.destroy(); return }
           res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({ error: String((error && error.message) || error) }))
         } catch {}
       })
+      // N12：客户端中途断开时联动终止上游，避免上游继续空跑
+      req.on('aborted', () => { try { upstream.destroy() } catch (e) {} })
       req.pipe(upstream)
     },
   })

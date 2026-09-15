@@ -261,6 +261,12 @@ function apply(ctx) {
   styleEl.dataset.plugin = 'deepmemory'
   styleEl.textContent = PANEL_CSS
   document.head.appendChild(styleEl)
+  // N23：随插件卸载移除——否则 HMR/重载会不断累积重复样式表
+  try {
+    if (ctx && typeof ctx.effect === 'function') {
+      ctx.effect(() => () => { try { styleEl.remove() } catch (e) {} })
+    }
+  } catch (e) {}
 
   const GRAPH_RAINBOW = [
     [0, [79, 107, 237]], [0.2, [39, 169, 225]], [0.4, [53, 166, 111]],

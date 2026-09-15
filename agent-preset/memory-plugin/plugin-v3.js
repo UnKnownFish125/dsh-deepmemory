@@ -358,13 +358,19 @@ function redactSensitive(text) {
     const start = out.indexOf('{')
     const end = out.lastIndexOf('}')
     if (start < 0 || end <= start) {
-      console.error('[deepmemory] extract no JSON in LLM output (len=' + out.length + '): ' + out.slice(0, 300).replace(/\s+/g, ' '))
+      // N24：不打未验证的模型输出正文（可能回显提示中的敏感内容并落进 journal），
+      // 只保留可诊断的结构信息
+      console.error('[deepmemory] extract no JSON in LLM output (len=' + out.length
+        + ', hasOpenBrace=' + (out.indexOf('{') >= 0)
+        + ', hasCloseBrace=' + (out.indexOf('}') >= 0)
+        + ', firstChar=' + JSON.stringify(String(out.trim().charAt(0) || '')))
       return null
     }
     try {
       return JSON.parse(out.slice(start, end + 1))
     } catch (e) {
-      console.error('[deepmemory] extract parse failed: ' + out.slice(0, 240).replace(/\s+/g, ' '))
+      // N24：同上——只记录错误类型与长度，不落正文
+      console.error('[deepmemory] extract parse failed (len=' + out.length + '): ' + String((e && e.message) || e))
       return null
     }
   }
