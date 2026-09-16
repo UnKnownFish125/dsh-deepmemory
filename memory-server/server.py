@@ -1868,6 +1868,315 @@ def get_sources(memory_id):
     return out
 
 
+
+# ===== P2（原文按需读取）只读窗口端点 =====
+# 契约：GET /v1/memories/<id>/source?cursor=&max_chars=&query=&workspace_id=&session_id=
+# - 硬上限 SOURCE_WINDOW_HARD_CAP=800 字符/次（保守起步，中文约 <=500 token）。
+# - scope 校验与检索（search_memories）同一 scope_allows 语义：global 放行；workspace 需
+#   workspace_id 匹配；session 需 session_id 匹配；未知 scope 拒绝 —— 防跨 workspace/会话按
+#   任意 id 读原文。
+# - sources:documents 实测为 N:1；seq 是"单条原文的分段序号"（>8000 字符才分段，每次入库
+#   从 0 重排），同一 memory 多次入库时 (memory_id,seq) 大量重复 → 窗口按 (seq,id) 排序、
+#   id 决胜（实测仅 4/10484 条记忆含多条多段原文，存在交错可能，items 同时暴露 seq+id 供拼接）。
+# - cursor 三段式 "<seq>:<id>:<char_offset>"（后两段可省略）：支持行内断点续读；
+#   next_cursor 永远回传完整三段。
+# - related_memory_ids：窗口内 source 全文（len>=200）精确匹配到其他 memory 时返回（<=5 个，
+#   逐一过 scope 校验，不泄露无权可见的 memory），提示"同一份原文对应多条记忆"。
+# - 非 active 状态保守处理：允许读，status/storage_tier 如实返回（scope 校验仍然生效）。
+# - 任何分支都以 (code, JSON) 返回，不向上抛异常。
+
+SOURCE_WINDOW_HARD_CAP = 800
+SOURCE_RELATED_MIN_LEN = 200
+SOURCE_RELATED_MAX = 5
+
+
+def _sanitize_source_text(text):
+    """UTF-8 异常防御：清洗 lone surrogate 等非法字符，保证 json.dumps+encode 不炸。"""
+    try:
+        return str(text or "").encode("utf-8", "replace").decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _parse_source_cursor(raw):
+    """解析 cursor：<seq> | <seq>:<id> | <seq>:<id>:<char_offset>。
+    返回 (seq, id, off) 三元组；格式非法返回 None（调用方回 400）。"""
+    if raw is None:
+        return (0, 0, 0)
+    s = str(raw).strip()
+    if not s:
+        return (0, 0, 0)
+    parts = s.split(":")
+    if len(parts) > 3:
+        return None
+    vals = []
+    for p in parts:
+        if not p or not p.isdigit() or len(p) > 18:
+            return None
+        vals.append(int(p))
+    while len(vals) < 3:
+        vals.append(0)
+    return (vals[0], vals[1], vals[2])
+
+
+def _source_type_of(row):
+    try:
+        return row["source_type"] or "message"
+    except Exception:
+        return "message"
+
+
+def _related_memory_ids(conn, mid, contents, req_sid, req_ws):
+    """同源反查：与窗口内 source 全文完全一致（len>=200）的其他 memory_id。
+    逐一过 scope 校验（不泄露调用方无权看到的 memory），最多 SOURCE_RELATED_MAX 个。"""
+    out = []
+    seen = set()
+    try:
+        for content in contents:
+            if not content or len(content) < SOURCE_RELATED_MIN_LEN:
+                continue
+            rows = conn.execute(
+                "SELECT DISTINCT memory_id FROM sources WHERE content=? AND memory_id<>?",
+                (content, mid),
+            ).fetchall()
+            for r in rows:
+                cand = int(r["memory_id"])
+                if cand in seen:
+                    continue
+                seen.add(cand)
+                doc = conn.execute(
+                    "SELECT id, status, scope, workspace_id, session_id FROM documents WHERE id=?",
+                    (cand,),
+                ).fetchone()
+                if doc is None or not scope_allows(doc, req_sid, req_ws):
+                    continue
+                out.append(cand)
+                if len(out) >= SOURCE_RELATED_MAX:
+                    return out
+    except Exception:
+        return out
+    return out
+
+
+def _source_seq_window(base, prepared, cur, cap, conn, req_sid, req_ws):
+    """顺序窗口：按 (seq,id) 排序从 cursor 起读，本次总字符不超过 cap。"""
+    s0, i0, o0 = cur
+    budget = int(cap)
+    items = []
+    related_contents = []
+    last = None
+    for seq, rid, text, row in prepared:
+        key = (seq, rid)
+        if key < (s0, i0):
+            continue
+        off = o0 if key == (s0, i0) else 0
+        if off >= len(text):
+            continue  # 该行已在之前的窗口读完
+        piece = text[off:]
+        cut = False
+        if len(piece) > budget:
+            piece = piece[:budget]
+            cut = True
+        items.append({
+            "seq": seq, "id": rid, "text": piece,
+            "created_at": row["created_at"],
+            "source_type": _source_type_of(row),
+            "truncated": bool(row["truncated"]),
+            "protected": bool(row["protected_source_id"]),
+            "cut": cut,
+        })
+        related_contents.append(row["content"])
+        budget -= len(piece)
+        last = (seq, rid, off + len(piece))
+        if budget <= 0:
+            break
+    # has_more：last 位置之后是否还有未读字符
+    # last 为 None = 从 cursor 起没有任何可读内容（越界 cursor / 全空文本）→ 无更多
+    has_more = False
+    if last is not None:
+        ls, li, lo = last
+        for seq, rid, text, _row in prepared:
+            key = (seq, rid)
+            if key < (ls, li):
+                continue
+            if key == (ls, li):
+                if lo < len(text):
+                    has_more = True
+                    break
+            elif len(text) > 0:
+                has_more = True
+                break
+    base["source_seq"] = items[-1]["seq"] if items else None
+    base["has_more"] = has_more
+    base["next_cursor"] = ("%d:%d:%d" % last) if (has_more and last) else None
+    base["truncated"] = bool(has_more and budget <= 0)
+    base["items"] = items
+    base["related_memory_ids"] = _related_memory_ids(
+        conn, base["memory_id"], related_contents, req_sid, req_ws)
+    return base
+
+
+def _source_query_window(base, prepared, query, cap, conn, req_sid, req_ws):
+    """query 窗口：子串（不区分大小写）优先；其次全部关键词命中；再次部分命中。
+    不引 LLM；不做游标分页（next_cursor=None，has_more=仍有未展示的命中行）。"""
+    ql = query.casefold()
+    tokens = [t for t in str(query).split() if len(t) >= 2]
+    scored = []
+    for seq, rid, text, row in prepared:
+        t = text.casefold()
+        pos = t.find(ql) if ql else -1
+        score = 3 if pos >= 0 else 0
+        if not score:
+            hits = []
+            for tok in tokens:
+                p = t.find(tok.casefold())
+                if p >= 0:
+                    hits.append(p)
+            if hits and len(hits) == len(tokens):
+                score, pos = 2, min(hits)
+            elif hits:
+                score, pos = 1, min(hits)
+        if score > 0:
+            scored.append((score, seq, rid, pos, text, row))
+    scored.sort(key=lambda x: (-x[0], x[1], x[2]))
+    base["query"] = query
+    base["query_matched"] = len(scored)
+    if not scored:
+        base.update({"source_seq": None, "has_more": False, "next_cursor": None,
+                     "truncated": False, "items": [], "related_memory_ids": []})
+        return base
+    CTX = 40  # 命中位置前保留的上下文字符数
+    budget = int(cap)
+    items = []
+    related_contents = []
+    shown = 0
+    cut_any = False
+    for score, seq, rid, pos, text, row in scored:
+        start = pos - CTX if (isinstance(pos, int) and pos > CTX) else 0
+        piece = text[start:]
+        cut = False
+        if len(piece) > budget:
+            piece = piece[:budget]
+            cut = True
+            cut_any = True
+        items.append({
+            "seq": seq, "id": rid, "text": piece,
+            "match_offset": pos,
+            "created_at": row["created_at"],
+            "source_type": _source_type_of(row),
+            "truncated": bool(row["truncated"]),
+            "protected": bool(row["protected_source_id"]),
+            "cut": cut,
+        })
+        related_contents.append(row["content"])
+        budget -= len(piece)
+        shown += 1
+        if budget <= 0:
+            break
+    base["source_seq"] = items[-1]["seq"] if items else None
+    base["has_more"] = shown < len(scored)
+    base["next_cursor"] = None
+    base["truncated"] = cut_any
+    base["items"] = items
+    base["related_memory_ids"] = _related_memory_ids(
+        conn, base["memory_id"], related_contents, req_sid, req_ws)
+    return base
+
+
+def get_source_window(doc_id, qs):
+    """P2 只读窗口入口（do_GET 调用）。任何输入异常都以 (4xx/5xx, JSON) 返回，不抛出。"""
+    try:
+        try:
+            mid = int(str(doc_id).strip())
+        except (TypeError, ValueError):
+            return 400, {"error": "invalid memory_id"}
+        if mid <= 0:
+            return 400, {"error": "invalid memory_id"}
+        req_ws = str((qs.get("workspace_id", [""])[0] or "")).strip()
+        req_sid = str((qs.get("session_id", [""])[0] or "")).strip()
+        conn = get_conn()
+        try:
+            doc = conn.execute(
+                "SELECT id, status, scope, workspace_id, session_id, storage_tier"
+                " FROM documents WHERE id=?", (mid,),
+            ).fetchone()
+            if doc is None:
+                return 404, {"error": "memory not found", "memory_id": mid}
+            if not scope_allows(doc, req_sid, req_ws):
+                return 403, {"error": "scope denied: memory not visible to this session/workspace",
+                             "memory_id": mid, "scope": doc["scope"]}
+            try:
+                rows = conn.execute(
+                    "SELECT id, seq, content, created_at, protected_source_id, truncated, source_type"
+                    " FROM sources WHERE memory_id=? ORDER BY seq ASC, id ASC", (mid,),
+                ).fetchall()
+            except Exception:
+                # 老库可能缺 source_type 列（v2 迁移补齐前）：降级 SELECT
+                rows = conn.execute(
+                    "SELECT id, seq, content, created_at, protected_source_id, truncated"
+                    " FROM sources WHERE memory_id=? ORDER BY seq ASC, id ASC", (mid,),
+                ).fetchall()
+            source_count = len(rows)
+            cap = SOURCE_WINDOW_HARD_CAP
+            capped = False
+            invalid_max = False
+            raw_max = qs.get("max_chars", [None])[0]
+            if raw_max is not None and str(raw_max).strip():
+                try:
+                    want = int(str(raw_max).strip())
+                except (TypeError, ValueError):
+                    want = -1
+                if want <= 0:
+                    invalid_max = True
+                elif want > SOURCE_WINDOW_HARD_CAP:
+                    capped = True
+                else:
+                    cap = want
+            cur = _parse_source_cursor(qs.get("cursor", [None])[0])
+            if cur is None:
+                return 400, {"error": "invalid cursor (expect seq[:id[:char_offset]])",
+                             "memory_id": mid}
+            base = {
+                "memory_id": mid,
+                "status": doc["status"] or "active",
+                "storage_tier": doc["storage_tier"] or "",
+                "scope": doc["scope"] or "",
+                "source_count": source_count,
+                "max_chars_effective": cap,
+            }
+            if capped:
+                base["max_chars_capped"] = True
+                base["note"] = "max_chars exceeds hard cap %d; clamped" % SOURCE_WINDOW_HARD_CAP
+            elif invalid_max:
+                base["max_chars_invalid"] = True
+                base["note"] = "invalid max_chars; using default %d" % SOURCE_WINDOW_HARD_CAP
+            if source_count == 0:
+                base.update({"source_seq": None, "has_more": False, "next_cursor": None,
+                             "truncated": False, "items": [], "related_memory_ids": []})
+                return 200, base
+            prepared = []
+            for r in rows:
+                text = _sanitize_source_text(r["content"])
+                if r["protected_source_id"]:
+                    # 写入时已脱敏（_save_source 存 redacted）；此处二次脱敏兜底历史行
+                    try:
+                        text = redact_text(text)[0]
+                    except Exception:
+                        pass
+                prepared.append((int(r["seq"] or 0), int(r["id"]), text, r))
+            query = str((qs.get("query", [""])[0] or "")).strip()
+            if query:
+                return 200, _source_query_window(base, prepared, query, cap, conn, req_sid, req_ws)
+            return 200, _source_seq_window(base, prepared, cur, cap, conn, req_sid, req_ws)
+        finally:
+            conn.close()
+    except Exception as e:
+        try:
+            return 500, {"error": redact_text(str(e))[0]}
+        except Exception:
+            return 500, {"error": "internal error"}
+
+
 def delete_memory(doc_id):
     conn = get_conn()
     row = conn.execute("SELECT id FROM documents WHERE id=?", (doc_id,)).fetchone()
@@ -3410,6 +3719,13 @@ class Handler(BaseHTTPRequestHandler):
                 parts = path.strip("/").split("/")
                 doc_id = int(parts[-1] if parts[-1] != "source" else parts[-2])
                 if parts[-1] == "source":
+                    # P2 原文按需读取：带 cursor/max_chars/query/workspace_id/session_id 任一参数
+                    # → 窗口契约（scope 校验 + 800 字符硬上限，见 get_source_window）；
+                    # 完全不带参数 → 保持既有全量返回行为不变（风险隔离，兼容旧调用方）。
+                    if qs.get("cursor") or qs.get("max_chars") or qs.get("query") \
+                            or qs.get("workspace_id") or qs.get("session_id"):
+                        code, payload = get_source_window(doc_id, qs)
+                        return self._send(code, payload)
                     return self._send(200, {"sources": get_sources(doc_id)})
                 try:
                     mem = self._v2_store().get_memory(doc_id)
@@ -3545,7 +3861,30 @@ class Handler(BaseHTTPRequestHandler):
                     # POST /v1/v2/sessions/<session_id>/purge {hard?}
                     session_id = unquote(parts[3])
                     hard = bool(body.get("hard"))
-                    return self._v2_call(lambda: store.purge_session(session_id, hard))
+                    # G2：purge 前先取出该会话的 memory id —— purge_session 只改
+                    # documents 等表，**不碰 FAISS/BM25**（v2_domain 拿不到索引句柄），
+                    # 硬删或软归档后向量仍留在索引里（死向量长期占 k*3 候选位且不自愈）。
+                    _purge_ids = []
+                    try:
+                        _pc = get_conn()
+                        try:
+                            _purge_ids = [r["id"] for r in _pc.execute(
+                                "SELECT id FROM documents WHERE session_id=?", (session_id,)).fetchall()]
+                        finally:
+                            _pc.close()
+                    except Exception as _pe:
+                        print(f"[deepmemory] G2 purge 前取 id 失败（索引可能残留死向量）: {_pe}")
+                    _purge_result = self._v2_call(lambda: store.purge_session(session_id, hard))
+                    if _purge_ids:
+                        try:
+                            _index_remove_ids(_purge_ids)
+                            _bm = get_bm25()
+                            for _mid in _purge_ids:
+                                _bm.remove(_mid)
+                            print(f"[deepmemory] G2 purge 索引同步: 已移除 {len(_purge_ids)} 条向量/BM25")
+                        except Exception as _se:
+                            print(f"[deepmemory] G2 purge 后索引同步失败（需重建索引修复）: {_se}")
+                    return _purge_result
                 if path == "/v1/v2/tasks":
                     if not body.get("title"):
                         return self._send(400, {"error": "title is required"})
