@@ -550,10 +550,12 @@ function redactSensitive(text) {
       console.error('[deepmemory] prompt cache refresh failed', String(e))
     }
     const text = (memoryCache.get(sessionId) || '') ? String(memoryCache.get(sessionId) || '') + '\n\n' + GUIDE : ''
-    if (!assembled || !Array.isArray(assembled.sections)) return assembled
+    // 0.1.5: deepmemory 注册的是 systemPrompt.context({name:'deepmemory'})（对话流尾部的
+    // 持久用户角色快照），assembly 里对应 contexts——旧代码改 sections 恒不匹配（注入滞后一次）。
+    if (!assembled || !Array.isArray(assembled.contexts)) return assembled
     return {
       ...assembled,
-      sections: assembled.sections.map((section) => section.name === 'deepmemory' ? { ...section, text: text } : section),
+      contexts: assembled.contexts.map((entry) => entry.name === 'deepmemory' ? { ...entry, text: text } : entry),
     }
   })
 

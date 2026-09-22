@@ -42,8 +42,22 @@ export function apply(ctx) {
       const rows = (bias && bias.results) || []
       if (!rows.length) return downstream
       const text = rows.map((r) => `- ${r.summary || r.concept || ''}`).join('\n')
-      if (assembly && typeof assembly.push === 'function') {
-        assembly.push({ role: 'system', content: `[约束前提]（来自 literature bias 库，均须遵守）：\n${text}` })
+      // 0.1.5: PromptAssembly = {sections, contexts, tools, variables}，没有 push（旧代码恒假，从未注入）。
+      // [约束前提] 的“预算外”指独立于 deepmemory L2/L3 记忆注入预算（plan-literature-side.md §1.4），
+      // 不是系统提示预算：它是持久系统级约束，应进 sections（系统提示本体，policy 语义、前缀缓存友好）；
+      // contexts 是对话流尾部逐回合重发的运行时快照（"supersedes earlier"），语义不符。
+      // 遵循核心 dsh-agent 的瀑布范式：next() 返回值为权威，追加到其 sections 尾部后返回。
+      if (downstream && Array.isArray(downstream.sections)
+        && !downstream.sections.some((section) => section && section.name === 'literature:bias-constraints')) {
+        return {
+          ...downstream,
+          sections: [...downstream.sections, {
+            name: 'literature:bias-constraints',
+            // 防 renderPrompt 严格插值：把完整的 {{...}} 组拆成全角，避免 bias 文本里的
+            // 模板残留抛 unknown prompt variable 炸掉整个 assembly。
+            text: `[约束前提]（来自 literature bias 库，均须遵守）：\n${text.replaceAll('{{', '\uFF5B\uFF5B')}`,
+          }],
+        }
       }
     } catch (e) { /* 轨 B 注入失败不影响主流程 */ }
     return downstream
