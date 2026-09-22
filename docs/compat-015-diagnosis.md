@@ -28,6 +28,27 @@
 
 ---
 
+## ①.5 修复状态（2026-09-23 补记）
+
+本报告所列 ①–⑤ **已全部修复**，并经**测试机实机验证**（真实会话，非静态推断）。**生产仅改文件、未重启** —— `dsh-web.service` 启动时间仍为 `2026-09-17 01:02:02`，**需重启后才生效**。
+
+| # | 状态 | 修复要点 | 实机验证 |
+|---|---|---|---|
+| ① | ✅ 已修（生产/测试/仓库三处） | `assembly.push`（恒假）→ `await next()` 取下游权威值后向 `downstream.sections` 尾部追加 `literature:bias-constraints` 段；含按 name 重入防重、`{{`→全角消毒（防 `renderPrompt` 严格插值抛 unknown variable 炸掉 assembly） | 真实会话系统提示 7054 字符，**第 6976 字符处**出现 `[约束前提]（来自 literature bias 库，均须遵守）：…`（真实 bias 行） |
+| ② | ✅ 已修（生产/测试） | 段名集合补入 `deployment:persona-prefix`/`-suffix`（**保留旧名**兼容）；`:394` 工作目录追加随之修复 | liangshen 受控阶段 `system/message` 从**空串**恢复为一行 persona。⚠️ **本报告 2.2 低估了后果**：该处恒空意味着受控阶段**系统提示为空字符串**，不只是"persona 链路失效" |
+| ③ | ✅ 已修（三处） | `assembled.sections.map(...)` → `assembled.contexts.map(...)`（注册的是 `systemPrompt.context`） | seq10 的 runtime-context 快照含完整 `[长期记忆召回]` 块；回合 `completed` |
+| ④ | ✅ 已修（**仅生产**） | `defaultEffort` 默认 `"max"` → `"high"`（收窄到 4 档表内；**未**补 `max`/`xhigh`，避免虚构各 endpoint 能力） | 收窄改动，无运行时验证需求 |
+| ⑤ | ✅ 已修（**仅测试机**） | `session.events` 加 `Array.isArray` 防御（该文件 CRLF/LF 混合，字节级行尾保留） | 四步 preflight 两轮全绿 |
+
+**验证方式**：四步 preflight 两轮全过（`node --check` 4/4、ESM import 4/4、重启后 active + 401 + journal 零 warning、`session/create` 返回 `ok:true`）；补丁脚本 `/www/scripts/dsh-015-compat-fix.py`（幂等，`--check` 复跑 10/10）。
+
+**遗留（未处理，非遗漏）**：
+1. **④ 属第三方包的部署副本**（`dsh-custom-provider-reasoning`），**包升级会被覆盖**，需重跑 `--scope prod`；测试机 6 档表未动。
+2. **仓库副本与部署件存在"修复前既有"分叉**（`plugin-v1.js` 仓库 147 行 vs 部署 220 行；`plugin-v3.js` 同理）→ 本次只做同一锚点修复，**未盲目同步**；建议择机做一次"部署→仓库"回灌，否则从仓库重建部署件会丢部署侧改进。
+3. 本报告 3.2（冷启动回放）与 anysearch 残留清理**按计划跳过**（前者需设计补偿方案，后者未被引用、无实际影响）。
+
+---
+
 ## ② 不兼容清单（均【已核实】）
 
 ### 2.1 🔴 `[约束前提]` 从未注入（最严重）
