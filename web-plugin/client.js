@@ -1524,17 +1524,21 @@ function apply(ctx) {
       function (props) { return React.createElement(MemoryPanel, props) },
     )
   })
-  // 记忆配置卡片：设置 → 插件 → 插件配置页（官方 configurable tab），独立卡片
-  slots.inject('settings.plugin.item', function* () {
-    yield slots.register(
-      { name: 'settings.plugin.item', id: 'deepmemory', key: 'deepmemory', order: 30, label: 'deepmemory 记忆' },
-      function () {
+  // 记忆配置卡片：设置 → 插件。0.1.7 起旧槽 `settings.plugin.item` 已删除，
+  // 改用插件页的 `plugins.item` 列表槽：注册项以「内嵌视图」参与渲染——
+  // view==='summary' 取其一行描述，其余（page）渲染整卡。旧代码的 key 与
+  // 第三个「注册条件」参数在新槽不存在，generator 形式也不需要。
+  slots.inject('plugins.item', function () {
+    return slots.register(
+      { name: 'plugins.item', id: 'deepmemory', order: 30, label: () => 'deepmemory 记忆' },
+      function (props) {
         const dict = I18N.zh
         const t = function (key) { return dict[key] !== undefined ? dict[key] : key }
+        if (props && props.view === 'summary') return '记忆与知识注入配置（数据来自 memory-server）'
         return React.createElement(ConfigView, { t: t, lang: 'zh', embedded: true, sessionId: null })
       },
     )
-  }, { key: 'deepmemory' })
+  })
 }
 return { name, apply }
   }

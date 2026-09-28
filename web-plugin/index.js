@@ -5,12 +5,13 @@
  * same-origin route, so no CORS or private-network policy applies.
  */
 import http from 'node:http'
-import z from '@deepseek-ai/schemastery'
 import fs from 'node:fs'
 
 export const name = 'deepmemory'
 
-export const inject = ['webServer', 'settings', 'timer']
+// 0.1.7 起不再注入 'settings'：ctx.settings 已由 SettingsProvider 改为
+// SettingsForms 服务，没有 register()；本插件也没有其它地方用到它。
+export const inject = ['webServer', 'timer']
 
 const TARGET_HOST = 'localhost'
 const TARGET_PORT = Number(process.env.MEMORY_SERVER_PORT || 6230)
@@ -458,11 +459,10 @@ function readRequestJson(req) {
 }
 
 export function apply(ctx) {
-  // The official Plugins settings page discovers configurable cards from the
-  // Host settings namespace list, then dispatches settings.plugin.item by key.
-  // Deepmemory keeps its actual config in memory-server, so this empty section
-  // is only the discovery contract for the browser-owned configuration card.
-  ctx.settings.register('deepmemory', z.object({}))
+  // 0.1.7 起设置页的表单从 Loader entry 的 Config schema 派生（按 profile entry
+  // id 索引），插件不再自行 register 命名空间——ctx.settings 已无 register()。
+  // deepmemory 的实际配置存在 memory-server，配置卡片由浏览器半通过
+  // `plugins.item` 槽位自绘注册，Host 侧无需任何注册动作。
 
   const cardBuckets = new Map()
   const cardRuns = new Set()
