@@ -1,0 +1,1099 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+- insert:
+    - id: web-search-anysearch
+      name: 'dsh-anysearch'
+
+# 临时插件：拦截模型流式输出重复退化（runaway repetition）。
+# 命中时以 EMPTY_RESPONSE 终止该次响应，由 dsh-llm-retry 在同一 step 重跑。
+- insert:
+    - id: reasoning-guard
+      name: 'dsh-reasoning-guard'
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash
+    reasoningEffort: high
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-08-13.1
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      uuapi-astra:
+        displayName: uuapi-astra (审核规划)
+        apiKeyEnv: UUAPI_ASTRA_API_KEY
+        api: openai-responses
+        baseURL: https://uuapi.shop/v1
+        models:
+          - id: gpt-6-astra
+            name: gpt-6-astra
+            contextWindow: 1000000
+            maxTokens: 128000
+            inputModalities:
+              - text
+              - image
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+        reasoning: high
+      uuapi-gpt:
+        apiKeyEnv: UUAPI_GPT_API_KEY
+        api: openai-responses
+        baseURL: https://uuapi.shop/v1
+        models:
+          - id: codex-auto-review
+            name: codex-auto-review
+            contextWindow: 1000000
+            maxTokens: 128000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
+          - id: gpt-5.6-sol
+            name: gpt-5.6-sol
+            contextWindow: 1000000
+            maxTokens: 128000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+          - id: gpt-5.6-terra
+            name: gpt-5.6-terra
+            contextWindow: 1000000
+            maxTokens: 128000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              xhigh: xhigh
+              max: max
+        reasoning: high
+      uuapi-claude:
+        apiKeyEnv: UUAPI_CLAUDE_API_KEY
+        api: anthropic-messages
+        baseURL: https://uuapi.shop
+        models:
+          - id: claude-opus-5
+            name: claude-opus-5
+            contextWindow: 200000
+            maxTokens: 32000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
+          - id: claude-opus-4-8-thinking
+            name: claude-opus-4-8-thinking
+            contextWindow: 200000
+            maxTokens: 32000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
+          - id: claude-sonnet-5
+            name: claude-sonnet-5
+            contextWindow: 200000
+            maxTokens: 64000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
+        displayName: uuapi-claude
+        reasoning: high
+      uuapi-gemini:
+        apiKeyEnv: UUAPI_GEMINI_API_KEY
+        api: openai-responses
+        baseURL: https://uuapi.shop/v1
+        models:
+          - id: gemini-3.7-flash
+            name: gemini-3.7-flash
+            contextWindow: 1000000
+            maxTokens: 128000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
+          - id: gemini-3.8-flash
+            name: gemini-3.8-flash
+            contextWindow: 1000000
+            maxTokens: 128000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
+        reasoning: high
+        compat:
+          supportsDeveloperRole: false
+      uuapi-grok:
+        apiKeyEnv: UUAPI_GROK_API_KEY
+        api: openai-responses
+        baseURL: https://uuapi.shop/v1
+        models:
+          - id: grok-4.6
+            name: grok-4.6
+            contextWindow: 500000
+            maxTokens: 128000
+            reasoningEfforts:
+              off: null
+              low: low
+              medium: medium
+              high: high
+              max: max
+        reasoning: high
+        compat:
+          supportsDeveloperRole: false
+      siliconflow:
+        displayName: 硅基流动
+        apiKeyEnv: SILICONFLOW_API_KEY
+        api: openai-completions
+        baseURL: https://api.siliconflow.cn/v1
+        models:
+          - id: deepseek-ai/DeepSeek-V4-Flash
+            reasoningEfforts:
+              off: null
+              high: high
+              max: max
+            maxTokens: 384000
+            contextWindow: 1000000
+        reasoning: max
+        compat:
+          supportsDeveloperRole: false
+      uuapi:
+        displayName: uuapi-国模
+        apiKeyEnv: UUAPI_API_KEY
+        api: openai-responses
+        baseURL: https://uuapi.shop/v1
+        models:
+          - id: deepseek-v4-flash-0731
+            name: deepseek-v4-flash-0731
+            contextWindow: 1000000
+            maxTokens: 384000
+            reasoningEfforts:
+              off: null
+              high: high
+              max: max
+          - id: deepseek-v4-flash
+            name: deepseek-v4-flash
+            contextWindow: 1000000
+            maxTokens: 384000
+            reasoningEfforts:
+              off: null
+              high: high
+              max: max
+        reasoning: max
+        cacheRetention: none
+      glm-official:
+        displayName: glm-official (GLM-5.3 代码/安全)
+        apiKeyEnv: GLM_API_KEY
+        api: openai-responses
+        baseURL: https://open.bigmodel.cn/api/v1
+        models:
+          - id: glm-5.3
+            name: GLM-5.3
+            contextWindow: 1048576
+            maxTokens: 131072
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+        reasoning: max
+- id: llm-deepseek
+  name: "@deepseek-ai/dsh-llm-deepseek-api-key"
+  config:
+    models:
+      - id: deepseek-v4-flash
+        name: DeepSeek-V4-Flash
+        description: Fast, efficient, and economical; suited to focused, routine, or
+          parallel tasks.
+        contextWindow: 1000000
+        inputModalities:
+          - text
+          - image
+      - id: deepseek-v4-pro
+        name: DeepSeek-V4-Pro
+        description: Stronger agentic coding, knowledge, and difficult reasoning; suited
+          to complex or quality-critical tasks at higher cost.
+        contextWindow: 1000000
+        inputModalities:
+          - text
+- id: ui-theme
+  name: "@deepseek-ai/dsh-client-ui-theme"
+  config:
+    preference: dark
+- id: bash-sandbox
+  name: "@deepseek-ai/dsh-bash-sandbox"
+  config:
+    timeoutMs: 300000
+
+# 2026-09-28：0.1.7 下 dsh-workbench 的 settings API 未移植，用户决定先不要；
+# 显式禁用（防每日 04:00 sync-test-env.sh 的"已装即补回 bundles"自愈再挂上）。
+- id: workbench-ui
+  disabled: true
+
+# ── agent preset harness-memory-task (DSH 0.1.7 declarative form) ─────────────────
+# Generated by /www/scripts/gen-preset-017.py from
+#   /www/dsh-test-home/.agent-presets/harness-memory-task/agent.cordis.yml
+# 0.1.7 no longer scans $DSH_HOME/.agent-presets; a preset is a normal
+# Cordis row declaring @deepseek-ai/dsh-agent-preset with config.plugins.
+- insert:
+    - id: preset-harness-memory-task
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: harness-memory-task
+        name: '任务型 Agent（长期记忆 / deepmemory）'
+        description: '带任务看板、过程记忆与委派的任务型编码 agent（deepmemory 载体）'
+        order: 50
+        plugins:
+          # Task preset: full coding agent with task board, process memory, and delegation.
+          #
+          # This preset supports development, deployment, project planning, and execution
+          # validation. It includes task state cards, task boards, process memory, and
+          # subtask orchestration.
+
+          # ── identity ────────────────────────────────────────────────────────────────
+
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a task-oriented coding agent powered by the {{model}} model.
+                Your working directory is {{cwd}}. You maintain task state, manage
+                subtasks, and track execution progress.
+                Credential rule: if a message, tool output, or memory contains a credential
+                (GitHub/Gitea PAT, API key, password, private key, Bearer token), never
+                reproduce the literal value. Remember only the reference name/env var and
+                that a credential exists, with the value shown as REDACTED.
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          # ── shell ───────────────────────────────────────────────────────────────────
+
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+
+          # ── filesystem ──────────────────────────────────────────────────────────────
+
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
+          # ── background jobs ─────────────────────────────────────────────────────────
+
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+
+          # ── skills ──────────────────────────────────────────────────────────────────
+
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            # 不配置 customSkillDirs：literature 技能**不进入 DSH 自动发现**，
+            # 改由用户主动发起（见 docs/dsh-literature-skill-management-v02.md §主动加载）。
+
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          # ── goals ───────────────────────────────────────────────────────────────────
+
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+
+          # ── plan mode ───────────────────────────────────────────────────────────────
+
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                        Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                        The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                        Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                        Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                        When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+          # ── compaction ──────────────────────────────────────────────────────────────
+
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  thresholdRatio: 0.45
+                  retainRatio: 0.2
+
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+          # ── delegation and workflows ────────────────────────────────────────────────
+
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  backgroundMode: continuable
+                  # 允许运行时切换子 agent 模型（白名单见 settings.yaml: subagent-model-selection）
+                  modelSelectionSettings: true
+                  # 默认子 agent 模型（调用时未指定 provider/model 时使用）
+                  # 2026-09-12：按用户要求全部改回 DeepSeek。fable 曾短暂做过默认，但它在 uuapi 上
+                  # 会偶发 502、窗口只有 200k，子 agent 频繁撞压缩阈值（实测 1 小时压 35 次）。
+                  # 要用 fable / GLM 时在调用处显式传 provider/model（白名单已含这两条路由）。
+                  agentOptions:
+                    provider: deepseek-official
+                    model: deepseek-v4-flash
+                    reasoningEffort: high
+                  # 子 agent 默认不注入 DSH skill catalog（省 token）：
+                  # dsh-tool-skill 只在「调用方 agent 能解析到 skill 工具」时才注入 catalog，
+                  # 这里 deny 掉即等价于「skill 注入可选、默认关」。
+                  # 需要某个子 agent 用 skill 时：删掉该 toolFilter，或改成 allow 白名单。
+                  toolFilter:
+                    deny:
+                      - skill
+
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+                  modelSelectionSettings: true
+                  agentOptions:
+                    provider: deepseek-official
+                    model: deepseek-v4-flash
+                    reasoningEffort: high
+                  # 子 agent 默认不注入 DSH skill catalog（省 token）：
+                  # dsh-tool-skill 只在「调用方 agent 能解析到 skill 工具」时才注入 catalog，
+                  # 这里 deny 掉即等价于「skill 注入可选、默认关」。
+                  # 需要某个子 agent 用 skill 时：删掉该 toolFilter，或改成 allow 白名单。
+                  toolFilter:
+                    deny:
+                      - skill
+
+              # GLM-5.3 代码/安全专员：固定走 glm-official（max 思考档），不参与运行时切换。
+              # 用于代码写作、重构、漏洞分析、加固与审计类委派；不允许再向下委派（maxDepth: 0）。
+              - id: tool-subagent-glm
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent_glm
+                  backgroundMode: continuable
+                  maxDepth: 0
+                  # 子 agent 默认不注入 DSH skill catalog（省 token）：
+                  # dsh-tool-skill 只在「调用方 agent 能解析到 skill 工具」时才注入 catalog，
+                  # 这里 deny 掉即等价于「skill 注入可选、默认关」。
+                  # 需要某个子 agent 用 skill 时：删掉该 toolFilter，或改成 allow 白名单。
+                  toolFilter:
+                    deny:
+                      - skill
+                  persona: |
+                    你是「GLM 代码与安全专员」，由主 agent 委派的专职子 agent，运行在 GLM-5.3（max 思考档）。
+
+                    专长：
+                    - 代码写作与改造：新增功能、重构、修 bug、补测试、迁移适配、性能优化。写出的代码必须可直接落地，严格遵循所在仓库既有风格、命名与目录约定。
+                    - 网络安全与攻防分析：漏洞成因定位、PoC 复现、加固与缓解方案、依赖与配置审计、日志与流量分析、权限与凭据风险排查。只做防御性与授权范围内的验证，拒绝产出针对真实第三方目标的攻击载荷。
+
+                    工作方式：
+                    1. 先读后写：动手前用 read/grep/glob 把相关文件、调用方和测试读清楚，禁止凭猜测改代码。
+                    2. 小步验证：改动后用 bash 跑测试、类型检查或最小复现命令，把真实输出作为结论依据，禁止声称未实际运行的验证。
+                    3. 结论可执行：交付时说清「改了什么、为什么、怎么验证」，路径用绝对路径，命令可原样复制。
+                    4. 不越权：不擅自扩大改动范围；拿不准的地方明确说出不确定点和需要主 agent 决策的选项，而不是替你决定。
+                  agentOptions:
+                    provider: glm-official
+                    model: glm-5.3
+                    reasoningEffort: max
+
+
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+
+          # ── remaining model-facing rows ─────────────────────────────────────────────
+
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000
+
+          # ── long-term memory ────────────────────────────────────────────────────────
+
+          # Task preset uses deepmemory with full task board, task state cards, and
+          # process memory. Budget profile: task-default (see budget configuration below).
+          - id: harness-memory
+            name: '/www/dsh-test-home/.agent-presets/_memory-plugin/plugin-v3.js'
+            config:
+              preset_mode: task
+              budget_profile: task-default
+
+          # 轨 B：知识库约束注入（[约束前提] 段——6260 bias 知识；预算外）
+          - id: literature-kb
+            name: '/www/dsh-test-home/.agent-presets/_literature-kb-plugin/plugin-v1.js'
+
+          # 文献读写工具（add/search/attach/update/link_evidence）。
+          # workspace_id 必须由调用方显式提供（服务端与插件都禁兜底：错值会写进孤儿工作区）。
+          - id: literature-io
+            name: '/www/dsh-test-home/.agent-presets/_literature-plugin/plugin-v1.js'
+
+          # ── budget configuration ────────────────────────────────────────────────────
+
+          # Task preset budget profile: optimized for development work with process memory.
+          # These are soft targets for memory allocation within the total context window.
+          # Hard limits prevent any single component from consuming the entire context.
+          #
+          # Priority order (highest first):
+          #   1. recent_messages (0.50) - immediate conversation context
+          #   2. task_state_card (0.15) - current task state snapshot
+          #   3. task_board (0.10) - task lifecycle overview
+          #   4. active_memory (0.15) - semantic recall of relevant facts
+          #   5. recall_reserve (0.10) - buffer for memory_recall tool expansion
+          #
+          # Token constraints:
+          #   - Soft target ratio: 0.70 (allow memory to use up to 70% of context)
+          #   - Hard limit ratio: 0.85 (never exceed 85% to leave room for response)
+          #
+          # Note: Ratios don't need to sum to 1.0. Unused budget returns to the pool
+          # and is redistributed by priority when other components need expansion.
+
+# ── agent preset harness-memory (DSH 0.1.7 declarative form) ─────────────────
+# Generated by /www/scripts/gen-preset-017.py from
+#   /www/dsh-test-home/.agent-presets/harness-memory/agent.cordis.yml
+# 0.1.7 no longer scans $DSH_HOME/.agent-presets; a preset is a normal
+# Cordis row declaring @deepseek-ai/dsh-agent-preset with config.plugins.
+- insert:
+    - id: preset-harness-memory
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: harness-memory
+        name: '记忆增强模式'
+        description: '标准编码 Agent + 长期记忆系统（pre-step 语义召回注入、自动抽取、工作区状态卡、/memory 开关，依赖本机 dsh-memory-server）。'
+        order: 50
+        plugins:
+          # The `standard` agent preset: the full coding agent, mounted once per process.
+          #
+          # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
+          # standing scope; every session naming it joins by scope parentage, so the
+          # tools and prompt sections registered here cover each joined agent while a
+          # session's own state stays keyed per Session/Agent inside the plugins. The
+          # host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a
+          # preset must not own: the registries themselves, the sandbox and approval
+          # stack, persistence, and the model route.
+          #
+          # A service row here MUST sit inside a group carrying an `isolate` realm.
+          # Without one it publishes into the root realm, where it is process-global —
+          # another preset publishing the same name collides, and a host reader would
+          # resolve one preset's instance for every session; `dsh-agent-presets` rejects
+          # that at mount. `true` means an entry-local realm: this standing mount's own
+          # private instance, apart from every other preset's. (A shared label does NOT
+          # pool instances — `provide()` throws on the second registration under the
+          # same realm symbol; labels join REALMS, and are not what this file needs.)
+
+          # ── identity ────────────────────────────────────────────────────────────────
+
+          # The preset's own persona, shadowing the deployment default for this agent.
+          # `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          # ── shell ───────────────────────────────────────────────────────────────────
+
+          # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
+          # publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
+          # the criterion for host-plane ownership — injection resolves before any session
+          # exists, so there is no agent to key by. Behind a preset realm those variables
+          # never reached the model's shell at all. Both shell tools consume the host
+          # registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
+          # host-plane too.
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+
+          # ── filesystem ──────────────────────────────────────────────────────────────
+
+          # Both register into the host `tools` registry and provide nothing, so
+          # they need no realm. The `fs` service and its policy stay in the host.
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
+          # ── background jobs ────────────────────────────────────────────────────────
+
+          # Only the model-facing controls. The task REGISTRY stays on the host plane:
+          # its producers sit outside any realm this file could put it in — `tool-bash`
+          # above resolves it with `ctx.get`, and an entry-local realm here is invisible
+          # to every sibling row, so `run_in_background` would answer "background jobs
+          # unavailable" while these controls sat in the catalog. The registry is keyed by
+          # owning agent anyway, so one host instance serves every session. What a preset
+          # chooses is whether its agent can collect and stop background work at all.
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+
+          # ── skills ──────────────────────────────────────────────────────────────────
+
+          # The skill REGISTRY lives in the host composition and is layered per scope:
+          # these rows register into THIS preset's layer of it, so they need no realm.
+          # `skill-filesystem` contributes local-root discovery for agents on this preset, and
+          # `tool-skill` gives them the catalog and loader; the merged catalog also
+          # carries whatever the deployment registered globally (repository plugins).
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          # ── goals ───────────────────────────────────────────────────────────────────
+
+          # Only the model-facing tool. The goal SERVICE, its session driver, and the
+          # `/goal` command stay on the host plane: the Gateway serves the goal domain as
+          # Remote endpoints whose receiver comes from a generated descriptor, so it
+          # resolves `goals` on the host and an entry-local realm here would hide it. The
+          # registry is keyed by session anyway, so one host instance serves every
+          # session. What a preset chooses is whether its agent can call the goal tool.
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+
+          # ── plan mode ───────────────────────────────────────────────────────────────
+
+          # Plan state is per-agent by nature, so an entry-local realm is not a
+          # workaround here — it is the correct lifetime.
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                        Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                        The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                        Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                        Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                        When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+          # ── compaction ──────────────────────────────────────────────────────────────
+
+          # `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must
+          # share this realm rather than sit outside it.
+          #
+          # `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
+          # plane, and the rows here resolve that one instance. It takes no configuration,
+          # keys every fold by Session, and owns the context-meter projection units the
+          # browser reads for every session — behind a realm those units would come and go
+          # with whichever presets happen to be mounted. What a preset chooses is whether
+          # its agent compacts at all, which is `compaction-basic` below.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  thresholdRatio: 0.45
+                  retainRatio: 0.2
+
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+          # ── delegation and workflows ────────────────────────────────────────────────
+
+          # The `subagents` registry and its spawn/fork backends live in the HOST
+          # composition: the registry is a process singleton whose cross-session queries
+          # the api-proxy serves to the browser, and a provider name may only be
+          # registered once. This preset contributes the delegation TOOLS, which resolve
+          # that host registry.
+          #
+          # `workflows` is different — nothing outside an agent reads it — so every row
+          # that reaches it shares one entry-local realm here, and a consumer left
+          # outside would resolve a host registry this preset does not populate.
+          #
+          # `tool-subagent-report` is host-plane for the same reason as the registry,
+          # not because a preset may not want it: it registers a CONTINUABLE SETUP on
+          # that singleton rather than a tool this agent calls, and the setup list is
+          # not scope-aware — one copy per mounted preset means every child gets
+          # `report` registered once per live session, which throws on the second.
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  backgroundMode: continuable
+                  # 允许运行时切换子 agent 模型（白名单见 settings.yaml: subagent-model-selection）
+                  modelSelectionSettings: true
+                  # 默认子 agent 模型（调用时未指定 provider/model 时使用）
+                  # 2026-09-12：按用户要求全部改回 DeepSeek。fable 曾短暂做过默认，但它在 uuapi 上
+                  # 会偶发 502、窗口只有 200k，子 agent 频繁撞压缩阈值（实测 1 小时压 35 次）。
+                  # 要用 fable / GLM 时在调用处显式传 provider/model（白名单已含这两条路由）。
+                  agentOptions:
+                    provider: deepseek-official
+                    model: deepseek-v4-flash
+                    reasoningEffort: high
+
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+                  modelSelectionSettings: true
+                  agentOptions:
+                    provider: deepseek-official
+                    model: deepseek-v4-flash
+                    reasoningEffort: high
+
+              # GLM-5.3 代码/安全专员：固定走 glm-official（max 思考档），不参与运行时切换。
+              # 用于代码写作、重构、漏洞分析、加固与审计类委派；不允许再向下委派（maxDepth: 0）。
+              - id: tool-subagent-glm
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent_glm
+                  backgroundMode: continuable
+                  maxDepth: 0
+                  persona: |
+                    你是「GLM 代码与安全专员」，由主 agent 委派的专职子 agent，运行在 GLM-5.3（max 思考档）。
+
+                    专长：
+                    - 代码写作与改造：新增功能、重构、修 bug、补测试、迁移适配、性能优化。写出的代码必须可直接落地，严格遵循所在仓库既有风格、命名与目录约定。
+                    - 网络安全与攻防分析：漏洞成因定位、PoC 复现、加固与缓解方案、依赖与配置审计、日志与流量分析、权限与凭据风险排查。只做防御性与授权范围内的验证，拒绝产出针对真实第三方目标的攻击载荷。
+
+                    工作方式：
+                    1. 先读后写：动手前用 read/grep/glob 把相关文件、调用方和测试读清楚，禁止凭猜测改代码。
+                    2. 小步验证：改动后用 bash 跑测试、类型检查或最小复现命令，把真实输出作为结论依据，禁止声称未实际运行的验证。
+                    3. 结论可执行：交付时说清「改了什么、为什么、怎么验证」，路径用绝对路径，命令可原样复制。
+                    4. 不越权：不擅自扩大改动范围；拿不准的地方明确说出不确定点和需要主 agent 决策的选项，而不是替你决定。
+                  agentOptions:
+                    provider: glm-official
+                    model: glm-5.3
+                    reasoningEffort: max
+
+              # Product providers are host-plane singletons. Copy this preset, then
+              # remove `disabled` from either ordinary tool row to expose that product
+              # only to agents composed from the copy.
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  enableRunInBackground: false
+                  maxDepth: provider-managed
+
+
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+
+          # ── remaining model-facing rows ─────────────────────────────────────────────
+
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+
+          # The `web` service and its search provider stay in the host composition; only
+          # the model-facing tool is per-session.
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000
+
+          # ── long-term memory ────────────────────────────────────────────────────────
+
+          # 长期记忆插件（本地实现，相对路径行）。依赖本机 memory-server
+          # （systemd: dsh-memory-server，http://localhost:6230）。
+          # pre-step 语义召回注入 + turn-stopping 廉价 LLM 自动抽取 +
+          # 工作区状态卡 + /memory on|off|status|clean 会话级开关。
+          # 注册到宿主 tools 注册表、不发布服务，无需 isolate 域。
+          - id: harness-memory
+            # 2026-09-28（0.1.7 适配）：指向共享的**已修版本**（1155 行，含全部修复），
+            # 不再用本目录自带的 610 行旧副本（./memory-plugin/plugin-v3.js，0 个修复标记）。
+            # 0.1.7 下子插件行的相对路径基准是「声明行所在 profile 目录」，故必须绝对路径。
+            name: '/www/dsh-test-home/.agent-presets/_memory-plugin/plugin-v3.js'
+
+          # ── literature kb 知识库查询 ─────────────────────────────────────────────────
+
+          # literature 知识库查询工具（kb_query/browse/constraints/contracts/graph）。
+          # 经宿主 /lit-api 代理访问 literature kb-server（6262，回环）。
+          - id: literature-kb
+            name: '/www/dsh-test-home/.agent-presets/_literature-kb-plugin/plugin-v1.js'
+
+# ── agent preset harness-memory-daily (DSH 0.1.7 declarative form) ─────────────────
+# Generated by /www/scripts/gen-preset-017.py from
+#   /www/dsh-test-home/.agent-presets/harness-memory-daily/agent.cordis.yml
+# 0.1.7 no longer scans $DSH_HOME/.agent-presets; a preset is a normal
+# Cordis row declaring @deepseek-ai/dsh-agent-preset with config.plugins.
+- insert:
+    - id: preset-harness-memory-daily
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: harness-memory-daily
+        name: '日常问答模式'
+        description: '轻量问答、复习、求教、日常状态卡和短期记忆，不包含任务看板、子 agent、workflow。'
+        order: 51
+        plugins:
+          # Daily preset: lightweight Q&A mode with short-term memory and topic management.
+          #
+          # This preset is for casual conversation, learning, temporary queries, and
+          # general dialogue. It maintains lightweight state cards for short-term topics
+          # but does not include task boards, process memory, or heavy orchestration.
+
+          # ── identity ────────────────────────────────────────────────────────────────
+
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a conversational assistant powered by the {{model}} model.
+                Your working directory is {{cwd}}. You help with daily questions,
+                learning, and casual exploration.
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          # ── shell ───────────────────────────────────────────────────────────────────
+
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+
+          # ── filesystem ──────────────────────────────────────────────────────────────
+
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
+          # ── skills ──────────────────────────────────────────────────────────────────
+
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          # ── compaction ──────────────────────────────────────────────────────────────
+
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  thresholdRatio: 0.45
+                  retainRatio: 0.2
+
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+          # ── remaining model-facing rows ─────────────────────────────────────────────
+
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000
+
+          # ── long-term memory ────────────────────────────────────────────────────────
+
+          # Daily preset uses deepmemory with lightweight topic management and short-term
+          # memory. No task board, no subtask orchestration.
+          # Budget profile: daily-default (see budget configuration below).
+          - id: harness-memory
+            name: '/www/dsh-test-home/.agent-presets/_memory-plugin/plugin-v3.js'
+            config:
+              preset_mode: daily
+              budget_profile: daily-default
+
+          # ── budget configuration ────────────────────────────────────────────────────
+
+          # Daily preset budget profile: optimized for conversational flow with topic continuity.
+          # These are soft targets for memory allocation within the total context window.
+          # Hard limits prevent any single component from consuming the entire context.
+          #
+          # Priority order (highest first):
+          #   1. recent_messages (0.60) - maximize immediate conversation flow
+          #   2. daily_state_card (0.10) - current topic and suspended topics
+          #   3. active_memory (0.20) - semantic recall for continuity
+          #   4. recall_reserve (0.10) - buffer for memory_recall tool expansion
+          #
+          # Token constraints:
+          #   - Soft target ratio: 0.60 (allow memory to use up to 60% of context)
+          #   - Hard limit ratio: 0.75 (never exceed 75%, lighter than task mode)
+          #
+          # Note: Daily mode has NO task_board allocation. Ratios don't need to sum to 1.0.
+          # Unused budget returns to the pool and is redistributed by priority.
+
+# ── agent preset harness-memory-blank (DSH 0.1.7 declarative form) ─────────────────
+# Generated by /www/scripts/gen-preset-017.py from
+#   /www/dsh-test-home/.agent-presets/harness-memory-blank/agent.cordis.yml
+# 0.1.7 no longer scans $DSH_HOME/.agent-presets; a preset is a normal
+# Cordis row declaring @deepseek-ai/dsh-agent-preset with config.plugins.
+- insert:
+    - id: preset-harness-memory-blank
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: harness-memory-blank
+        name: 'DeepSeek Harness 子插件空白模板'
+        description: '可复制修改的最小 Agent preset；不包含 deepmemory 业务逻辑，供第三方开发子插件使用。'
+        order: 52
+        plugins:
+          # Blank DeepSeek Harness agent preset.
+          # Copy this directory before adding product-specific tools or plugins.
+          #
+          # Keep session/task state out of this file. The preset is a capability template;
+          # session state belongs to the runtime and persistent services.
+
+          # -- identity ---------------------------------------------------------------
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a configurable DeepSeek Harness agent powered by the {{model}} model.
+                Your working directory is {{cwd}}.
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          # -- optional tools ---------------------------------------------------------
+          # Uncomment or add only the tools your plugin needs. Host-plane registries such
+          # as tools, jobs, and subagents must not be reimplemented inside this preset.
+
+          # - id: tool-bash
+          #   name: '@deepseek-ai/dsh-tool-bash'
+
+          # - id: tool-fs
+          #   name: '@deepseek-ai/dsh-tool-fs'
+
+          # - id: tool-fs-search
+          #   name: '@deepseek-ai/dsh-tool-fs-search'
+
+          # - id: tool-ask-user
+          #   name: '@deepseek-ai/dsh-tool-ask-user'
+
+          # -- preset-local extension point ------------------------------------------
+          # Replace this relative path with the entry point of your own plugin.
+          # Keep service providers in an isolated realm when their lifetime is preset-local.
+
+          - id: plugin-entry
+            # 2026-09-28（0.1.7 适配）：0.1.7 下子插件行的相对路径基准是「声明行所在 profile 目录」，
+            # 不是 preset 目录，`./plugin/plugin.js` 会 404。生成器只绝对化 `../` 开头的 name，
+            # 不处理 `./`，故此处手工写死绝对路径（语义不变：仍是本 preset 自带的空模板桩）。
+            name: '/www/dsh-test-home/.agent-presets/harness-memory-blank/plugin/plugin.js'
+
+          # -- optional runtime group -------------------------------------------------
+          # Add a group only when the plugin actually needs a preset-local service.
+
+          # - id: plugin-runtime
+          #   name: cordis:group
+          #   group: true
+          #   isolate:
+          #     pluginRuntime: true
+          #   config:
+          #     - id: plugin-service
+          #       name: './plugin/service.js'
+
+          # -- configurable context budget -------------------------------------------
+          # These are plugin-owned policy defaults, not the model context window.
+          # Resolve model capacity through ctx.llm.resolveModelInfo().context and current
+          # request pressure through ctx.tokenMeter.
+
+          # Blank preset budget profile: minimal allocation for third-party plugins.
+          # This template does NOT mount deepmemory by default. If your plugin needs
+          # memory or state management, define your own budget profile here.
+          #
+          # Example budget structure (adjust for your plugin's needs):
+          #
+          # your_plugin:
+          #   budget_profile: blank-default
+          #   context:
+          #     soft_target_ratio: 0.40
+          #     hard_limit_ratio: 0.60
+          #     priority_allocation:
+          #       recent_messages:
+          #         ratio: 0.70
+          #         priority: 1
+          #         min_tokens: 2048
+          #       plugin_state:
+          #         ratio: 0.15
+          #         priority: 2
+          #         min_tokens: 256
+          #       plugin_reserve:
+          #         ratio: 0.15
+          #         priority: 3
+          #         min_tokens: 512
+
+          # -- subagents and workflows -----------------------------------------------
+          # Deliberately absent. Enable only with a bounded delegation contract and a
+          # clear primary-agent validation rule for child results.
