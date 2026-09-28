@@ -760,6 +760,13 @@
                     provider: deepseek-official
                     model: deepseek-v4-flash
                     reasoningEffort: high
+                  # 子 agent 默认不注入 DSH skill catalog（省 token）：
+                  # dsh-tool-skill 只在「调用方 agent 能解析到 skill 工具」时才注入 catalog，
+                  # 这里 deny 掉即等价于「skill 注入可选、默认关」。
+                  # 需要某个子 agent 用 skill 时：删掉该 toolFilter，或改成 allow 白名单。
+                  toolFilter:
+                    deny:
+                      - skill
 
               - id: tool-subagent-fork
                 name: '@deepseek-ai/dsh-tool-subagent'
@@ -772,6 +779,13 @@
                     provider: deepseek-official
                     model: deepseek-v4-flash
                     reasoningEffort: high
+                  # 子 agent 默认不注入 DSH skill catalog（省 token）：
+                  # dsh-tool-skill 只在「调用方 agent 能解析到 skill 工具」时才注入 catalog，
+                  # 这里 deny 掉即等价于「skill 注入可选、默认关」。
+                  # 需要某个子 agent 用 skill 时：删掉该 toolFilter，或改成 allow 白名单。
+                  toolFilter:
+                    deny:
+                      - skill
 
               # GLM-5.3 代码/安全专员：固定走 glm-official（max 思考档），不参与运行时切换。
               # 用于代码写作、重构、漏洞分析、加固与审计类委派；不允许再向下委派（maxDepth: 0）。
@@ -798,6 +812,13 @@
                     provider: glm-official
                     model: glm-5.3
                     reasoningEffort: max
+                  # 子 agent 默认不注入 DSH skill catalog（省 token）：
+                  # dsh-tool-skill 只在「调用方 agent 能解析到 skill 工具」时才注入 catalog，
+                  # 这里 deny 掉即等价于「skill 注入可选、默认关」。
+                  # 需要某个子 agent 用 skill 时：删掉该 toolFilter，或改成 allow 白名单。
+                  toolFilter:
+                    deny:
+                      - skill
 
               # Product providers are host-plane singletons. Copy this preset, then
               # remove `disabled` from either ordinary tool row to expose that product
