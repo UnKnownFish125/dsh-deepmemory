@@ -1,9 +1,9 @@
 # deepmemory 会话记忆治理计划（迁移 · key · 归档清理 · 状态卡/任务板 AI 自动更新）
 
-> 版本：v0.6 讨论稿
-> 状态：规划中，未进入实施
-> 基线：v0.5.0（a9319ab）已收口提交并部署；生产 web 插件为 `dsh-deepmemory`。
-> 更新：2026-08-24
+> 版本：v0.7（2026-10-21 实施核对版）
+> 状态：**主体已实施**——§3.1 / §3.5 / §3.6 已完成；§3.2 / §3.3 / §3.4 部分（服务端已就绪，导入 UI、自动归档清理未闭环）；§4 蒸馏仍延后。
+> 基线：v0.5.0（a9319ab）起草 → 现网 v0.6.3 部署（生产 `server.py` 4057 行）；生产 web 插件为 `dsh-deepmemory`。
+> 更新：2026-08-24 起草 · **2026-10-21 逐项核对（见 §9）**
 
 ## 0. 用户需求原文（梳理）
 
@@ -18,6 +18,8 @@
 ## 2. 现状与根因（已核实，2026-08-24 代码基线）
 
 ### 2.0 自动压缩验证结论（2026-08-24 生产实测）
+
+> ⚠️ **2026-10-21 复核：本节结论已过时。** 生产 journal 实测 `extracted 12/12 memories`（2026-10-21 19:24，`deepseek-official/deepseek-flash effort=low` 14.6s）；测试机压缩链路实测 `compaction/start:1 → compaction/summary:1 → compaction/end:1` 且 `turn/end=completed`。抽取与压缩现均正向工作，根因（抽取 LLM 空转）已随模型路由修复消失。证据见 §9。
 
 - **结论：生产自动压缩链没有正反馈**。证据：
   1. journal（dsh pid 1083072）显示 `extracting from 6/7/15/16 messages…` 出现 4 次，
@@ -37,6 +39,8 @@
 
 ### 2.1 状态卡/任务板为何不被 AI 自动更新
 
+> ⚠️ **2026-10-21 复核：本节“通道是断的”已过时。** 现插件已写回状态卡与任务：`plugin-v3.js` 的 `PUT /v1/v2/cards`（:1014）、`POST /v1/v2/tasks`（:1079）、`/blocked`（:1108）、`/transition`（:1119）；抽取 prompt 已含 `card` + `tasks` 契约（:196/:199）。测试库 `tasks` 表 8,796 行（completed 3496 / failed 45 / in_progress 1598 / planned 949 / todo 2708）。详见 §9。
+
 - `agent-preset/memory-plugin/plugin-v3.js` 的抽取 prompt（`EXTRACT_SYSTEM`）**声明了**
   `card`（goal/current_plan/key_decisions/in_progress/next_steps），
   但 `agent/turn-stopping` 处理器只把 `result.memories` 写入 `/v1/memories/add_batch`，
@@ -51,6 +55,8 @@
 
 ### 2.2 会话记忆的边界与可达性
 
+> ⚠️ **2026-10-21 复核：** “没有会话级导出/迁移接口”已过时——`/v1/v2/sessions/<sid>/memories/export|import`、`/purge`、`/v1/v2/session-keys*` 均已实现（生产 `server.py:3248/3544/3552/3561/3571`）。仍缺的是 **import 的 UI 入口**（导出/清理有按钮）。
+
 - `documents` 表以 `session_id` / `workspace_id` 作为归属边界；`scope_allows()` 做读写过滤。
 - 记忆按会话管理的现有接口：单条 `GET/DELETE /v1/memories/<id>`、`/v1/memories/list`（可按 scope/session 过滤）；
   **没有按会话批量清理、没有会话级导出/迁移接口**。
@@ -59,13 +65,15 @@
 
 ### 2.3 会话归档/删除
 
+> ⚠️ **2026-10-21 复核：** 结论仍成立但已部分缓解——手动 purge（`POST /v1/v2/sessions/<sid>/purge` + 记忆面板按钮 `client.js:1863-1869`）可用；**自动跟随仍未做**，因为 DSH 0.1.7 的事件词表里确实没有 `session/delete|archive`（`dsh-session` 全 store 检索无命中）。
+
 - DSH 会话生命周期由 Host 管理（`dsh-session` 的 `SessionStore`），
   事件词表中没有 `session/archive` 类的持久化事件；
 - deepmemory 目前**不做任何**会话删除的跟随清理——会话归档后其记忆、状态卡、任务板会残留。
 
 ## 3. 目标设计
 
-### 3.1 会话记忆 key（迁移凭证）
+### 3.1 会话记忆 key（迁移凭证）✅ 已实施
 
 - **模型**：每个（`workspace_id`, `session_id`）配一把 opaque key（随机 32B，URL-safe）。
   key 只定向到"这个会话的记忆库"，不携带其他会话权限；
@@ -78,7 +86,7 @@
 - **key 的用途**：迁移接口用 key 做**只读**凭证访问源会话记忆库，而不是用 session UUID
   （便于把"这份记忆"安全地交给另一个会话/实例）。
 
-### 3.2 记忆迁移接口
+### 3.2 记忆迁移接口 ◐ 服务端已实施（导入无 UI）
 
 - `GET /v1/v2/sessions/<session_id>/memories/export?key=<session_key>&format=json`
   - 导出该会话全部活跃记忆（content/key_facts/persona_summary/type/domain/scope/importance/atoms/entities/relations），
@@ -92,7 +100,7 @@
 - **sensitive / protected_source 处理**：导出不含敏感原文；目标实例 import 时敏感标记随行，
   原文通过受保护来源机制在目标实例重新授权解析（不复制密钥）。
 
-### 3.3 会话维护界面（key 获得入口）
+### 3.3 会话维护界面（key 获得入口）◐ 部分实施（缺导入入口）
 
 - **deepmemory 记忆面板**（client.js conversation.view `记忆` tab）新增「会话维护」区块：
   - 显示当前会话 key（可复制、可轮换）；
@@ -100,7 +108,7 @@
   - 会话归档清理入口（见 3.4）。
 - 该区块仅在该会话 opens 时显示，不跨会话暴露其他会话的 key（key 独立、按会话隔离）。
 
-### 3.4 会话归档 → 记忆清理
+### 3.4 会话归档 → 记忆清理 ◐ 手动 purge 已实施；自动跟随未做
 
 - **触发**：DSH Web 会话抽屉删除/归档会话时，Host 不再主动感知 deepmemory；
   方案：由记忆插件的 Host 侧监听会话管理事件，或由 DSH 会话删除流程显式调
@@ -114,7 +122,7 @@
   `agent/turn-stopping` + Host 响应中检测"该会话已被抹掉"的条件（如 session store 追查不到）
   是过重；故**清理动作锚定在 Host/UI 层**：会话删除/归档操作发生时调用 purge，插件本身不承担归档探测。
 
-### 3.5 状态卡/任务看板 AI 自动更新（修复）
+### 3.5 状态卡/任务看板 AI 自动更新（修复）✅ 已实施
 
 1. **plugin-v3 写回状态卡**：
    - 抽取产物从 `card` 字段落盘：turn-stopping 中若有 `card`，调
@@ -133,7 +141,7 @@
    - 冲突：仍以 `expected_version`/增量 revision 防覆盖——不改单体并发语义。
 4. **卡片修订/任务事件**：写入全程走 v2 修订轨迹（`state_card_revisions`、`task_events`），AI 行为可审计溯。
 
-### 3.6 状态卡主动初始化 HTTP 500（已复现，纳入修复）
+### 3.6 状态卡主动初始化 HTTP 500（已复现，纳入修复）✅ 已修复
 
 - **现象**：无状态卡会话点「初始化」→ `POST /mem-api/v1/cards/initialize` → **HTTP 500**。
 - **已核实根因**：`web-plugin/index.js` 的 `extractSessionCard()` 用
@@ -152,7 +160,7 @@
   4. 与 §3.5 共享修复：插件 AI 写回状态卡的提取健壮性复用同一 LLM 链路。
 - **验收**：初始化可成功建卡；LLM 不可用时返回结构化错误而非 500；verify 覆盖真实链路。
 
-## 4. 蒸馏（技能 + 知识，合并设计，延后）
+## 4. 蒸馏（技能 + 知识，合并设计，延后）⏸ 仍延后
 
 - **延后**：本计划不实施蒸馏；技能蒸馏（`deepmemory-skill-distillation-plan.md`）暂行保留，
   等待指令。
@@ -208,3 +216,50 @@
 4. 导入目标会话记忆库的归属：默认「迁移目的会话自己的 workspace_id」——是否要可指定。
 5. 初始化 500 的修复优先级：与迁移/归档/l渲染清理同批，还是先行单独修复——
    建议**先单独修复（小改动、立刻解除生产报错）**。
+## 9. 实施核对记录（2026-10-21）
+
+**核对方法**：逐项对照生产/测试 `server.py` 真实路由、部署插件代码行号、测试机 memory.db 表数据、会话日志实测事件；不采信计划自述。生产侧只读。
+
+### 9.1 逐项状态
+
+| 计划项 | 要求 | 状态 | 证据（绝对路径 / 行号） |
+|---|---|---|---|
+| §3.1 会话记忆 key | `session_keys` 表 + 创建/查询/轮换 3 端点 + 界面 | ✅ 已实施 | 生产 `/www/deepmemory-v063-deploy/memory-server/server.py:3248/3544/3552`；测试 `/www/dsh-test-memory/server.py:3538/3834/3842`；测试库 `/www/dsh-test-memory/data/memory.db` 表 `session_keys`（5 行）；`/www/dsh/home/profiles/web/node_modules/dsh-deepmemory/client.js:1820/1828/1837` |
+| §3.2 记忆迁移接口 | export/import（merge/replace）+ key 凭证 | ◐ 半落地 | import：生产 `server.py:3561`、测试 `:3851`；export：`client.js:1846`、按钮 `:2007`；**client.js 无 import 调用**（无 UI 入口，仅 curl 可用） |
+| §3.3 会话维护界面 | key 显示/轮换 + 导出/导入/归档 | ◐ 部分 | key+导出+清理入口 `client.js:1820-1837 / 1846 / 1863-1869 / 2007-2008`；缺导入按钮 |
+| §3.4 归档 → 记忆清理 | 删除会话 → 记忆归档（软删可恢复） | ◐ 手动已做 | purge 端点 生产 `:3571` / 测试 `:3861`；UI `client.js:1863-1869`；**自动跟随未做**：0.1.7 `dsh-session` 无 `session/delete|archive` 事件（全 store 检索 0 命中） |
+| §3.5 状态卡/任务板 AI 更新 | 插件写卡 + 写任务 | ✅ 已实施 | `/www/dsh/home/.agent-presets/_memory-plugin/plugin-v3.js:1014`(PUT cards)、`:1079`(POST tasks)、`:1108`(blocked)、`:1119`(transition)、prompt `:196/:199`；测试库 `tasks` 8,796 行（completed 3496 / failed 45 / in_progress 1598 / planned 949 / todo 2708）、`workspace_cards` 有表 |
+| §3.6 初始化 500 | 无卡会话不 500，可恢复错误 | ✅ 已修复 | `/www/dsh/home/profiles/web/node_modules/dsh-deepmemory/index.js:1837`：`state card extraction` / `llm_stream` → **503**；`extractSessionCard` 仍保留失败分级 |
+| §4 蒸馏 | 技能+知识合并，延后 | ⏸ 仍延后 | 部署插件 `plugin-v3.js` / `client.js` 中 `distill` 0 命中 |
+
+### 9.2 §2 诊断的时效性（重要）
+
+- §2.0「生产自动压缩链没有正反馈」——**已被实测推翻**：2026-10-21 19:24 生产 journal `[deepmemory] extracted 12/12 memories`；测试机 2026-10-21 19:45 压缩实测 `compaction/start:1 → summary:1 → end:1`、`turn/end=completed`（会话 `session-8151a60f-852f-4863-a5b7-5202812a8311` turn 7）。
+- §2.1「AI 驱动状态卡/任务板通道是断的」——**已被实现推翻**（见 9.1 §3.5 证据）。
+- §2.2「没有会话级导出/迁移接口」——**已过时**（端点已存在，见 9.1）。
+- §2.3「不做任何删除跟随清理」——**仍成立**（只有手动 purge）。
+
+### 9.3 验收标准对照（§6）
+
+| # | 标准 | 核对结论 |
+|---|---|---|
+| 1 | key 稳定；轮换后旧 key 失效 | 端点/表就绪；**未做轮换回归测试** |
+| 2 | A 导出 → B 导入（merge/replace）→ B 可检索 | 端点就绪；**仅服务端可达，无 UI；未做端到端迁移测试** |
+| 3 | 删除会话 → 记忆 archived、search 不返回、list 可查 | 手动 purge 路径存在；**未做真实删除回归** |
+| 4 | 抽取含 card → PUT cards、revision 递增 | 代码路径存在，测试库有卡数据；**未做单轮增量的 revision 断言** |
+| 5 | 任务出现且状态流转；无任务不空建 | 插件写任务路径存在，测试库 8,796 行；**无“空任务不建”断言** |
+| 6 | 初始化不 500、可恢复错误 | 503 映射已落地（`index.js:1837`）；**未点按真实链路** |
+
+### 9.4 剩余缺口（按优先级）
+
+1. **导入 UI 入口**（服务端已就绪，工作量集中在 `client.js` 记忆面板）。
+2. **归档自动清理**：需 Host 侧在会话删除流程里调 `purge`（DSH 无对应事件，属跨仓改动）。
+3. **验收 1/2/3/4/5/6 的端到端回归**（`verify.sh` 四层用例补齐）。
+4. 文档：§2 的四处旧诊断已按本节标注，不再作为现状依据。
+
+### 9.5 相邻计划状态（同批核对）
+
+| 文档 | 计划内容 | 现状 |
+|---|---|---|
+| `/www/deepseek harness workspace/dsh-deepmemory/docs/deepmemory-next-plan.md` | 命中率 gate + 嵌入迁移工具 + v063 同步（S1–S4） | `check_cache_health.py` / `migrate_embedding.py` 已落在 `/www/deepseek harness workspace/dsh-deepmemory/tools/`（计划写 `harness-memory-archive/scripts/`，**路径有出入**）；生产 v063（4057 行）已部署 |
+| `/www/deepseek harness workspace/harness-memory-archive/docs/workbench-plan.md` | workbench 计划书 v0.2（待 GLM 审核） | workbench 已实现且服务在跑（生产 `:6270` / 测试 `:6271`，`dsh-worktree*.service` active）；计划书版本头未更新 |

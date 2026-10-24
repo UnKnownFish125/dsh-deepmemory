@@ -184,6 +184,23 @@ const PANEL_CSS = `
 .dsh-mem-task-empty { color:var(--dsw-alias-label-tertiary, #696d74); font-size:12px; padding:9px 7px; }
 .dsh-mem-memory-editor { width:100%; min-height:72px; resize:vertical; }
 .dsh-mem-memory-edit-actions { display:flex; gap:6px; justify-content:flex-end; }
+/* 上下文注入详情（2026-10-18） */
+.dsh-mem-ctx-tabs { display:flex; flex-wrap:wrap; gap:6px; margin:2px 0 10px; }
+.dsh-mem-ctx-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:8px; margin:6px 0; }
+.dsh-mem-ctx-metric { border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.18)); border-radius:8px; padding:7px 9px; min-width:0; }
+.dsh-mem-ctx-metric-label { display:block; color:var(--dsw-alias-label-tertiary, #777b82); font-size:11px; line-height:1.4; }
+.dsh-mem-ctx-metric-value { display:block; color:var(--dsw-alias-label-primary, #e5e5e5); font-size:15px; font-weight:600; line-height:1.5; word-break:break-all; }
+.dsh-mem-ctx-bar { height:6px; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.16)); border-radius:3px; overflow:hidden; margin:5px 0 3px; }
+.dsh-mem-ctx-bar > span { display:block; height:100%; background:var(--dsw-alias-brand-primary, #4c8dff); border-radius:3px; }
+.dsh-mem-ctx-pre { font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-word; max-height:340px; overflow:auto; background:var(--dsw-alias-bg-layer-1, rgba(128,128,128,.07)); border-radius:6px; padding:8px; margin:5px 0; }
+.dsh-mem-ctx-row { display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:12px; line-height:1.6; }
+.dsh-mem-ctx-row > span:first-child { min-width:0; word-break:break-word; }
+.dsh-mem-ctx-seg { border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.12)); padding:7px 0; }
+.dsh-mem-ctx-seg:first-of-type { border-top:0; }
+.dsh-mem-ctx-ok { color:#3fa66b; }
+.dsh-mem-ctx-warn { color:#d18b3f; }
+.dsh-mem-ctx-bad { color:#d16a63; }
+.dsh-mem-ctx-source { word-break:break-all; font-size:11px; opacity:.72; margin-top:3px; }
 @media (max-width:760px) { .dsh-mem-task-board { grid-template-columns:repeat(5, minmax(82vw, 82vw)); } .dsh-mem-task-column { min-width:82vw; } }
 
 `
@@ -766,9 +783,459 @@ function apply(ctx) {
     )
   }
 
+  // ── 上下文注入详情 / 工具集 / 开关与预算（2026-10-18）──────────────────
+  function InjectionView(props) {
+    const lang = (props && props.lang) || 'zh'
+    const t = (props && props.t) || function (key) { return key }
+    function L(zh, en) { return lang === 'en' ? en : zh }
+    function fmtTime(value) {
+      if (!value) return ''
+      try { return new Date(Number(value)).toLocaleString(lang === 'en' ? 'en-US' : 'zh-CN') } catch (e) { return String(value) }
+    }
+    function normalizeSessions(list) {
+      return (Array.isArray(list) ? list : []).map(function (item) {
+        if (typeof item === 'string') return { id: item, title: item }
+        const id = String((item && (item.id || item.session_id)) || '')
+        return {
+          id: id,
+          title: String((item && (item.title || item.canonical_id)) || id),
+        }
+      }).filter(function (item) { return item.id })
+    }
+    const initialSessions = normalizeSessions(props && props.sessionOptions)
+    const [sid, setSid] = React.useState(props && props.sessionId ? String(props.sessionId) : '')
+    const [sessions, setSessions] = React.useState(initialSessions)
+    const [tab, setTab] = React.useState('injection')
+    const [data, setData] = React.useState(null)
+    const [tools, setTools] = React.useState(null)
+    const [busy, setBusy] = React.useState(false)
+    const [msg, setMsg] = React.useState('')
+    const [expanded, setExpanded] = React.useState({})
+    const [draft, setDraft] = React.useState(null)
+    const [saving, setSaving] = React.useState(false)
+    const [showSystem, setShowSystem] = React.useState(false)
+
+    React.useEffect(function () {
+      if (props && props.sessionId && String(props.sessionId) !== sid) setSid(String(props.sessionId))
+    }, [props && props.sessionId])
+
+    React.useEffect(function () { load(sid) }, [sid])
+
+    async function load(target) {
+      const id = String(target || '').trim()
+      setBusy(true)
+      setMsg('')
+      if (!id) {
+        const list = await api('GET', '/v1/context/sessions?limit=30')
+        if (list && Array.isArray(list.sessions)) {
+          const normalized = normalizeSessions(list.sessions)
+          setSessions(normalized)
+          if (props && props.autoSelect && normalized.length) {
+            setBusy(false)
+            setSid(normalized[0].id)
+            return
+          }
+        } else if (list && list.error) {
+          setMsg(L('读取会话列表失败：', 'Failed to list sessions: ') + list.error)
+        }
+        setBusy(false)
+        return
+      }
+      const [injectionResult, toolsResult] = await Promise.all([
+        api('GET', '/v1/context/injection?session_id=' + encodeURIComponent(id)),
+        api('GET', '/v1/context/tools?session_id=' + encodeURIComponent(id)),
+      ])
+      setBusy(false)
+      if (injectionResult && injectionResult.error) {
+        setMsg(L('读取注入详情失败：', 'Failed to load injection: ') + injectionResult.error)
+      } else {
+        setData(injectionResult || null)
+        if (injectionResult && injectionResult.flags) {
+          setDraft({
+            inject_enabled: !!injectionResult.flags.global.inject_enabled,
+            inject_card: !!injectionResult.flags.global.inject_card,
+            inject_summary: !!injectionResult.flags.global.inject_summary,
+            recall_k: Number(injectionResult.flags.global.recall_k) || 5,
+          })
+        }
+      }
+      if (toolsResult && toolsResult.error) {
+        setMsg(function (previous) { return previous || (L('读取工具集失败：', 'Failed to load tools: ') + toolsResult.error) })
+      } else {
+        setTools(toolsResult || null)
+      }
+    }
+
+    async function saveConfig() {
+      if (!draft || saving) return
+      setSaving(true)
+      const res = await api('POST', '/v1/context/config', {
+        inject_enabled: !!draft.inject_enabled,
+        inject_card: !!draft.inject_card,
+        inject_summary: !!draft.inject_summary,
+        recall_k: Number(draft.recall_k) || 5,
+      })
+      setSaving(false)
+      if (res && res.error) { setMsg(L('保存失败：', 'Save failed: ') + res.error); return }
+      setMsg(L('已保存；插件配置最多 60 秒后重新加载（loadConfig TTL），会话级缓存另有 TTL。', 'Saved. The plugin reloads config within 60s; session cache has its own TTL.'))
+      load(sid)
+    }
+
+    async function toggleSessionEnabled() {
+      if (!sid || !data || !data.flags) return
+      const next = !data.flags.session.enabled
+      const res = await api('POST', '/v1/context/session-flag', { session_id: sid, value: next })
+      if (res && res.error) { setMsg(L('切换会话开关失败：', 'Toggle failed: ') + res.error); return }
+      setMsg(next ? L('本会话记忆注入已开启（新回合生效）', 'Session injection enabled (next turn)') : L('本会话记忆注入已关闭（新回合生效）', 'Session injection disabled (next turn)'))
+      load(sid)
+    }
+
+    function tabButton(key, label) {
+      return React.createElement('button', {
+        key: key,
+        className: 'dsh-mem-btn' + (tab === key ? ' dsh-mem-btn-primary' : ''),
+        onClick: function () { setTab(key) },
+      }, label)
+    }
+
+    function metric(label, value, tone) {
+      return React.createElement('div', { className: 'dsh-mem-ctx-metric', key: label },
+        React.createElement('span', { className: 'dsh-mem-ctx-metric-label' }, label),
+        React.createElement('span', { className: 'dsh-mem-ctx-metric-value' + (tone ? ' dsh-mem-ctx-' + tone : '') }, String(value)),
+      )
+    }
+
+    function flagChip(label, value, tone) {
+      return React.createElement('div', { className: 'dsh-mem-ctx-metric', key: label },
+        React.createElement('span', { className: 'dsh-mem-ctx-metric-label' }, label),
+        React.createElement('span', { className: 'dsh-mem-ctx-metric-value' + (tone ? ' dsh-mem-ctx-' + tone : '') }, String(value)),
+      )
+    }
+
+    function renderSegment(segment, total) {
+      const pct = total > 0 ? Math.max(1, Math.round((segment.chars / total) * 100)) : 0
+      return React.createElement('div', { className: 'dsh-mem-ctx-seg', key: segment.key },
+        React.createElement('div', { className: 'dsh-mem-ctx-row' },
+          React.createElement('span', null, segment.label),
+          React.createElement('span', { className: segment.truncated ? 'dsh-mem-ctx-warn' : '' },
+            segment.chars + L(' 字符', ' chars') + (segment.truncated ? L(' · 已裁剪 ' + segment.removed_chars + ' 字符', ' · truncated ' + segment.removed_chars + ' chars') : '')),
+        ),
+        React.createElement('div', { className: 'dsh-mem-ctx-bar' },
+          React.createElement('span', { style: { width: pct + '%' } }),
+        ),
+        segment.groups && segment.groups.length
+          ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+            segment.groups.map(function (group) { return group.name + ' ' + group.items + L(' 条', ' items') }).join(' · '))
+          : null,
+        React.createElement('button', {
+          className: 'dsh-mem-mini',
+          onClick: function () { setExpanded(function (previous) { const next = Object.assign({}, previous); next[segment.key] = !next[segment.key]; return next }) },
+        }, expanded[segment.key] ? L('收起全文', 'Collapse') : L('展开全文', 'Expand')),
+        expanded[segment.key]
+          ? React.createElement('pre', { className: 'dsh-mem-ctx-pre' }, segment.text || L('（空）', '(empty)'))
+          : null,
+      )
+    }
+
+    function renderInjection() {
+      if (!data) return React.createElement('div', { style: { opacity: .65 } }, busy ? t('loading') : L('没有可显示的数据。请选择会话后刷新。', 'No data. Pick a session and refresh.'))
+      const injection = data.injection || {}
+      const flags = data.flags || null
+      const position = injection.position || {}
+      const runtime = position.runtime_context || null
+      const inputMap = position.input_map || { components: [] }
+      const system = data.system_prompt || {}
+      const budget = injection.budget || {}
+      const segments = Array.isArray(injection.segments) ? injection.segments : []
+      return React.createElement(React.Fragment, null,
+        React.createElement('div', { className: 'dsh-mem-ctx-grid' },
+          metric(L('注入文本总长', 'Injection chars'), injection.total_chars || 0),
+          metric(L('预算上限', 'Budget'), (budget.effective_chars || 0) + L(' 字符', ' chars')),
+          metric(L('实际注入', 'Observed'), injection.observed ? L('是', 'yes') : L('否', 'no'), injection.observed ? 'ok' : 'warn'),
+          metric(L('预算裁剪', 'Truncated'), injection.truncated ? L('已裁剪 ' + injection.removed_chars + ' 字符', 'truncated ' + injection.removed_chars) : L('未裁剪', 'none'), injection.truncated ? 'warn' : 'ok'),
+          metric(L('数据来源', 'Source'), data.source ? data.source.mode : '?'),
+          metric(L('runtime-context 段', 'Section'), runtime ? (runtime.section_index + 1) + ' / ' + runtime.section_count : '—'),
+        ),
+        flags
+          ? React.createElement('div', { className: 'dsh-mem-ctx-grid' },
+            flagChip(L('有效判定', 'Effective'), flags.effective ? L('应注入', 'inject') : L('不应注入', 'skip'), flags.effective ? 'ok' : 'bad'),
+            flagChip('inject_enabled', flags.global.inject_enabled ? L('开', 'on') : L('关', 'off'), flags.global.inject_enabled ? 'ok' : 'bad'),
+            flagChip('inject_card', flags.global.inject_card ? L('开', 'on') : L('关', 'off')),
+            flagChip('inject_summary', flags.global.inject_summary ? L('开', 'on') : L('关', 'off')),
+            flagChip('recall_k', flags.global.recall_k),
+            flagChip('session_enabled', flags.session.enabled ? L('开', 'on') : L('关', 'off'), flags.session.enabled ? 'ok' : 'bad'),
+            flags.child && flags.child.is_child ? flagChip('child_memory', flags.child.child_memory === true ? L('开', 'on') : L('关', 'off'), flags.child.child_memory === true ? 'ok' : 'warn') : null,
+            flags.astra && flags.astra.excluded ? flagChip('astra', L('排除', 'excluded'), 'bad') : null,
+          )
+          : null,
+        flags ? React.createElement('div', { className: 'dsh-mem-cfg-hint' }, flags.reason) : null,
+        flags && Array.isArray(flags.blockers) && flags.blockers.length
+          ? React.createElement('div', { className: 'dsh-mem-ctx-warn' }, L('阻断原因：', 'Blocked by: ') + flags.blockers.join(L('；', '; ')))
+          : null,
+        injection.consistency_note
+          ? React.createElement('div', { className: 'dsh-mem-ctx-warn' }, injection.consistency_note)
+          : null,
+        React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-title' }, L('注入位置', 'Injection position')),
+          runtime
+            ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+              L(
+                'runtime-context 事件 seq ' + runtime.event_seq + '；deepmemory 是第 ' + (runtime.section_index + 1) + '/' + runtime.section_count + ' 段；前一段：' + (runtime.previous_section || '（无）') + '；后一段：' + (runtime.next_section || '（无）') + '；在本条消息中字符偏移 ' + runtime.char_offset_in_message + ' / 总长 ' + runtime.runtime_context_chars + '。',
+                'runtime-context seq ' + runtime.event_seq + '; deepmemory section ' + (runtime.section_index + 1) + '/' + runtime.section_count + '; previous: ' + (runtime.previous_section || '(none)') + '; next: ' + (runtime.next_section || '(none)') + '; offset ' + runtime.char_offset_in_message + ' / ' + runtime.runtime_context_chars + '.'
+              ))
+            : React.createElement('div', { className: 'dsh-mem-ctx-warn' }, L('本会话最近一条 runtime-context 中没有 deepmemory 段。', 'No deepmemory section in the latest runtime-context.')),
+          runtime && Array.isArray(runtime.sections)
+            ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+              runtime.sections.map(function (section) {
+                return React.createElement('span', {
+                  key: String(section.index),
+                  className: 'dsh-mem-badge',
+                  style: { marginRight: 6, fontWeight: section.is_injection ? 600 : 400 },
+                }, (section.is_injection ? '★ ' : '') + section.name + ' · ' + section.chars)
+              }))
+            : null,
+          React.createElement('div', { className: 'dsh-mem-title', style: { marginTop: 8 } }, L('输入组件顺序（本回合）', 'Input components (this turn)')),
+          (inputMap.components || []).map(function (component, index) {
+            return React.createElement('div', { className: 'dsh-mem-ctx-row', key: String(component.seq) + '-' + index },
+              React.createElement('span', null, (index + 1) + '. ' + component.label),
+              React.createElement('span', null, 'seq ' + component.seq + ' · ' + component.chars + L(' 字符', ' chars')),
+            )
+          }),
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' }, inputMap.note || ''),
+          React.createElement('div', { className: 'dsh-mem-title', style: { marginTop: 8 } },
+            L('系统提示', 'System prompt') + '（' + (system.chars || 0) + L(' 字符', ' chars') + ' · ' + (system.source || '—') + '）'),
+          (system.segments || []).map(function (segment, index) {
+            return React.createElement('div', { className: 'dsh-mem-ctx-row', key: 'sys-' + index },
+              React.createElement('span', null, segment.label),
+              React.createElement('span', null, segment.chars + L(' 字符', ' chars')),
+            )
+          }),
+          React.createElement('button', { className: 'dsh-mem-mini', onClick: function () { setShowSystem(!showSystem) } },
+            showSystem ? L('收起系统提示全文', 'Collapse system prompt') : L('展开系统提示全文', 'Expand system prompt')),
+          showSystem ? React.createElement('pre', { className: 'dsh-mem-ctx-pre' }, system.text || L('（空）', '(empty)')) : null,
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' }, (position.system_prompt && position.system_prompt.note) || ''),
+        ),
+        React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-actions' },
+            React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, L('注入分段', 'Injection segments') + '（' + segments.length + '）'),
+            React.createElement('span', { className: 'dsh-mem-imp' }, L('总 ', 'total ') + (injection.total_chars || 0) + L(' 字符', ' chars')),
+          ),
+          segments.map(function (segment) { return renderSegment(segment, injection.total_chars || 0) }),
+        ),
+        React.createElement('details', { className: 'dsh-mem-box' },
+          React.createElement('summary', { className: 'dsh-mem-title' }, L('完整注入文本', 'Full injection text') + '（' + (injection.total_chars || 0) + L(' 字符', ' chars') + '）'),
+          React.createElement('pre', { className: 'dsh-mem-ctx-pre' }, injection.text || L('（空）', '(empty)')),
+        ),
+        React.createElement('div', { className: 'dsh-mem-cfg-hint' }, injection.cache_note || ''),
+        data.source
+          ? React.createElement('div', { className: 'dsh-mem-ctx-source' },
+            L('数据来源：', 'Source: ') + (data.source.detail || data.source.mode || '') +
+            (data.source.path ? ' · ' + data.source.path : '') +
+            (data.source.event_count ? ' · ' + data.source.event_count + L(' 个事件', ' events') : '') +
+            (data.session && data.session.agentPreset ? ' · preset ' + data.session.agentPreset : ''))
+          : null,
+      )
+    }
+
+    function renderTools() {
+      if (!tools) return React.createElement('div', { style: { opacity: .65 } }, busy ? t('loading') : L('没有工具集数据。', 'No tool data.'))
+      const toolInfo = tools.tools || { items: [], sources: [] }
+      const filter = tools.filter || {}
+      const calls = tools.calls || { counts: [], recent: [] }
+      return React.createElement(React.Fragment, null,
+        React.createElement('div', { className: 'dsh-mem-ctx-grid' },
+          metric(L('工具总数', 'Tool count'), toolInfo.total || 0),
+          metric(L('来源分组', 'Source groups'), (toolInfo.sources || []).length),
+          metric('toolFilter.deny', (filter.deny || []).length),
+          metric(L('工具调用事件', 'Tool calls'), calls.total || 0),
+        ),
+        React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-title' }, L('本回合请求头', 'Request header')),
+          tools.request
+            ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+              'seq ' + tools.request.seq + ' · ' + fmtTime(tools.request.time) + ' · ' + (tools.request.reason || '—') + ' · ' +
+              (tools.request.provider || '?') + '/' + (tools.request.model || '?') +
+              (tools.request.reasoning_effort ? ' · effort ' + tools.request.reasoning_effort : '') +
+              (tools.request.max_tokens ? ' · maxTokens ' + tools.request.max_tokens : ''))
+            : null,
+          (filter.deny || []).length
+            ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+              L('被 toolFilter.deny 裁剪：', 'Denied by toolFilter: ') + filter.deny.join(', ') +
+              (filter.source ? '（来源 ' + filter.source + '）' : '') +
+              L('；其中仍出现在工具表：', '; still present: ') + ((filter.denied_present || []).join(', ') || '—') +
+              L('；未出现：', '; absent: ') + ((filter.denied_absent || []).join(', ') || '—'))
+            : React.createElement('div', { className: 'dsh-mem-cfg-hint' }, L('本会话没有 toolFilter.deny 记录。', 'No toolFilter.deny recorded for this session.')),
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' }, filter.note || ''),
+        ),
+        React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-title' }, L('按来源插件分组', 'Grouped by source plugin')),
+          (toolInfo.sources || []).map(function (source) {
+            return React.createElement('div', { className: 'dsh-mem-ctx-seg', key: source.key || (source.plugin + source.row_id) },
+              React.createElement('div', { className: 'dsh-mem-ctx-row' },
+                React.createElement('span', null, source.plugin || L('（未识别来源）', '(unknown source)')),
+                React.createElement('span', null, (source.row_id || '—') + ' · ' + (source.confidence || '?')),
+              ),
+              React.createElement('div', { className: 'dsh-mem-content', style: { fontSize: 12, wordBreak: 'break-word' } }, (source.tools || []).join(', ')),
+            )
+          }),
+        ),
+        React.createElement('details', { className: 'dsh-mem-box' },
+          React.createElement('summary', { className: 'dsh-mem-title' }, L('全部工具明细', 'All tools') + '（' + (toolInfo.total || 0) + '）'),
+          (toolInfo.items || []).map(function (tool) {
+            return React.createElement('div', { className: 'dsh-mem-ctx-row', key: tool.name },
+              React.createElement('span', null, tool.name),
+              React.createElement('span', null,
+                'desc ' + tool.description_chars + ' · params ' + tool.parameters_chars + ' · ' +
+                (tool.source && (tool.source.row_id || tool.source.plugin) || L('未识别', 'unknown')) +
+                (tool.source && tool.source.confidence ? ' (' + tool.source.confidence + ')' : '')),
+            )
+          }),
+        ),
+        React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-title' }, L('最近工具调用', 'Recent tool calls') + '（' + (calls.total || 0) + '）'),
+          (calls.counts || []).length
+            ? React.createElement('div', { className: 'dsh-mem-cfg-hint' }, calls.counts.map(function (item) { return item.name + ' × ' + item.count }).join(' · '))
+            : React.createElement('div', { className: 'dsh-mem-cfg-hint' }, L('本会话还没有工具调用。', 'No tool calls yet.')),
+          (calls.recent || []).map(function (call) {
+            return React.createElement('div', { className: 'dsh-mem-ctx-seg', key: String(call.seq) + '-' + call.call_id },
+              React.createElement('div', { className: 'dsh-mem-ctx-row' },
+                React.createElement('span', null, call.name),
+                React.createElement('span', null, 'seq ' + call.seq + ' · turn ' + (call.turn || '?') + ' · step ' + (call.step || '?') + ' · ' + fmtTime(call.time)),
+              ),
+              React.createElement('div', { className: 'dsh-mem-cfg-hint', style: { wordBreak: 'break-all' } }, call.arguments_preview || ''),
+            )
+          }),
+        ),
+        (tools.preset_files && tools.preset_files.length)
+          ? React.createElement('div', { className: 'dsh-mem-ctx-source' }, L('插件行来源文件：', 'Preset files: ') + tools.preset_files.join(' · '))
+          : null,
+        (tools.notes || []).map(function (note, index) {
+          return React.createElement('div', { className: 'dsh-mem-cfg-hint', key: 'note-' + index }, note)
+        }),
+      )
+    }
+
+    function renderSettings() {
+      if (!draft || !data || !data.flags) return React.createElement('div', { style: { opacity: .65 } }, t('loading'))
+      const flags = data.flags
+      const budget = data.injection && data.injection.budget ? data.injection.budget : {}
+      function setField(key, value) {
+        setDraft(function (previous) { const next = Object.assign({}, previous); next[key] = value; return next })
+      }
+      function boolSelect(key, label) {
+        return React.createElement('div', { className: 'dsh-mem-cfg-item', key: key },
+          React.createElement('span', { className: 'dsh-mem-cfg-label' }, label),
+          React.createElement('select', {
+            className: 'dsh-mem-select',
+            value: draft[key] ? 'true' : 'false',
+            onChange: function (event) { setField(key, event.target.value === 'true') },
+          },
+            React.createElement('option', { value: 'true' }, L('开', 'on')),
+            React.createElement('option', { value: 'false' }, L('关', 'off')),
+          ),
+        )
+      }
+      return React.createElement(React.Fragment, null,
+        React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-title' }, L('全局开关与预算（所有会话）', 'Global flags & budget (all sessions)')),
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+            L('写入 memory-server 的 deepmemory.* 设置；布尔值同时写 group 键与扁平别名（injection.inject_enabled + inject_enabled），回退写 boolean false，不写 null。', 'Writes memory-server deepmemory.* settings; each boolean is written to both the grouped key and the flat alias; rollback writes boolean false, never null.')),
+          boolSelect('inject_enabled', L('记忆注入总开关 inject_enabled', 'Master inject_enabled')),
+          boolSelect('inject_card', L('状态卡注入 inject_card', 'State card inject_card')),
+          boolSelect('inject_summary', L('摘要链注入 inject_summary', 'Summary chain inject_summary')),
+          React.createElement('div', { className: 'dsh-mem-cfg-item' },
+            React.createElement('span', { className: 'dsh-mem-cfg-label' }, L('每轮召回条数 recall_k', 'Recall count recall_k')),
+            React.createElement('input', {
+              className: 'dsh-mem-input', type: 'number', min: 1, max: 50, value: String(draft.recall_k || 5),
+              onChange: function (event) { setField('recall_k', Number(event.target.value) || 1) },
+            }),
+          ),
+          React.createElement('div', { className: 'dsh-mem-actions', style: { marginTop: 6 } },
+            React.createElement('button', { className: 'dsh-mem-btn dsh-mem-btn-primary', onClick: saveConfig, disabled: saving }, saving ? t('cfgSaving') : t('cfgSave')),
+            React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { load(sid) }, disabled: busy }, busy ? t('loading') : t('refresh')),
+          ),
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+            L('当前生效值：inject_enabled=' + String(flags.global.inject_enabled) + '，inject_card=' + String(flags.global.inject_card) + '，inject_summary=' + String(flags.global.inject_summary) + '，recall_k=' + String(flags.global.recall_k) + '，inject_order=' + String(flags.global.inject_order) + '。',
+              'Effective: inject_enabled=' + String(flags.global.inject_enabled) + ', inject_card=' + String(flags.global.inject_card) + ', inject_summary=' + String(flags.global.inject_summary) + ', recall_k=' + String(flags.global.recall_k) + ', inject_order=' + String(flags.global.inject_order) + '.')),
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+            L('预算（只读）：基础 ' + (budget.base_chars || 0) + ' + 额外 ' + (budget.extra_chars || 0) + ' = ' + (budget.effective_chars || 0) + ' 字符；来源 ' + (budget.source || 'default') + '（INJECT_BUDGET_CHARS 在 preset 插件里，memory-server 不管理它）。',
+              'Budget (read-only): ' + (budget.base_chars || 0) + ' + ' + (budget.extra_chars || 0) + ' = ' + (budget.effective_chars || 0) + ' chars; source ' + (budget.source || 'default') + ' (INJECT_BUDGET_CHARS lives in the preset plugin, not memory-server).')),
+        ),
+        React.createElement('div', { className: 'dsh-mem-box' },
+          React.createElement('div', { className: 'dsh-mem-title' }, L('本会话开关', 'This session')),
+          React.createElement('div', { className: 'dsh-mem-ctx-row' },
+            React.createElement('span', null, 'session_enabled'),
+            React.createElement('span', { className: flags.session.enabled ? 'dsh-mem-ctx-ok' : 'dsh-mem-ctx-bad' }, flags.session.enabled ? L('开', 'on') : L('关', 'off')),
+          ),
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' }, flags.session.source || ''),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: toggleSessionEnabled },
+            flags.session.enabled ? L('关闭本会话记忆注入', 'Disable injection for this session') : L('开启本会话记忆注入', 'Enable injection for this session')),
+          flags.child && flags.child.is_child
+            ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+              L('子 agent 的注入由父会话 child_memory 控制（缺省 false）。父会话：' + (flags.child.parent_session_id || '?') + '，child_memory=' + String(flags.child.child_memory) + '。',
+                'Child injection is controlled by parent child_memory (default false). Parent: ' + (flags.child.parent_session_id || '?') + ', child_memory=' + String(flags.child.child_memory) + '.'))
+            : null,
+          React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+            L('切换会话开关只影响新回合；插件对 session_enabled 有 TTL 缓存。', 'Session toggle affects new turns; the plugin caches session_enabled with a TTL.')),
+        ),
+        React.createElement('div', { className: 'dsh-mem-cfg-hint' }, L('注意：以上为全局设置，改动会影响所有使用 deepmemory 的会话；关闭后不会删除已存记忆。', 'Note: global settings affect all deepmemory sessions; disabling does not delete stored memories.')),
+      )
+    }
+
+    const sessionOptions = sessions.length ? sessions : normalizeSessions(props && props.sessionOptions)
+    return React.createElement('div', { className: 'dsh-mem-panel' },
+      React.createElement('div', { className: 'dsh-mem-actions' },
+        React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, L('上下文注入详情', 'Context injection')),
+        props.onBack ? React.createElement('button', { className: 'dsh-mem-btn', onClick: props.onBack }, t('back')) : null,
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { load(sid) }, disabled: busy }, busy ? t('loading') : t('refresh')),
+      ),
+      React.createElement('div', { className: 'dsh-mem-form' },
+        React.createElement('span', { className: 'dsh-mem-imp' }, L('会话', 'Session')),
+        React.createElement('select', {
+          className: 'dsh-mem-select', style: { flex: 1, minWidth: 220 }, value: sid,
+          onChange: function (event) { setSid(event.target.value) },
+        },
+          React.createElement('option', { value: '' }, L('选择会话…', 'Select a session…')),
+          sessionOptions.map(function (item) {
+            return React.createElement('option', { key: item.id, value: item.id }, (item.title || item.id) + ' · ' + item.id.slice(-12))
+          }),
+        ),
+      ),
+      data && data.session && data.session.agentPreset
+        ? React.createElement('div', { className: 'dsh-mem-ctx-source' },
+          data.session.agentPreset + ' · ' + (data.session.title || '') + ' · ' + (data.session.origin || L('主会话', 'main')) + (data.session.delegationDepth ? ' · depth ' + data.session.delegationDepth : ''))
+        : null,
+      msg ? React.createElement('div', { className: 'dsh-mem-ctx-warn' }, msg) : null,
+      React.createElement('div', { className: 'dsh-mem-ctx-tabs' },
+        tabButton('injection', L('注入内容', 'Injection')),
+        tabButton('tools', L('工具集', 'Tools')),
+        tabButton('settings', L('开关与预算', 'Flags & budget')),
+      ),
+      tab === 'injection' ? renderInjection() : (tab === 'tools' ? renderTools() : renderSettings()),
+    )
+  }
+
+  // 设置页里的按会话注入查看器：默认折叠，点开才发请求——
+  // 避免设置页每次加载都对大日志做全量解压（注入 + 工具集各一次）。
+  function ContextInspectSection(props) {
+    const lang = (props && props.lang) || 'zh'
+    function L(zh, en) { return lang === 'en' ? en : zh }
+    const [open, setOpen] = React.useState(false)
+    return React.createElement('div', { className: 'dsh-mem-box' },
+      React.createElement('div', { className: 'dsh-mem-actions' },
+        React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, L('上下文注入详情（按会话）', 'Context injection (per session)')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setOpen(!open) } }, open ? L('收起', 'Collapse') : L('打开查看', 'Open')),
+      ),
+      open
+        ? React.createElement(InjectionView, props)
+        : React.createElement('div', { className: 'dsh-mem-cfg-hint' }, L('按会话查看实际注入文本、注入位置、字符数/裁剪与工具集。', 'Inspect per-session injected text, position, sizes and tools.')),
+    )
+  }
+
   function ConfigView(props) {
     // 插件配置卡片：注册在 设置 → 插件 → 插件配置（web-ui.plugin.item）
     const t = props.t
+    const lang = props.lang || 'zh'
     const sessionId = props.sessionId || ''
     const [schema, setSchema] = React.useState(null)
     const [values, setValues] = React.useState({})
@@ -963,6 +1430,7 @@ function apply(ctx) {
                 )
               })
               : React.createElement('div', { style: { opacity: .6 } }, t('loading')),
+            React.createElement(ContextInspectSection, { t: t, lang: lang, sessionId: '', autoSelect: true }),
             React.createElement('div', { className: 'dsh-mem-pcard-footer' },
               msg ? React.createElement('span', { className: 'dsh-mem-pcard-failed', style: { opacity: .8 } }, msg) : null,
               React.createElement('button', { className: 'dsh-mem-pcard-save', onClick: save, disabled: busy || !loaded }, busy ? t('cfgSaving') : t('cfgSave')),
@@ -995,6 +1463,7 @@ function apply(ctx) {
           )
         })
         : React.createElement('div', { style: { opacity: .6 } }, t('loading')),
+      React.createElement(ContextInspectSection, { t: t, lang: lang, sessionId: sessionId, autoSelect: true }),
     )
   }
 
@@ -1098,6 +1567,7 @@ function apply(ctx) {
     const [keyFull, setKeyFull] = React.useState('')
     const [keyRevealing, setKeyRevealing] = React.useState(false)
     const [sessionOpsBusy, setSessionOpsBusy] = React.useState(false)
+    const [injectionReport, setInjectionReport] = React.useState(null)
 
     const sid = props && props.sessionId ? String(props.sessionId) : ''
     const sessionsState = typeof props.useSessions === 'function'
@@ -1169,6 +1639,18 @@ function apply(ctx) {
 
     React.useEffect(function () { refresh() }, [])
 
+    // 每个会话打开时取一次实际注入摘要（只读；用于主面板常驻显示）。
+    React.useEffect(function () {
+      if (!sid) return
+      let cancelled = false
+      api('GET', '/v1/context/injection?session_id=' + encodeURIComponent(sid)).then(function (res) {
+        if (cancelled) return
+        if (res && !res.error) setInjectionReport(res)
+        else setInjectionReport({ error: (res && res.error) || 'unknown' })
+      })
+      return function () { cancelled = true }
+    }, [sid])
+
     React.useEffect(function () {
       if (view !== 'main' || !initialLoaded || !panelRef.current) return
       let node = panelRef.current
@@ -1232,6 +1714,15 @@ function apply(ctx) {
     if (view === 'archive') return React.createElement(ArchiveView, subProps())
     if (view === 'maintain') return React.createElement(MaintenanceView, subProps())
     if (view === 'config') return React.createElement(ConfigView, { t: t, lang: lang, sessionId: sid, onBack: function () { setView('main') } })
+    if (view === 'inject') return React.createElement(InjectionView, Object.assign(subProps(), { autoSelect: true }))
+
+    function injectedPositionText(injection) {
+      const position = injection && injection.position && injection.position.runtime_context
+      if (!position) return ''
+      return lang === 'en'
+        ? 'runtime-context section ' + (position.section_index + 1) + '/' + position.section_count + ' · offset ' + position.char_offset_in_message
+        : 'runtime-context 第 ' + (position.section_index + 1) + '/' + position.section_count + ' 段 · 偏移 ' + position.char_offset_in_message
+    }
 
     const cardLines = []
     if (card && card.goal) cardLines.push({ k: '目标', v: card.goal })
@@ -1435,6 +1926,7 @@ function apply(ctx) {
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('graph') } }, t('graph')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('archive') } }, t('archive')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('maintain') } }, t('maintain')),
+        React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('inject') } }, lang === 'en' ? 'Injection' : '注入详情'),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('config') } }, t('sessionConfig')),
         React.createElement('button', { className: 'dsh-mem-btn', onClick: toggleEnabled }, enabled ? t('enabled') : t('disabled')),
         React.createElement('button', { className: 'dsh-mem-btn', title: 'Switch language', onClick: function () { setLang(lang === 'zh' ? 'en' : 'zh') } }, t('lang')),
@@ -1446,6 +1938,47 @@ function apply(ctx) {
         stats ? React.createElement('span', null, t('atoms') + ' ' + stats.atoms) : null,
         stats ? React.createElement('span', null, t('archived') + ' ' + stats.archived) : null,
         card ? React.createElement('span', null, t('stateV') + cardVersion) : null,
+      ),
+      React.createElement('div', { className: 'dsh-mem-box' },
+        React.createElement('div', { className: 'dsh-mem-actions' },
+          React.createElement('span', { className: 'dsh-mem-title', style: { flex: 1 } }, lang === 'en' ? 'Context injection' : '上下文注入'),
+          React.createElement('button', { className: 'dsh-mem-btn', onClick: function () { setView('inject') } }, lang === 'en' ? 'Details' : '查看详情'),
+        ),
+        injectionReport && injectionReport.error
+          ? React.createElement('div', { className: 'dsh-mem-cfg-hint' },
+            (String(injectionReport.error).indexOf('404') >= 0 || String(injectionReport.error).indexOf('not found') >= 0)
+              ? (lang === 'en' ? 'Host API not loaded yet (needs a DSH Web restart after deployment).' : 'Host API 尚未加载（部署后需重启 DSH Web 才生效）。')
+              : (lang === 'en' ? 'Failed to load injection: ' : '读取注入失败：') + injectionReport.error)
+          : injectionReport && injectionReport.injection
+            ? React.createElement(React.Fragment, null,
+              React.createElement('div', { className: 'dsh-mem-ctx-row' },
+                React.createElement('span', null, lang === 'en' ? 'Observed' : '实际注入'),
+                React.createElement('span', { className: injectionReport.injection.observed ? 'dsh-mem-ctx-ok' : 'dsh-mem-ctx-warn' },
+                  injectionReport.injection.observed ? (lang === 'en' ? 'yes' : '是') : (lang === 'en' ? 'no' : '否')),
+              ),
+              React.createElement('div', { className: 'dsh-mem-ctx-row' },
+                React.createElement('span', null, lang === 'en' ? 'Chars / budget' : '总长 / 预算'),
+                React.createElement('span', null,
+                  (injectionReport.injection.total_chars || 0) + ' / ' +
+                  ((injectionReport.injection.budget && injectionReport.injection.budget.effective_chars) || 0) +
+                  (injectionReport.injection.truncated ? (lang === 'en' ? ' · truncated ' : ' · 已裁剪 ') + injectionReport.injection.removed_chars : '')),
+              ),
+              injectedPositionText(injectionReport.injection) ? React.createElement('div', { className: 'dsh-mem-ctx-row' },
+                React.createElement('span', null, lang === 'en' ? 'Position' : '位置'),
+                React.createElement('span', null, injectedPositionText(injectionReport.injection)),
+              ) : null,
+              (injectionReport.injection.segments || []).length ? React.createElement('div', { className: 'dsh-mem-ctx-row' },
+                React.createElement('span', null, lang === 'en' ? 'Segments' : '分段'),
+                React.createElement('span', null, injectionReport.injection.segments.map(function (segment) {
+                  return segment.label + ':' + segment.chars
+                }).join(' · ')),
+              ) : null,
+              injectionReport.flags && !injectionReport.flags.effective && injectionReport.flags.blockers && injectionReport.flags.blockers.length
+                ? React.createElement('div', { className: 'dsh-mem-ctx-warn' },
+                  (lang === 'en' ? 'Blocked: ' : '阻断：') + injectionReport.flags.blockers.join(lang === 'en' ? '; ' : '；'))
+                : null,
+            )
+            : React.createElement('div', { className: 'dsh-mem-cfg-hint' }, lang === 'en' ? 'Loading…' : '加载中…'),
       ),
       cardEdit
         ? renderCardEditor()

@@ -1,5 +1,21 @@
 #!/opt/AstrBot/venv/bin/python3
 # -*- coding: utf-8 -*-
+# ═══════════════════════════════════════════════════════════════════════════
+# ⚠️ 部署版本声明（P0-2，2026-10-21）—— 生产是权威，本文件含【未部署】特性
+#
+#   生产权威（线上真实运行，4057 行 / 177274 B / md5 652c345f79041964940b6f35e36c559c）
+#     /www/deepmemory-v063-deploy/memory-server/server.py
+#     systemd: dsh-memory-server.service   :6230   数据: .../data/memory.db (schema v9)
+#
+#   本仓库文件（4366 行 / 191856 B / md5 140b463c6753f1eb87d231ecbdccc00a）
+#     - 与 /www/dsh-test-memory/server.py 逐字节相同（测试机 :6240 运行的就是这份）
+#     - 包含生产【尚未部署】的特性；实测证据：用本文件启动"克隆来的生产库"时
+#       日志打印 "migration: schema v10 已应用"——生产库仍停在 v9。
+#
+#   两份是**双向分叉**（v0.4 assertions 等差异），禁止强行合并 / 禁止互相覆盖。
+#   凡是"线上到底是什么行为"的问题，一律以生产那份为准；本文件只代表"未来候选"。
+#   部署顺序仍须遵守 AGENTS.md：测试机(3091/6240) → 生产(3081/6230)。
+# ═══════════════════════════════════════════════════════════════════════════
 """
 DSH memory-server — semantic long-term memory backend for the DeepSeek Harness.
 

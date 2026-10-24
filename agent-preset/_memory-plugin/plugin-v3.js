@@ -1,3 +1,16 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// ⚠️ DEPRECATED（P0-2，2026-10-21）—— 本文件已不是权威版本，请勿再以它为准。
+//   现状：849 行 / 47380 B / md5 ed28d8b206ca2a5e9ca57895a4de56af（2026-09 旧副本），
+//         落后 live 465+ 行，缺 memory_call / child_memory 等能力。
+//   权威版本：/www/dsh/home/.agent-presets/_memory-plugin/plugin-v3.js（1620 行，
+//             md5 1b32cd85f855182e481f0ea827293afd）
+//   仓库镜像：agent-preset/memory-plugin/plugin-v3.js（= live 的逐字节镜像）
+//   为什么没直接删：下面两个 preset 仍以相对路径引用它，删除会打断加载 ——
+//     · agent-preset/daily/agent.cordis.yml:92   name: '../_memory-plugin/plugin-v3.js'
+//     · agent-preset/task/agent.cordis.yml:176   name: '../_memory-plugin/plugin-v3.js'
+//   收口建议：把这两个 yml 的引用改为 ../memory-plugin/plugin-v3.js，
+//             验证后把本文件整体移入 agent-preset/archive/（本次按要求保留、仅标注）。
+// ═══════════════════════════════════════════════════════════════════════════
 // harness-memory — long-term memory plugin for the DeepSeek Harness.
 //
 // Preset-plane plugin (mounted as a relative-path row from agent.cordis.yml).
