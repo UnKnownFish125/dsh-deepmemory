@@ -3,6 +3,10 @@
 //   权威版本：$DSH_HOME/.agent-presets/_memory-plugin/plugin-v3.js
 //   生产实值：/www/dsh/home/.agent-presets/_memory-plugin/plugin-v3.js
 //   同步基线：1620 行 / 89859 B / md5 1b32cd85f855182e481f0ea827293afd
+//   ⚠️ P0-3（task-2，2026-10-24）：本文件在 live 基线之上新增「抽取落库确认」
+//      （持久化 pending + 分批消费，见下方 P0-3 段）。**live 尚未部署**；
+//      部署时必须先把本文件同步到 live 路径并重算上一行 md5，否则下一次
+//      live → 仓库回灌会把 P0-3 补丁覆盖掉。
 //   校验命令：md5sum /www/dsh/home/.agent-presets/_memory-plugin/plugin-v3.js
 //             —— 结果必须等于上面这行 md5；不等 = 仓库又落后了，重跑回灌。
 //   规则：只允许 live → 仓库单向回灌。不要在本文件单独改逻辑，
@@ -25,7 +29,10 @@
 //  - daily importance decay with access reinforcement (server-side)
 
 import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 
 // N25：不再用硬编码绝对路径 **静态** import dsh-tools——静态解析失败会让整个 preset
 // 加载失败（换机 / DSH 升级 / 清理旧安装 / 换安装根都会触发），届时所有会话的记忆注入
@@ -534,7 +541,7 @@ function redactSensitive(text) {
     return { provider: provider || 'deepseek-official', model: model || 'deepseek-flash' }
   }
 
-  async function extract(dialog, signal) {
+  async function extract(dialog, signal, opts) {
     const llm = ctx.get('llm')
     if (!llm) return null
     const route = await resolveModelRoute(llm, null, null)
@@ -561,13 +568,17 @@ function redactSensitive(text) {
       timedSignal = AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(45000)])
     } catch {}
     const t0 = Date.now()
+    // P0-3：pending 批次里的 dialog 已在写盘前脱敏（磁盘上不落原始密钥），这里不再二次
+    // redact——redactSensitive 对 `token=[REDACTED:...]` 会每轮多补一个 `]`。分块后恒
+    // ≤8000 字符，slice 仅作防御兜底。
+    const inputText = (opts && opts.preRedacted) ? String(dialog || '') : redactSensitive(dialog)
     let out = ''
     try {
       const stream = llm.stream({
         provider: route.provider,
         model: route.model,
         system: EXTRACT_SYSTEM,
-        messages: [{ role: 'user', content: [{ type: 'text', text: redactSensitive(dialog).slice(0, 8000) }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: inputText.slice(0, 8000) }] }],
         temperature: 0.2,
         ...(effort ? { reasoningEffort: effort } : {}),
         signal: timedSignal,
@@ -598,6 +609,444 @@ function redactSensitive(text) {
       // N24：同上——只记录错误类型与长度，不落正文
       console.error('[deepmemory] extract parse failed (len=' + out.length + '): ' + String((e && e.message) || e))
       return null
+    }
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // P0-3（落库确认）：持久化 pending + 分批抽取/分批落库/分批 ack
+  //
+  // 旧实现的三个数据丢失点：
+  //   ① LLM 返回合法 JSON 后立刻消费内存桶，落库（add_batch）失败时消息已经没了，
+  //      后端超时/重启/HTTP 5xx 无法重试（旧 929-934 vs 965-985）；
+  //   ② add_batch 部分条目失败只打日志，失败条目永不重试；
+  //   ③ 发给抽取模型的内容截 8000 字符，但成功后消费整桶 → 尾部消息从未参与抽取。
+  //
+  // 新模型：每批一个 pending 文件（$DSH_HOME/.agent-presets/_memory-plugin/pending/）
+  //   pending/<batchId>.json = { sourceMessages, chunks:[{dialog, items, status}], ... }
+  //   · 抽取前把整批来源消息原子写盘（tmp+rename，0600），写盘成功后才从内存桶消费；
+  //   · 按 ≤8000 字符切块（消息边界优先，超长消息可跨块），逐块抽取→落库→标记 done；
+  //   · 每个条目带 uuid 幂等键（server documents.uuid UNIQUE），重放复用同一 uuid；
+  //   · add_batch 逐条核对，失败条目按条重试并留在 pending；全部 chunk done 才删文件（ack）；
+  //   · 插件启动 + 每 60s 重放未 ack 批次；跨实例用 <file>.lock 互斥。
+  // ═════════════════════════════════════════════════════════════════════════
+  const PENDING_VERSION = 1
+  const PENDING_CHUNK_CHARS = 8000            // 与旧 extract 的 slice(0,8000) 对齐
+  const PENDING_ITEM_ROUNDS = 3               // 单次处理中 add_batch 最多轮数
+  const PENDING_ITEM_RETRY_DELAY_MS = 300     // 轮间退避（300/600）
+  const PENDING_LIVE_BUDGET_MS = Number(process.env.DEEPMEMORY_PENDING_LIVE_BUDGET_MS || 60000) || 60000  // turn-stopping 内总预算，剩余留给重放（不阻塞回合过久）
+  const PENDING_LOCK_STALE_MS = 15 * 60 * 1000
+  const pendingBadLogged = new Set()
+
+  function resolvePendingDir() {
+    const explicit = String(process.env.DEEPMEMORY_PENDING_DIR || '').trim()
+    if (explicit) return explicit
+    const home = String(process.env.DSH_HOME || process.env.HOME || '').trim()
+    if (home) return path.join(home, '.agent-presets', '_memory-plugin', 'pending')
+    try { return path.join(path.dirname(fileURLToPath(import.meta.url)), 'pending') } catch (e) { return '' }
+  }
+  const PENDING_DIR = resolvePendingDir()
+
+  function ensurePendingDir() {
+    if (!PENDING_DIR) return false
+    try {
+      fs.mkdirSync(PENDING_DIR, { recursive: true, mode: 0o700 })
+      return true
+    } catch (e) {
+      console.error('[deepmemory] pending dir unavailable (' + PENDING_DIR + '): ' + String(e))
+      return false
+    }
+  }
+
+  function pendingFilePath(batchId) {
+    return path.join(PENDING_DIR, String(batchId) + '.json')
+  }
+
+  // tmp+rename 原子写：崩溃只会留下 .tmp-*（不参与重放），不会出现半截 JSON。
+  function atomicWriteJson(file, data) {
+    const tmp = file + '.tmp-' + process.pid + '-' + crypto.randomBytes(3).toString('hex')
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 })
+      fs.renameSync(tmp, file)
+      return true
+    } catch (e) {
+      try { fs.unlinkSync(tmp) } catch (e2) {}
+      throw e
+    }
+  }
+
+  function pendingRecordOf(rec) {
+    return {
+      version: PENDING_VERSION,
+      batchId: rec.batchId,
+      sessionId: rec.sessionId,
+      workspaceId: rec.workspaceId || '',
+      createdAt: rec.createdAt,
+      updatedAt: Date.now(),
+      attempts: rec.attempts || 0,
+      sourceMessages: rec.sourceMessages,
+      chunks: rec.chunks,
+      lastError: rec.lastError || null,
+    }
+  }
+
+  function persistPending(rec) {
+    if (!rec || !rec.file) return false
+    if (!ensurePendingDir()) return false
+    try {
+      atomicWriteJson(rec.file, pendingRecordOf(rec))
+      return true
+    } catch (e) {
+      console.error('[deepmemory] pending persist failed (' + rec.batchId + '): ' + String(e))
+      return false
+    }
+  }
+
+  function loadPending(file) {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (!data || data.version !== PENDING_VERSION) throw new Error('unsupported pending version')
+    if (!data.batchId || !/^[A-Za-z0-9._-]+$/.test(String(data.batchId))) throw new Error('bad batchId')
+    if (!Array.isArray(data.sourceMessages) || !Array.isArray(data.chunks)) throw new Error('bad pending shape')
+    for (const chunk of data.chunks) {
+      if (!chunk || typeof chunk !== 'object') throw new Error('bad chunk record')
+      if (!Array.isArray(chunk.items)) chunk.items = []
+      if (typeof chunk.dialog !== 'string' || !chunk.dialog) throw new Error('bad chunk dialog')
+      // 防御：历史文件/手工改坏时也保证单块 ≤8000（不静默：打日志并保留记录）
+      if (chunk.dialog.length > PENDING_CHUNK_CHARS) {
+        console.error('[deepmemory] pending chunk dialog oversized (' + data.batchId + '#' + chunk.index
+          + '): truncating ' + chunk.dialog.length + ' -> ' + PENDING_CHUNK_CHARS + ' chars')
+        chunk.dialog = chunk.dialog.slice(0, PENDING_CHUNK_CHARS)
+      }
+      if (!chunk.status) chunk.status = chunk.items.length ? 'extracted' : 'pending_extract'
+    }
+    return Object.assign({}, data, { file })
+  }
+
+  // 把一批消息按 ≤limit 字符切块。按「角色: 文本」行打包，整行超长时切片（同一消息可跨块）。
+  // 保证：每个 chunk.dialog ≤ limit；所有消息的每个字符都恰好属于一个 chunk。
+  function buildPendingChunks(sourceMessages, limit) {
+    const pieces = []
+    for (const m of sourceMessages) {
+      const line = (m.role === 'user' ? '用户: ' : '助手: ') + String(m.text || '')
+      if (!line) continue
+      for (let off = 0; off < line.length; off += limit) {
+        pieces.push({ text: line.slice(off, off + limit), messageIndex: m.index })
+      }
+    }
+    const chunks = []
+    let cur = { parts: [], messageIndexes: [], chars: 0 }
+    const flush = () => {
+      if (!cur.parts.length) return
+      chunks.push({
+        index: chunks.length,
+        status: 'pending_extract',
+        chars: cur.chars,
+        messageIndexes: cur.messageIndexes,
+        dialog: cur.parts.join('\n'),
+        items: [],
+        itemAttempts: 0,
+        lastError: null,
+        extractedAt: null,
+        storedAt: null,
+      })
+      cur = { parts: [], messageIndexes: [], chars: 0 }
+    }
+    for (const piece of pieces) {
+      const add = piece.text.length + (cur.parts.length ? 1 : 0)
+      if (cur.parts.length && cur.chars + add > limit) flush()
+      cur.chars += piece.text.length + (cur.parts.length ? 1 : 0)
+      cur.parts.push(piece.text)
+      if (!cur.messageIndexes.includes(piece.messageIndex)) cur.messageIndexes.push(piece.messageIndex)
+    }
+    flush()
+    return chunks
+  }
+
+  // 抽取前落盘：sourceMessages 已脱敏（磁盘上不出现原始密钥），dialog 由脱敏消息拼出。
+  function createPendingBatch(sid, batch) {
+    if (!ensurePendingDir()) return null
+    const now = Date.now()
+    const sidTag = String(sid).slice(0, 8).replace(/[^A-Za-z0-9]/g, '_')
+    const batchId = 'b' + now.toString(36) + '-' + crypto.randomBytes(4).toString('hex') + '-' + sidTag
+    const sourceMessages = batch.map((m, index) => ({
+      index,
+      role: m.role === 'user' ? 'user' : 'assistant',
+      text: redactSensitive(String(m.text || '')),
+    }))
+    const chunks = buildPendingChunks(sourceMessages, PENDING_CHUNK_CHARS)
+    if (!chunks.length) return null
+    const rec = {
+      batchId,
+      sessionId: sid,
+      workspaceId: resolveWorkspace(sid),
+      createdAt: now,
+      attempts: 0,
+      sourceMessages,
+      chunks,
+      lastError: null,
+      file: pendingFilePath(batchId),
+    }
+    if (!persistPending(rec)) return null
+    console.log('[deepmemory] pending batch written: ' + batchId + ' (' + sourceMessages.length
+      + ' msgs, ' + chunks.length + ' chunk(s), ' + chunks.reduce((n, c) => n + c.chars, 0) + ' chars)')
+    return rec
+  }
+
+  // 由抽取结果构造待落库条目；uuid = 幂等键（先落 pending 再 add_batch，重放时复用）。
+  function buildPendingItems(result, sid, dialogText) {
+    if (!result || !Array.isArray(result.memories) || !result.memories.length) return []
+    const items = []
+    for (const m of result.memories) {
+      if (!m || typeof m.content !== 'string' || !m.content.trim()) continue
+      const rawContent = redactSensitive(m.content)
+      const rawKeyFacts = redactSensitive(m.key_facts || '')
+      const rawPersona = redactSensitive(m.persona_summary || '')
+      const rawAtom = Array.isArray(m.atoms) ? m.atoms.map((a) => Object.assign({}, a, { content: redactSensitive(a.content || '') })) : []
+      const rawEntities = Array.isArray(m.entities) ? m.entities.map((e) => Object.assign({}, e, { name: redactSensitive(e.name || '') })) : []
+      const rawRelations = Array.isArray(m.relations) ? m.relations.map((r) => Object.assign({}, r, { source: redactSensitive(r.source || ''), target: redactSensitive(r.target || ''), relation: redactSensitive(r.relation || '') })) : []
+      items.push({
+        uuid: crypto.randomUUID(),
+        content: String(rawContent).slice(0, 500),
+        key_facts: String(rawKeyFacts).slice(0, 600),
+        persona_summary: String(rawPersona).slice(0, 500),
+        type: m.type || 'fact',
+        domain: m.domain || 'work',
+        scope: m.scope || 'workspace',
+        importance: typeof m.importance === 'number' ? m.importance : 0.5,
+        workspace_id: resolveWorkspace(sid),
+        session_id: sid,
+        dialog_scoped: true,
+        topic_id: String(m.topic || '').slice(0, 60),
+        atoms: rawAtom,
+        entities: rawEntities,
+        relations: rawRelations,
+        source: redactSensitive(dialogText).slice(0, 32000),
+      })
+    }
+    return items
+  }
+
+  // server 对重复 uuid 抛 UNIQUE 约束错误（documents.uuid UNIQUE）→ 视为「已经落库」，
+  // 这是「server 已提交但客户端没收到响应」这一崩溃窗口的去重依据。
+  function isDuplicateUuidError(err) {
+    const s = String(err || '').toLowerCase()
+    return s.indexOf('unique constraint failed') !== -1 && s.indexOf('uuid') !== -1
+  }
+
+  // 逐条核对 add_batch 的 added 数组：成功/重复 uuid → 从 pending 移除；其余失败条目保留重试。
+  async function storePendingChunk(rec, chunk) {
+    if (!Array.isArray(chunk.items) || !chunk.items.length) return { okCount: 0, failedCount: 0 }
+    let okCount = 0
+    let round = 0
+    while (chunk.items.length && round < PENDING_ITEM_ROUNDS) {
+      if (round > 0) await new Promise((r) => setTimeout(r, PENDING_ITEM_RETRY_DELAY_MS * Math.pow(2, round - 1)))
+      round += 1
+      const sent = chunk.items.slice()
+      const res = await http('POST', '/v1/memories/add_batch', { items: sent })
+      if (!res.ok) {
+        chunk.itemAttempts = (chunk.itemAttempts || 0) + 1
+        chunk.lastError = 'add_batch_http:' + String(res.error || 'unknown')
+        persistPending(rec)
+        console.error('[deepmemory] pending store failed (' + rec.batchId + ' chunk ' + chunk.index
+          + '): ' + chunk.lastError + '; keep ' + sent.length + ' item(s) for retry')
+        continue
+      }
+      const added = res.data && Array.isArray(res.data.added) ? res.data.added : null
+      if (!added) {
+        chunk.itemAttempts = (chunk.itemAttempts || 0) + 1
+        chunk.lastError = 'add_batch_bad_shape'
+        persistPending(rec)
+        console.error('[deepmemory] pending store bad response shape (' + rec.batchId + ' chunk '
+          + chunk.index + '); keep ' + sent.length + ' item(s)')
+        continue
+      }
+      const failed = []
+      let dup = 0
+      for (let i = 0; i < sent.length; i++) {
+        const out = i < added.length ? added[i] : null
+        if (!out) { failed.push(sent[i]); continue }
+        const err = out.error
+        if (!err) { okCount += 1; continue }
+        if (isDuplicateUuidError(err)) { dup += 1; continue }   // 重放命中已写条目
+        failed.push(sent[i])
+      }
+      chunk.items = failed
+      chunk.itemAttempts = (chunk.itemAttempts || 0) + 1
+      chunk.lastError = failed.length ? ('item_errors:' + failed.length) : null
+      persistPending(rec)   // 先把已确认落库的条目从 pending 移除
+      console.log('[deepmemory] pending chunk store ' + rec.batchId + ' chunk ' + chunk.index
+        + ': ok=' + okCount + ' dup=' + dup + ' failed=' + failed.length + ' (kept ' + chunk.items.length + ')')
+    }
+    state.extractCount += okCount
+    return { okCount, failedCount: chunk.items.length }
+  }
+
+  // 处理一批 pending：逐块「抽取 → 落盘条目 → add_batch → 逐条核对 → 标记 done」，
+  // 全部 chunk done 才删除 pending 文件（ack）。返回本次新抽取的结果（供状态卡/任务板用）。
+  async function runPendingBatch(rec, opts) {
+    const options = opts || {}
+    const results = []
+    rec.attempts = (rec.attempts || 0) + 1
+    if (!persistPending(rec)) return results
+    const liveDeadline = options.live ? Date.now() + PENDING_LIVE_BUDGET_MS : 0
+    for (const chunk of rec.chunks) {
+      if (chunk.status === 'done') continue
+      if (liveDeadline && Date.now() > liveDeadline) {
+        console.log('[deepmemory] pending batch ' + rec.batchId
+          + ' live budget exhausted; remaining chunk(s) deferred to replay')
+        break
+      }
+      // 1) 需要时抽取（pending_extract / 上次崩在 extracting）
+      if (chunk.status === 'pending_extract' || chunk.status === 'extracting') {
+        if (options.live !== true) {
+          // 重放尊重用户开关：关闭会话记忆或抽取时，保留 pending 不做新抽取。
+          if (!EXTRACT_ENABLED) {
+            console.log('[deepmemory] pending replay paused (extract disabled): ' + rec.batchId)
+            break
+          }
+          if (!(await isEnabled(rec.sessionId))) {
+            console.log('[deepmemory] pending replay paused (session memory off): ' + String(rec.sessionId).slice(0, 12))
+            break
+          }
+        }
+        chunk.status = 'extracting'
+        persistPending(rec)
+        const result = await extract(chunk.dialog, options.signal, { preRedacted: true })
+        if (!result) {
+          chunk.status = 'pending_extract'
+          chunk.lastError = 'extract_failed'
+          persistPending(rec)
+          console.error('[deepmemory] pending extract failed (' + rec.batchId + ' chunk '
+            + chunk.index + '); kept for replay')
+          break
+        }
+        chunk.items = buildPendingItems(result, rec.sessionId, chunk.dialog)
+        chunk.status = 'extracted'
+        chunk.extractedAt = Date.now()
+        chunk.lastError = null
+        persistPending(rec)
+        results.push(result)
+      }
+      // 2) 落库 + 3) 逐条核对
+      await storePendingChunk(rec, chunk)
+      if (!chunk.items.length) {
+        chunk.status = 'done'
+        chunk.storedAt = Date.now()
+        persistPending(rec)
+      }
+    }
+    // 4) ack：所有块都 done 才删文件；否则文件留在磁盘等重放
+    if (rec.chunks.every((c) => c.status === 'done')) {
+      try {
+        fs.unlinkSync(rec.file)
+        console.log('[deepmemory] pending batch acked: ' + rec.batchId)
+      } catch (e) {
+        console.error('[deepmemory] pending ack failed (' + rec.batchId + '): ' + String(e))
+      }
+    }
+    return results
+  }
+
+  // 跨实例/跨重放的批次互斥（同一 dsh-web 进程可能有多个 preset 实例）。
+  function lockIsStale(lock) {
+    try {
+      const pid = Number(String(fs.readFileSync(lock, 'utf8')).trim()) || 0
+      if (pid && pid !== process.pid) {
+        try { process.kill(pid, 0); return false } catch (e) { if (e && e.code === 'ESRCH') return true }
+      }
+      const st = fs.statSync(lock)
+      return Date.now() - st.mtimeMs > PENDING_LOCK_STALE_MS
+    } catch (e) { return true }
+  }
+
+  function acquireBatchLock(file) {
+    const lock = file + '.lock'
+    const write = () => {
+      const fd = fs.openSync(lock, 'wx', 0o600)
+      try { fs.writeSync(fd, String(process.pid)) } finally { fs.closeSync(fd) }
+      return lock
+    }
+    try {
+      return write()
+    } catch (e) {
+      if (e && e.code === 'EEXIST' && lockIsStale(lock)) {
+        try { fs.unlinkSync(lock) } catch (e2) {}
+        try { return write() } catch (e3) {}
+      }
+      return null
+    }
+  }
+
+  function releaseBatchLock(lock) {
+    if (!lock) return
+    try { fs.unlinkSync(lock) } catch (e) {}
+  }
+
+  // 清理崩溃残留：已 ack（.json 已删）却来不及删的 .lock，以及超龄的 .tmp-*。
+  function cleanupPendingStrays(knownJsonNames) {
+    if (!PENDING_DIR) return
+    try {
+      const now = Date.now()
+      const known = new Set(knownJsonNames || [])
+      for (const n of fs.readdirSync(PENDING_DIR)) {
+        const full = path.join(PENDING_DIR, n)
+        if (n.endsWith('.json.lock')) {
+          if (known.has(n.slice(0, -5))) continue        // 对应 .json 还在 → 正常锁
+          if (!lockIsStale(full)) continue
+          try { fs.unlinkSync(full); console.log('[deepmemory] removed orphan pending lock: ' + n) } catch (e) {}
+        } else if (n.indexOf('.tmp-') !== -1) {
+          try { if (now - fs.statSync(full).mtimeMs > 60 * 60 * 1000) fs.unlinkSync(full) } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+
+  let replayRunning = false
+
+  // 启动/定时重放：扫描 pending 目录，逐个取锁处理未 ack 批次。
+  async function replayPendingBatches(trigger) {
+    if (replayRunning) return
+    if (!PENDING_DIR) return
+    replayRunning = true
+    try {
+      let names = []
+      try {
+        names = fs.readdirSync(PENDING_DIR).filter((n) => n.endsWith('.json')).sort()
+      } catch (e) {
+        if (e && e.code !== 'ENOENT') console.error('[deepmemory] pending scan failed: ' + String(e))
+        return
+      }
+      cleanupPendingStrays(names)
+      if (!names.length) return
+      for (const name of names) {
+        const file = path.join(PENDING_DIR, name)
+        let rec = null
+        try {
+          rec = loadPending(file)
+        } catch (e) {
+          if (!pendingBadLogged.has(file)) {
+            pendingBadLogged.add(file)
+            console.error('[deepmemory] pending record unreadable (' + file + '): ' + String(e) + '; kept on disk')
+          }
+          continue
+        }
+        const lock = acquireBatchLock(file)
+        if (!lock) continue   // 另一个实例/本轮 live 正在处理
+        try {
+          // 取锁后重读，避免读到别的实例刚更新的旧状态
+          try { rec = loadPending(file) } catch (e) { continue }
+          const results = await runPendingBatch(rec, { live: false })
+          if (results.length) {
+            console.log('[deepmemory] pending replay (' + trigger + ') ' + rec.batchId
+              + ' extracted ' + results.length + ' chunk(s)')
+          }
+        } catch (e) {
+          console.error('[deepmemory] pending replay failed (' + rec.batchId + '): ' + String(e))
+        } finally {
+          releaseBatchLock(lock)
+        }
+      }
+    } finally {
+      replayRunning = false
     }
   }
 
@@ -916,75 +1365,46 @@ function redactSensitive(text) {
     if (!sid || !(await isEnabled(sid))) return
     const bucket = buckets.get(sid)
     if (!bucket || bucket.length < EXTRACT_THRESHOLD) return
-    // N09：原实现在 LLM 调用前就 buckets.delete(sid)，抽取超时/解析失败直接 return
-    // → 整桶消息永久丢失。改为「抽取成功后」才消费本批消息，失败保留桶等下一轮重试。
+    // P0-3：先持久化（pending 文件，含来源消息 + 批次幂等键），落盘成功后才从内存桶消费。
+    // 写盘失败 → 保留内存桶，绝不出现「删了桶但没落盘」。
     const batch = bucket.slice()
-    const dialog = batch.map((m) => (m.role === 'user' ? '用户: ' : '助手: ') + m.text).join('\n')
-    console.log('[deepmemory] extracting from ' + batch.length + ' messages...')
-    const result = await extract(dialog, payload.signal)
-    if (!result) {
-      console.error('[deepmemory] extract failed; keep bucket for retry (' + batch.length + ' messages)')
+    const pending = createPendingBatch(sid, batch)
+    if (!pending) {
+      console.error('[deepmemory] pending persist failed; keep bucket for retry (' + batch.length + ' messages)')
       return
     }
-    // 抽取成功：只消费本批消息；抽取期间新入桶的消息保留，下一轮再抽
+    // 已持久化：只消费本批消息；抽取期间新入桶的消息保留，下一轮再抽
     if (buckets.get(sid) === bucket) {
       const rest = bucket.filter((m) => batch.indexOf(m) < 0)
       if (rest.length) buckets.set(sid, rest)
       else buckets.delete(sid)
     }
-    let memoryChanged = false
-    // N10：原实现只查 .length —— {"memories":"x"} 是合法 JSON，字符串有 length 却没有
-    // .filter，会抛 TypeError；本代码在 agent/turn-stopping 里运行，异常会把已生成回答的
-    // 回合标成 error。这里加结构守卫（tasks/card 两处原本就已有守卫）。
-    if (Array.isArray(result.memories) && result.memories.length) {
-      const items = result.memories.filter((m) => m && typeof m.content === 'string' && m.content.trim()).map((m) => {
-        const rawContent = redactSensitive(m.content)
-        const rawKeyFacts = redactSensitive(m.key_facts || '')
-        const rawPersona = redactSensitive(m.persona_summary || '')
-        const rawAtom = Array.isArray(m.atoms) ? m.atoms.map((a) => Object.assign({}, a, { content: redactSensitive(a.content || '') })) : []
-        const rawEntities = Array.isArray(m.entities) ? m.entities.map((e) => Object.assign({}, e, { name: redactSensitive(e.name || '') })) : []
-        const rawRelations = Array.isArray(m.relations) ? m.relations.map((r) => Object.assign({}, r, { source: redactSensitive(r.source || ''), target: redactSensitive(r.target || ''), relation: redactSensitive(r.relation || '') })) : []
-        return {
-        content: String(rawContent).slice(0, 500),
-        key_facts: String(rawKeyFacts).slice(0, 600),
-        persona_summary: String(rawPersona).slice(0, 500),
-        type: m.type || 'fact',
-        domain: m.domain || 'work',
-        scope: m.scope || 'workspace',
-        importance: typeof m.importance === 'number' ? m.importance : 0.5,
-        workspace_id: resolveWorkspace(sid),
-        session_id: sid,
-        dialog_scoped: true,
-        topic_id: String(m.topic || '').slice(0, 60),
-        atoms: rawAtom,
-        entities: rawEntities,
-        relations: rawRelations,
-        source: redactSensitive(dialog).slice(0, 32000),   // v0.4：无 2000 截断；超长由 server 分段+truncated 标记
-        }
-      })
-      if (items.length) {
-        const res = await http('POST', '/v1/memories/add_batch', { items: items })
-        if (res.ok) {
-          // N09：add_batch 即使 HTTP 200，也会在 added 数组里逐项返回 error（见 server.py add_batch）。
-          // 原实现按 items.length 全计成功 → 部分写失败被宣告成功。这里逐项核对，只计真正成功的条目。
-          const added = res.data && Array.isArray(res.data.added) ? res.data.added : null
-          if (!added) {
-            console.log('[deepmemory] extracted 0/' + items.length + ' memories (unexpected add_batch response shape)')
-          } else {
-            const failed = added.filter((x) => x && x.error)
-            const okCount = added.length - failed.length
-            state.extractCount += okCount
-            if (okCount > 0) memoryChanged = true
-            // 只打数量与错误摘要，不打记忆正文
-            console.log('[deepmemory] extracted ' + okCount + '/' + items.length + ' memories (total ' + state.extractCount + ')'
-              + (failed.length ? '; failed=' + failed.length + ' firstError=' + JSON.stringify(String((failed[0] && failed[0].error) || '').slice(0, 120)) : ''))
-            if (failed.length) {
-              console.error('[deepmemory] add_batch partial failure: ' + failed.length + '/' + added.length + ' items rejected (session ' + sid.slice(0, 12) + ', ' + items.length + ' sent)')
-            }
-          }
-        }
-      }
+    console.log('[deepmemory] extracting from ' + batch.length + ' messages... (' + pending.chunks.length
+      + ' chunk(s) ≤' + PENDING_CHUNK_CHARS + ' chars, pending ' + pending.batchId + ')')
+    let extractedResults = []
+    const batchLock = acquireBatchLock(pending.file)
+    if (!batchLock) {
+      // 另一个 preset 实例/重放已接管这一批；消息已在磁盘，稍后由重放 ack。
+      console.log('[deepmemory] pending batch busy; deferred to replay (' + pending.batchId + ')')
+      return
     }
+    try {
+      extractedResults = await runPendingBatch(pending, { live: true, signal: payload && payload.signal })
+    } catch (e) {
+      console.error('[deepmemory] pending live processing failed (' + pending.batchId + '): ' + String(e))
+    } finally {
+      releaseBatchLock(batchLock)
+    }
+    // 各分块抽取结果合并后，状态卡/任务板仍走下方原有的「单次处理」逻辑：
+    // card 取最后一个非空 card（越靠后的分块越新），tasks 合并各块（原有代码会按 title 去重）。
+    let mergedCard = null
+    const mergedTasks = []
+    for (const r of extractedResults) {
+      if (r && r.card && typeof r.card === 'object') mergedCard = r.card
+      if (r && Array.isArray(r.tasks) && r.tasks.length) mergedTasks.push(...r.tasks)
+    }
+    const result = { card: mergedCard, tasks: mergedTasks }
+    let memoryChanged = false
     // AI 驱动状态卡更新：抽取到 card 即写回 v2 卡（增量修订，expected_version 防止覆盖）
     if (INJECT_CARD && result.card && typeof result.card === 'object') {
       try {
@@ -1624,6 +2044,38 @@ function redactSensitive(text) {
     })
   } catch (e) {
     console.log('[deepmemory] agent/created hook unavailable: ' + String(e))
+  }
+
+  // P0-3：启动时 + 定时重放未 ack 的 pending 批次（后台定时器，unref 不阻止进程退出）。
+  // 时间窗可用 DEEPMEMORY_PENDING_REPLAY_MS / DEEPMEMORY_PENDING_STARTUP_MS 覆盖（测试用）。
+  try {
+    ctx.effect(() => {
+      const intervalMs = Math.max(500, Number(process.env.DEEPMEMORY_PENDING_REPLAY_MS || 60000) || 60000)
+      const startupMs = Math.max(100, Number(process.env.DEEPMEMORY_PENDING_STARTUP_MS || Math.min(8000, intervalMs)) || 100)
+      let interval = null
+      let startup = null
+      const stop = () => {
+        if (interval) { clearInterval(interval); interval = null }
+        if (startup) { clearTimeout(startup); startup = null }
+      }
+      try {
+        startup = setTimeout(() => {
+          startup = null
+          replayPendingBatches('startup').catch((e) => console.error('[deepmemory] pending startup replay failed: ' + String(e)))
+        }, startupMs)
+        if (startup.unref) startup.unref()
+        interval = setInterval(() => {
+          replayPendingBatches('timer').catch((e) => console.error('[deepmemory] pending timer replay failed: ' + String(e)))
+        }, intervalMs)
+        if (interval.unref) interval.unref()
+        console.log('[deepmemory] pending replay scheduled (startup ' + startupMs + 'ms, interval ' + intervalMs + 'ms, dir ' + PENDING_DIR + ')')
+      } catch (e) {
+        console.log('[deepmemory] pending replay timer unavailable: ' + String(e))
+      }
+      return stop
+    })
+  } catch (e) {
+    console.log('[deepmemory] pending replay effect unavailable: ' + String(e))
   }
 
   loadConfig().then(() => console.log('[deepmemory] ready (preset plugin P2: relations + cross-turn query + graph route)'))

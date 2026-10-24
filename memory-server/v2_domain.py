@@ -8,13 +8,14 @@ this module owns the P1 transactional data model that later API work can call.
 import hashlib
 import json
 import sqlite3
+import sys
 import time
 import uuid
 
-from sensitive import redact_text, sensitivity_types
+from sensitive import redact_text, redact_value, sensitivity_types
 
 
-V2_SCHEMA_VERSION = 5
+V2_SCHEMA_VERSION = 6
 
 TASK_STATUSES = ("draft", "planned", "todo", "in_progress", "review", "completed", "failed")
 TASK_COLORS = ("neutral", "red", "orange", "yellow", "green", "blue")
@@ -42,6 +43,10 @@ DECISION_STATUSES = (
     "invalid",
 )
 SENSITIVITY_LEVELS = ("normal", "sensitive", "protected", "secret")
+SCOPES = ("global", "workspace", "session")
+# 需要脱敏的正文类字段：v2 的每条写入路径（lifecycle / 状态卡 / 导入）都必须走
+# redact_fields，禁止再直接把这些字段写进 documents。
+MEMORY_TEXT_FIELDS = ("content", "key_facts", "persona_summary", "canonical_summary", "keywords")
 
 
 class DomainError(Exception):
@@ -64,12 +69,81 @@ class InvalidTransition(DomainError):
     pass
 
 
+MEMORY_UPDATE_FIELDS = frozenset({
+    "content",
+    "key_facts",
+    "persona_summary",
+    "canonical_summary",
+    "keywords",
+    "type",
+    "domain",
+    "scope",
+    "workspace_id",
+    "session_id",
+    "persona_id",
+    "importance",
+    "memory_class",
+    "storage_tier",
+    "decision_status",
+    "disputed",
+    "supersedes_id",
+    "event_time_start",
+    "event_time_end",
+    "time_raw",
+    "time_precision",
+    "time_confidence",
+    "time_inferred",
+    "sensitivity_level",
+    "confirmation_status",
+    "source_quality",
+    "actionability",
+    "reject_penalty",
+    "lifecycle_expires_at",
+    "cold_at",
+    "compressed_at",
+    "task_id",
+    "source_ref",
+    "source_message_id",
+    "trace_id",
+})
+# 插入路径额外允许库/敏感标记（library 是入库属性，敏感标记由脱敏结果决定下限）。
+MEMORY_INSERT_FIELDS = MEMORY_UPDATE_FIELDS | frozenset({
+    "uuid", "library", "has_sensitive", "sensitive_types",
+})
+
+
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _hash_payload(value):
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def redact_fields(fields, text_fields=MEMORY_TEXT_FIELDS):
+    """Redact sensitive literals inside memory text fields.
+
+    Returns ``(clean_fields, matches)``. Only string values are examined; this is
+    the single gate every v2 memory write path must pass through before values
+    reach ``documents`` / ``memory_revisions``.
+    """
+    clean = dict(fields or {})
+    matches = []
+    for name in text_fields:
+        value = clean.get(name)
+        if not isinstance(value, str):
+            continue
+        redacted, found = redact_text(value)
+        if found:
+            clean[name] = redacted
+            matches.extend(found)
+    return clean, matches
+
+
+def redact_payload(payload):
+    """Recursively redact a JSON-like state-card payload (keeps the structure)."""
+    return redact_value(payload)
+
 
 
 def _columns(conn, table):
@@ -82,6 +156,64 @@ def _ensure_columns(conn, table, columns):
         if name not in present:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
             present.add(name)
+
+
+def _migrate_state_cards_v6(conn):
+    """Make state cards workspace-owned: add workspace_id + composite UNIQUE.
+
+    v5 keyed cards by ``(card_key, kind)``, which made two workspaces sharing a
+    session_id collide. v6 scopes the key by workspace. SQLite cannot alter a
+    UNIQUE constraint in place, so the (small) parent table is rebuilt while
+    keeping every row id, so ``state_card_revisions.card_id`` references stay
+    valid. Idempotent: detected by the composite UNIQUE in the stored DDL.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='state_cards'"
+    ).fetchone()
+    if row is None:
+        return
+    sql = row[0] or ""
+    columns = _columns(conn, "state_cards")
+    if "workspace_id" in columns and "UNIQUE(workspace_id, card_key, kind)" in sql:
+        return
+    ws_expr = "COALESCE(workspace_id,'')" if "workspace_id" in columns else "''"
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.executescript(
+            f"""
+            CREATE TABLE state_cards_v6 (
+              id TEXT PRIMARY KEY,
+              card_key TEXT NOT NULL,
+              workspace_id TEXT NOT NULL DEFAULT '',
+              session_id TEXT NOT NULL DEFAULT '',
+              kind TEXT NOT NULL CHECK(kind IN ('task','daily')),
+              task_id TEXT REFERENCES tasks(id),
+              payload TEXT NOT NULL DEFAULT '{{}}',
+              version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+              current_revision_id TEXT,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              UNIQUE(workspace_id, card_key, kind)
+            );
+            INSERT OR IGNORE INTO state_cards_v6
+              (id,card_key,workspace_id,session_id,kind,task_id,payload,version,
+               current_revision_id,created_at,updated_at)
+            SELECT id,card_key,{ws_expr},session_id,kind,task_id,payload,version,
+               current_revision_id,created_at,updated_at
+            FROM state_cards;
+            DROP TABLE state_cards;
+            ALTER TABLE state_cards_v6 RENAME TO state_cards;
+            CREATE INDEX IF NOT EXISTS idx_cards_task ON state_cards(task_id);
+            CREATE INDEX IF NOT EXISTS idx_cards_session ON state_cards(session_id,kind);
+            CREATE INDEX IF NOT EXISTS idx_cards_workspace
+              ON state_cards(workspace_id,session_id,kind);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
 
 
 V2_SCHEMA = """
@@ -130,6 +262,7 @@ CREATE TABLE IF NOT EXISTS task_events (
 CREATE TABLE IF NOT EXISTS state_cards (
   id TEXT PRIMARY KEY,
   card_key TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
   session_id TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL CHECK(kind IN ('task','daily')),
   task_id TEXT REFERENCES tasks(id),
@@ -138,7 +271,7 @@ CREATE TABLE IF NOT EXISTS state_cards (
   current_revision_id TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
-  UNIQUE(card_key, kind)
+  UNIQUE(workspace_id, card_key, kind)
 );
 
 CREATE TABLE IF NOT EXISTS state_card_revisions (
@@ -446,6 +579,11 @@ def install_v2_schema(conn):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cards_session ON state_cards(session_id,kind)"
         )
+        _migrate_state_cards_v6(conn)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cards_workspace "
+            "ON state_cards(workspace_id, session_id, kind)"
+        )
     if "session_keys" in {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }:
@@ -461,6 +599,8 @@ class V2Store:
 
     def __init__(self, db_path):
         self.db_path = db_path
+        self.index_hook = None
+        self.cache_hook = None
 
     def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -471,6 +611,362 @@ class V2Store:
     def migrate(self):
         with self._connect() as conn:
             install_v2_schema(conn)
+
+    # ---------------------------------------------------------------- unified write gate
+
+    def set_write_hooks(self, index_hook=None, cache_hook=None):
+        """Register post-write hooks.
+
+        ``index_hook`` is the P1 vector/BM25 synchronization point (left as a
+        no-op stub by this task); ``cache_hook`` invalidates derived read caches
+        (the HTTP layer wires it to its search cache + semantic generation).
+        """
+        self.index_hook = index_hook
+        self.cache_hook = cache_hook
+
+    def _notify_write(self, event):
+        for hook in (self.index_hook, self.cache_hook):
+            if hook is None:
+                continue
+            try:
+                hook(dict(event))
+            except Exception as exc:  # pragma: no cover - a hook must never break a write
+                print(f"[v2_domain] write hook failed: {exc}", file=sys.stderr)
+
+    def _resolve_workspace_id(self, workspace_id, session_id, conn=None):
+        """Resolve the owning workspace: explicit arg > unique session_keys match > ''.
+
+        Kept deliberately permissive for legacy callers: when no workspace is
+        supplied and ``session_keys`` does not disambiguate the session, the old
+        workspace-agnostic semantics are preserved (an empty scope).
+        """
+        workspace_id = str(workspace_id or "").strip()
+        if workspace_id:
+            return workspace_id
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return ""
+        sql = (
+            "SELECT DISTINCT workspace_id FROM session_keys "
+            "WHERE session_id=? AND workspace_id!=''"
+        )
+        if conn is not None:
+            rows = conn.execute(sql, (session_id,)).fetchall()
+        else:
+            with self._connect() as own:
+                rows = own.execute(sql, (session_id,)).fetchall()
+        found = {str(row[0]) for row in rows if row[0]}
+        return found.pop() if len(found) == 1 else ""
+
+    @staticmethod
+    def _validate_scope(scope, workspace_id, session_id):
+        if scope not in SCOPES:
+            raise DomainError(f"unknown memory scope: {scope}")
+        if scope == "workspace" and not workspace_id:
+            raise DomainError("workspace-scoped memory requires workspace_id")
+        if scope == "session" and not session_id:
+            raise DomainError("session-scoped memory requires session_id")
+
+    def write_memory(
+        self,
+        fields,
+        memory_id=None,
+        *,
+        workspace_id=None,
+        session_id=None,
+        expected_version=None,
+        actor="main_agent",
+        reason="",
+        source_message_id="",
+        trace_id="",
+        explicit_execution=False,
+    ):
+        """The single v2 memory write gate.
+
+        Every v2 memory write (lifecycle updates, imports, state-card imports)
+        must go through here. It applies, in order: redaction (``redact_text`` /
+        ``sensitivity_types``) → workspace/session scope validation → the
+        ``documents`` write → an immutable ``memory_revisions`` row → the index
+        hook (P1 stub) → the cache-invalidation hook. Returns a small result dict;
+
+        ``memory_id=None`` performs an insert (revision version 1), otherwise an
+        optimistic-concurrency update against ``expected_version``.
+        """
+        fields = dict(fields or {})
+        inserting = memory_id is None
+        allowed = MEMORY_INSERT_FIELDS if inserting else MEMORY_UPDATE_FIELDS
+        unknown = set(fields) - allowed
+        if unknown:
+            raise DomainError(f"unsupported memory fields: {sorted(unknown)}")
+        if not fields:
+            raise DomainError("memory write requires at least one field")
+        if actor not in MEMORY_ACTORS:
+            raise PermissionDenied(f"unknown memory actor: {actor}")
+        decision = fields.get("decision_status")
+        if decision == "invalid" and actor != "user":
+            raise PermissionDenied("only an explicit user action may set invalid")
+        if decision == "adopted" and actor == "model" and not explicit_execution:
+            raise PermissionDenied("candidate discussion cannot be promoted to adopted")
+        if decision is not None and decision not in DECISION_STATUSES:
+            raise DomainError(f"unknown decision status: {decision}")
+        if "memory_class" in fields and fields["memory_class"] not in MEMORY_CLASSES:
+            raise DomainError(f"unknown memory_class: {fields['memory_class']}")
+        if "storage_tier" in fields and fields["storage_tier"] not in STORAGE_TIERS:
+            raise DomainError(f"unknown storage_tier: {fields['storage_tier']}")
+        if "sensitivity_level" in fields and fields["sensitivity_level"] not in SENSITIVITY_LEVELS:
+            raise DomainError(f"unknown sensitivity_level: {fields['sensitivity_level']}")
+
+        # ① 脱敏：正文类字段统一过 redact_text；检测到敏感内容时 has_sensitive 只能置位。
+        clean, matches = redact_fields(fields)
+        detected = sensitivity_types(matches)
+        if detected:
+            clean["has_sensitive"] = 1
+            clean["sensitive_types"] = json.dumps(detected, ensure_ascii=False)
+        elif "sensitive_types" in clean and not isinstance(clean["sensitive_types"], str):
+            clean["sensitive_types"] = json.dumps(clean["sensitive_types"] or [], ensure_ascii=False)
+        if "has_sensitive" in clean:
+            clean["has_sensitive"] = int(bool(clean["has_sensitive"]))
+
+        if not inserting:
+            return self._write_memory_update(
+                int(memory_id), clean, matches, detected,
+                workspace_id=workspace_id, session_id=session_id,
+                expected_version=expected_version, actor=actor, reason=reason,
+                source_message_id=source_message_id, trace_id=trace_id,
+            )
+        return self._write_memory_insert(
+            clean, matches, detected,
+            workspace_id=workspace_id, session_id=session_id, actor=actor,
+            reason=reason, source_message_id=source_message_id, trace_id=trace_id,
+        )
+
+    def _write_memory_update(
+        self, memory_id, clean, matches, detected,
+        workspace_id=None, session_id=None, expected_version=None,
+        actor="main_agent", reason="", source_message_id="", trace_id="",
+    ):
+        if expected_version is None:
+            raise DomainError("expected_version is required for a memory update")
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM documents WHERE id=?", (memory_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"memory not found: {memory_id}")
+            columns = set(row.keys())
+            # ③ 作用域校验：resolved workspace 与行归属不一致时拒绝跨 workspace 写入。
+            row_ws = str(row["workspace_id"] or "") if "workspace_id" in columns else ""
+            row_sid = str(row["session_id"] or "") if "session_id" in columns else ""
+            row_scope = str(row["scope"] or "") if "scope" in columns else ""
+            resolved_ws = self._resolve_workspace_id(workspace_id, row_sid, conn=conn)
+            if resolved_ws and row_ws and resolved_ws != row_ws and row_scope != "global":
+                raise PermissionDenied("memory belongs to another workspace")
+            if "workspace_id" in clean:
+                requested_ws = str(clean["workspace_id"] or "").strip()
+                if resolved_ws and requested_ws and requested_ws != resolved_ws:
+                    raise PermissionDenied("memory workspace cannot be rewritten across workspaces")
+                clean["workspace_id"] = requested_ws or resolved_ws or row_ws
+            if "session_id" in clean:
+                requested_sid = str(clean["session_id"] or "").strip()
+                if session_id and requested_sid and requested_sid != str(session_id).strip():
+                    raise PermissionDenied("memory session does not match the request scope")
+                clean["session_id"] = requested_sid or str(session_id or "")
+            target_sid = str(clean.get("session_id") or row_sid or session_id or "").strip()
+            target_ws = str(clean.get("workspace_id") or row_ws or resolved_ws or "").strip()
+            scope_after = str(clean.get("scope") or row_scope or "session")
+            if {"scope", "workspace_id", "session_id"} & set(clean):
+                self._validate_scope(scope_after, target_ws, target_sid)
+            if resolved_ws and not row_ws and scope_after != "global":
+                # 历史无归属行在被作用域化编辑时补归属；revision patch 会记录这次绑定。
+                clean["workspace_id"] = resolved_ws
+            missing = [key for key in clean if key not in columns]
+            if missing:
+                raise DomainError(f"memory fields not supported by this database: {sorted(missing)}")
+            if row["revision_version"] != expected_version:
+                raise ConflictError(
+                    f"memory version conflict: expected {expected_version}, "
+                    f"current {row['revision_version']}"
+                )
+            # before_payload 也走脱敏：历史明文不得经 revision 再落一份。
+            before = {key: row[key] for key in MEMORY_UPDATE_FIELDS if key in columns}
+            before, _ = redact_fields(before)
+            after = dict(before)
+            after.update(clean)
+            version = int(row["revision_version"]) + 1
+            parent = conn.execute(
+                "SELECT id FROM memory_revisions WHERE memory_id=? ORDER BY version DESC LIMIT 1",
+                (memory_id,),
+            ).fetchone()
+            fields_written = sorted(clean)
+            assignments = ",".join(f"{key}=?" for key in fields_written)
+            conn.execute(
+                f"UPDATE documents SET {assignments},revision_version=?,updated_at=? WHERE id=?",
+                [clean[key] for key in fields_written] + [version, time.time(), memory_id],
+            )
+            conn.execute(
+                "INSERT INTO memory_revisions (id,memory_id,parent_revision_id,version,patch,"
+                "before_payload,after_payload,actor,reason,source_message_id,trace_id,before_hash,"
+                "after_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(uuid.uuid4()),
+                    memory_id,
+                    parent["id"] if parent else None,
+                    version,
+                    _json(clean),
+                    _json(before),
+                    _json(after),
+                    actor,
+                    reason,
+                    source_message_id or clean.get("source_message_id", ""),
+                    trace_id or clean.get("trace_id", ""),
+                    _hash_payload(before),
+                    _hash_payload(after),
+                    time.time(),
+                ),
+            )
+        self._notify_write({
+            "kind": "memory", "action": "update", "memory_id": memory_id,
+            "workspace_id": target_ws, "session_id": target_sid,
+        })
+        return {
+            "id": memory_id,
+            "revision_version": version,
+            "inserted": False,
+            "redacted": bool(matches),
+            "sensitive_types": detected,
+        }
+
+    def _write_memory_insert(
+        self, clean, matches, detected,
+        workspace_id=None, session_id=None, actor="main_agent", reason="",
+        source_message_id="", trace_id="",
+    ):
+        content = str(clean.get("content") or "").strip()
+        if not content:
+            raise DomainError("content is required")
+        clean["content"] = content
+        declared_ws = str(clean.get("workspace_id") or "").strip()
+        if workspace_id and declared_ws and declared_ws != str(workspace_id).strip():
+            raise PermissionDenied("memory workspace does not match the request scope")
+        target_session = str(session_id or clean.get("session_id") or "").strip()
+        requested_ws = str(workspace_id or declared_ws or "").strip()
+        resolved_ws = self._resolve_workspace_id(requested_ws, target_session)
+        scope = str(clean.get("scope") or "session")
+        self._validate_scope(scope, resolved_ws or requested_ws, target_session)
+        now = time.time()
+        values = {
+            "uuid": str(clean.get("uuid") or uuid.uuid4()),
+            "content": content,
+            "key_facts": str(clean.get("key_facts") or ""),
+            "persona_summary": str(clean.get("persona_summary") or ""),
+            "canonical_summary": str(clean.get("canonical_summary") or ""),
+            "type": str(clean.get("type") or "fact"),
+            "domain": str(clean.get("domain") or "work"),
+            "scope": scope,
+            "workspace_id": resolved_ws or requested_ws,
+            "session_id": target_session,
+            "persona_id": str(clean.get("persona_id") or ""),
+            "importance": float(clean.get("importance") if clean.get("importance") is not None else 0.5),
+            "created_at": now,
+            "last_access_at": now,
+            "access_count": 0,
+            "status": "active",
+            "keywords": str(clean.get("keywords") or ""),
+            "has_sensitive": int(clean.get("has_sensitive") or 0),
+            "sensitive_types": (
+                clean["sensitive_types"] if isinstance(clean.get("sensitive_types"), str)
+                else json.dumps(clean.get("sensitive_types") or [], ensure_ascii=False)
+            ),
+            "topic_id": str(clean.get("topic_id") or ""),
+            "event_time": clean.get("event_time") if clean.get("event_time") is not None else now,
+            "library": str(clean.get("library") or "runtime"),
+            "time_raw": str(clean.get("time_raw") or ""),
+            "time_precision": str(clean.get("time_precision") or "unknown"),
+            "time_confidence": float(clean.get("time_confidence") or 0.0),
+            "time_inferred": int(clean.get("time_inferred") or 0),
+            "sensitivity_level": str(clean.get("sensitivity_level") or "normal"),
+            "confirmation_status": str(clean.get("confirmation_status") or "unconfirmed"),
+            "source_quality": float(
+                clean.get("source_quality") if clean.get("source_quality") is not None else 0.5
+            ),
+            "actionability": float(clean.get("actionability") or 0.0),
+            "reject_penalty": float(clean.get("reject_penalty") or 0.0),
+            "source_ref": str(clean.get("source_ref") or ""),
+            "source_message_id": str(clean.get("source_message_id") or source_message_id or ""),
+            "trace_id": str(clean.get("trace_id") or trace_id or ""),
+            "memory_class": str(clean.get("memory_class") or "semantic"),
+            "storage_tier": str(clean.get("storage_tier") or "active"),
+            "revision_version": 1,
+            "updated_at": now,
+        }
+        for key, value in clean.items():
+            if key not in values:
+                values[key] = value
+        with self._connect() as conn:
+            present = _columns(conn, "documents")
+            # 调用方显式给的字段必须存在；内部默认值可略过（老库缺列不强行 ALTER）。
+            missing = [key for key in clean if key not in present]
+            if missing:
+                raise DomainError(f"memory fields not supported by this database: {sorted(missing)}")
+            values = {key: value for key, value in values.items() if key in present}
+            columns = sorted(values)
+            placeholders = ",".join("?" for _ in columns)
+            cur = conn.execute(
+                f"INSERT INTO documents ({','.join(columns)}) VALUES ({placeholders})",
+                [values[key] for key in columns],
+            )
+            memory_id = int(cur.lastrowid)
+            after_payload = {key: value for key, value in values.items() if key != "uuid"}
+            conn.execute(
+                "INSERT INTO memory_revisions (id,memory_id,parent_revision_id,version,patch,"
+                "before_payload,after_payload,actor,reason,source_message_id,trace_id,before_hash,"
+                "after_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(uuid.uuid4()),
+                    memory_id,
+                    None,
+                    1,
+                    _json({"created": True}),
+                    "{}",
+                    _json(after_payload),
+                    actor,
+                    reason or "memory created",
+                    values.get("source_message_id", ""),
+                    values.get("trace_id", ""),
+                    _hash_payload({}),
+                    _hash_payload(after_payload),
+                    now,
+                ),
+            )
+        self._notify_write({
+            "kind": "memory", "action": "insert", "memory_id": memory_id,
+            "workspace_id": values.get("workspace_id", ""),
+            "session_id": values.get("session_id", ""),
+        })
+        return {
+            "id": memory_id,
+            "revision_version": 1,
+            "inserted": True,
+            "redacted": bool(matches),
+            "sensitive_types": detected,
+        }
+
+    def find_memory_by_content(self, session_id, content, workspace_id=None):
+        """Find an active memory of one session store by exact (redacted) content."""
+        session_id = str(session_id or "").strip()
+        content = str(content or "").strip()
+        if not session_id or not content:
+            return None
+        clauses = ["session_id=?", "status='active'", "content=?"]
+        args = [session_id, content]
+        workspace_id = str(workspace_id or "").strip()
+        if workspace_id:
+            clauses.append("workspace_id=?")
+            args.append(workspace_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT * FROM documents WHERE {' AND '.join(clauses)} ORDER BY id LIMIT 1",
+                args,
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def create_task(self, title, status="planned", parent_task_id=None, **fields):
         if status not in TASK_STATUSES:
@@ -890,57 +1386,100 @@ class V2Store:
     def export_session(self, workspace_id, session_id, include_sensitive=False):
         """Export one session's active memory store (memories + card) for migration.
 
-        Sensitive content is never exported in the clear unless explicitly
-        authorized at the HTTP layer; this domain method only carries the
-        sensitivity flags and redacted placeholders.
+        The export is scoped by ``(workspace_id, session_id)``: when a workspace
+        is supplied (or can be resolved from ``session_keys``) only that
+        workspace's rows are exported, so two workspaces that share one
+        session_id cannot read each other's store.
+
+        Unless ``include_sensitive`` is explicitly true, sensitive literals are
+        redacted on the way out — including the state card payload, which is
+        exported as a parsed object (never as an unredacted raw string).
         """
         session_id = str(session_id or "").strip()
         if not session_id:
             raise DomainError("session_id is required")
+        resolved_ws = self._resolve_workspace_id(workspace_id, session_id)
+        clauses = ["session_id=?", "status='active'"]
+        args = [session_id]
+        if resolved_ws:
+            clauses.append("workspace_id=?")
+            args.append(resolved_ws)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id,content,key_facts,persona_summary,canonical_summary,type,domain,scope,"
-                "importance,keywords,has_sensitive,sensitive_types,status,memory_class,created_at "
-                "FROM documents WHERE session_id=? AND status='active'",
-                (session_id,),
+                f"SELECT * FROM documents WHERE {' AND '.join(clauses)} ORDER BY id",
+                args,
             ).fetchall()
+            card_clauses = ["session_id=?", "kind IN ('task','daily')"]
+            card_args = [session_id]
+            if resolved_ws:
+                card_clauses.append("workspace_id=?")
+                card_args.append(resolved_ws)
             card = conn.execute(
-                "SELECT payload,version FROM state_cards WHERE session_id=? AND kind IN ('task','daily') "
+                f"SELECT * FROM state_cards WHERE {' AND '.join(card_clauses)} "
                 "ORDER BY updated_at DESC LIMIT 1",
-                (session_id,),
+                card_args,
             ).fetchone()
         memories = []
         for r in rows:
+            keys = r.keys()
             item = {
                 "content": str(r["content"] or ""),
-                "key_facts": str(r["key_facts"] or ""),
+                "key_facts": str(r["key_facts"] or "") if "key_facts" in keys else "",
                 "type": str(r["type"] or "fact"),
                 "domain": str(r["domain"] or "work"),
                 "scope": str(r["scope"] or "session"),
+                "workspace_id": str(r["workspace_id"] or "") if "workspace_id" in keys else "",
                 "importance": float(r["importance"] or 0.5),
-                "keywords": str(r["keywords"] or ""),
+                "keywords": str(r["keywords"] or "") if "keywords" in keys else "",
                 "has_sensitive": bool(r["has_sensitive"]),
                 "sensitive_types": json.loads(r["sensitive_types"] or "[]"),
             }
             if include_sensitive:
-                item["persona_summary"] = str(r["persona_summary"] or "")
-                item["canonical_summary"] = str(r["canonical_summary"] or "")
+                item["persona_summary"] = str(r["persona_summary"] or "") if "persona_summary" in keys else ""
+                item["canonical_summary"] = (
+                    str(r["canonical_summary"] or "") if "canonical_summary" in keys else ""
+                )
+            else:
+                # 即使历史行里残留明文，也绝不让它明文离开导出边界。
+                for field in ("content", "key_facts", "keywords"):
+                    item[field] = redact_text(item[field])[0]
             memories.append(item)
+        card_out = None
+        if card is not None:
+            try:
+                payload = json.loads(card["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            if not include_sensitive:
+                payload = redact_payload(payload)
+            card_out = {
+                "kind": card["kind"],
+                "version": int(card["version"]),
+                "payload": payload,
+            }
         return {
             "format": "deepmemory-session-v1",
-            "workspace_id": workspace_id,
+            "workspace_id": resolved_ws,
             "session_id": session_id,
+            "include_sensitive": bool(include_sensitive),
             "exported_at": time.time(),
             "memories": memories,
-            "card": dict(card) if card else None,
+            "card": card_out,
+            "truncated": 0,
         }
 
-    def import_session_memories(self, target_session_id, payload, mode="merge"):
+    def import_session_memories(self, target_session_id, payload, mode="merge", workspace_id=None):
         """Import an exported session memory bundle into another session store.
 
-        merge:  fingerprint-dedupe against existing active documents.
+        merge:   fingerprint-dedupe against existing active documents.
         replace: archive existing active documents of the target session first.
-        Returns per-item decision counts.
+
+        The import is workspace-scoped: target workspace = explicit
+        ``workspace_id`` > bundle ``workspace_id`` > unique ``session_keys``
+        match. Every memory goes through :meth:`write_memory`, so redaction,
+        scope validation, revisions and write hooks cannot be bypassed. Long
+        content is kept in full: ``truncated`` always reports how many items
+        were cut (0 today — nothing is silently dropped).
         """
         target_session_id = str(target_session_id or "").strip()
         if not target_session_id:
@@ -948,134 +1487,141 @@ class V2Store:
         memories = payload.get("memories") if isinstance(payload, dict) else None
         if not isinstance(memories, list):
             raise ValueError("payload.memories is required")
+        bundle_ws = ""
+        if isinstance(payload, dict):
+            bundle_ws = str(payload.get("workspace_id") or "").strip()
+        target_ws = self._resolve_workspace_id(
+            str(workspace_id or "").strip() or bundle_ws, target_session_id
+        )
         now = time.time()
         inserted = 0
         merged = 0
         replaced = 0
-        with self._connect() as conn:
-            if mode == "replace":
+        truncated = 0
+        if mode == "replace":
+            clauses = ["session_id=?", "status='active'"]
+            args = [target_session_id]
+            if target_ws:
+                clauses.append("workspace_id=?")
+                args.append(target_ws)
+            with self._connect() as conn:
                 cur = conn.execute(
-                    "UPDATE documents SET status='archived',updated_at=? WHERE session_id=? AND status='active'",
-                    (now, target_session_id),
+                    f"UPDATE documents SET status='archived',updated_at=? "
+                    f"WHERE {' AND '.join(clauses)}",
+                    [now] + args,
                 )
                 replaced = cur.rowcount
-            for m in memories:
-                if not isinstance(m, dict) or not str(m.get("content") or "").strip():
-                    continue
-                content = str(m["content"]).strip()
-                # 脱敏：导入写普通 memory 表前统一红act（与 server._save_source 一致的敏感处理），
-                # 避免导入明文 secret 进入 documents.content/key_facts/persona_summary/keywords。
-                redacted = {}
-                matches_all = []
-                for field in ("content", "key_facts", "persona_summary", "keywords"):
-                    raw = str(m.get(field) or "")
-                    if not raw:
-                        redacted[field] = raw
-                        continue
-                    red, ms = redact_text(raw)
-                    redacted[field] = red
-                    matches_all.extend(ms)
-                content = redacted["content"].strip()[:500]
-                det_sens = sensitivity_types(matches_all)
-                has_sensitive = int(bool(det_sens) or bool(m.get("has_sensitive")))
-                sens_types = det_sens or list(m.get("sensitive_types") or [])
-                if mode == "merge":
-                    dup = conn.execute(
-                        "SELECT id FROM documents WHERE session_id=? AND status='active' AND content=?",
-                        (target_session_id, content),
-                    ).fetchone()
-                    if dup is not None:
-                        merged += 1
-                        continue
-                conn.execute(
-                    "INSERT INTO documents (uuid,content,key_facts,persona_summary,type,domain,scope,"
-                    "workspace_id,session_id,importance,created_at,last_access_at,status,keywords,"
-                    "has_sensitive,sensitive_types,time_raw,time_precision,time_confidence,time_inferred,"
-                    "sensitivity_level,confirmation_status,source_quality,actionability,reject_penalty,"
-                    "source_ref,source_message_id,trace_id,revision_version,memory_class,storage_tier) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        str(uuid.uuid4()),
-                        content,
-                        redacted["key_facts"],
-                        redacted["persona_summary"],
-                        str(m.get("type") or "fact"),
-                        str(m.get("domain") or "work"),
-                        str(m.get("scope") or "session"),
-                        str(m.get("workspace_id") or ""),
-                        target_session_id,
-                        float(m.get("importance") or 0.5),
-                        now,
-                        now,
-                        "active",
-                        redacted["keywords"],
-                        has_sensitive,
-                        json.dumps(sens_types, ensure_ascii=False),
-                        "",
-                        "unknown",
-                        0.0,
-                        1,
-                        "normal",
-                        "unconfirmed",
-                        0.5,
-                        0.0,
-                        0.0,
-                        "",
-                        "",
-                        "",
-                        0,
-                        "semantic",
-                        "active",
-                    ),
-                )
+        for m in memories:
+            if not isinstance(m, dict) or not str(m.get("content") or "").strip():
+                continue
+            # 先按最终落库文本（脱敏后）比对去重；write_memory 会再脱敏一次（幂等）。
+            prepared, matches = redact_fields(dict(m))
+            flagged = sensitivity_types(matches)
+            content = str(prepared.get("content") or "").strip()
+            if not content:
+                continue
+            if mode == "merge" and self.find_memory_by_content(
+                target_session_id, content, workspace_id=target_ws
+            ) is not None:
+                merged += 1
+                continue
+            fields = {
+                key: value
+                for key, value in prepared.items()
+                if key in MEMORY_INSERT_FIELDS and key not in ("uuid", "workspace_id")
+            }
+            if flagged:
+                # 预脱敏已消费掉原文：把检测结果显式带给统一写入口，避免 has_sensitive 丢失。
+                fields["has_sensitive"] = 1
+                fields["sensitive_types"] = json.dumps(flagged, ensure_ascii=False)
+            fields["session_id"] = target_session_id
+            if target_ws:
+                fields["workspace_id"] = target_ws
+            result = self.write_memory(
+                fields,
+                workspace_id=target_ws or None,
+                session_id=target_session_id,
+                actor="system",
+                reason=f"session import ({mode})",
+            )
+            if result.get("inserted"):
                 inserted += 1
-            if payload.get("card") and isinstance(payload["card"], dict):
-                card = payload["card"]
-                existing = conn.execute(
-                    "SELECT id,version FROM state_cards WHERE session_id=? AND kind=?",
-                    (target_session_id, "daily"),
-                ).fetchone()
-                now_ts = now
-                if existing is None:
-                    conn.execute(
-                        "INSERT INTO state_cards (id,card_key,session_id,kind,task_id,payload,version,"
-                        "created_at,updated_at) VALUES (?,?,?,?,NULL,?,1,?,?)",
-                        (
-                            str(uuid.uuid4()),
-                            "card-" + target_session_id[-8:],
-                            target_session_id,
-                            "daily",
-                            _json(card),
-                            now_ts,
-                            now_ts,
-                        ),
+        card = payload.get("card") if isinstance(payload, dict) else None
+        card_result = None
+        if isinstance(card, dict) and card.get("payload") is not None:
+            kind = card.get("kind") if card.get("kind") in CARD_KINDS else "daily"
+            card_payload = self._normalize_imported_card(card)
+            if card_payload is not None:
+                try:
+                    existing = self.get_state_card(
+                        target_session_id, kind, workspace_id=target_ws or None
                     )
-                else:
-                    conn.execute(
-                        "UPDATE state_cards SET payload=?,version=version+1,updated_at=? WHERE id=?",
-                        (_json(card), now_ts, existing["id"]),
-                    )
-        return {"inserted": inserted, "merged": merged, "replaced": replaced, "mode": mode}
+                    expected_version = existing["version"]
+                except NotFoundError:
+                    expected_version = 0
+                card_result = self.put_state_card(
+                    target_session_id,
+                    kind,
+                    card_payload,
+                    expected_version=expected_version,
+                    workspace_id=target_ws or None,
+                    actor="system",
+                    reason=f"session import ({mode})",
+                )
+        return {
+            "inserted": inserted,
+            "merged": merged,
+            "replaced": replaced,
+            "mode": mode,
+            "workspace_id": target_ws,
+            "card_imported": bool(card_result),
+            "truncated": truncated,
+            "max_content_chars": None,
+        }
 
-    def purge_session(self, session_id, hard=False):
-        """归档（或物理删除）一个会话的全部记忆/状态卡/任务，保留审计。
+    @staticmethod
+    def _normalize_imported_card(card):
+        """Accept both the serialized v1 export shape and the parsed v2 shape."""
+        if not isinstance(card, dict):
+            return None
+        payload = card.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        return redact_payload(payload)
 
-        Default semantics: 软归档（status='archived'），可恢复；hard=True 物理删除
-        （审计记录保留）。返回各对象数量。
+    def purge_session(self, session_id, hard=False, workspace_id=None):
+        """归档（或物理删除）一个会话的记忆/状态卡/任务，保留审计。
+
+        The purge is scoped by ``(workspace_id, session_id)`` when the workspace
+        is known: a session id shared by two workspaces only ever purges its own
+        store. Default semantics: 软归档（status='archived'），可恢复；hard=True
+        物理删除主体行（不可变审计链 memory_revisions/state_card_revisions/
+        task_events 保留）。
         """
         session_id = str(session_id or "").strip()
         if not session_id:
             raise DomainError("session_id is required")
+        resolved_ws = self._resolve_workspace_id(workspace_id, session_id)
+        ws_and = " AND workspace_id=?" if resolved_ws else ""
+        ws_args = [resolved_ws] if resolved_ws else []
+        doc_where = "session_id=?" + ws_and
+        doc_args = [session_id] + ws_args
+        doc_sub = "SELECT id FROM documents WHERE " + doc_where
         now = time.time()
         with self._connect() as conn:
             docs = conn.execute(
-                "SELECT COUNT(*) c FROM documents WHERE session_id=?", (session_id,)
+                f"SELECT COUNT(*) c FROM documents WHERE {doc_where}", doc_args
             ).fetchone()["c"]
             cards = conn.execute(
-                "SELECT COUNT(*) c FROM state_cards WHERE session_id=?", (session_id,)
+                f"SELECT COUNT(*) c FROM state_cards WHERE {doc_where}", doc_args
             ).fetchone()["c"]
             tasks = conn.execute(
-                "SELECT COUNT(*) c FROM tasks WHERE session_id=?", (session_id,)
+                f"SELECT COUNT(*) c FROM tasks WHERE {doc_where}", doc_args
             ).fetchone()["c"]
             if hard:
                 # 物理删除：移除主体行（documents/atoms/graph_edges/state_cards/tasks），
@@ -1091,53 +1637,79 @@ class V2Store:
                 conn.execute("PRAGMA foreign_keys=OFF")
                 # 级联清理全部主体行关联：子表先删（sources→protected_sources→
                 # document_links→memory_archives→atoms→graph_edges→documents），仅删
-                # 本会话记忆的关联（按 memory_id，勿全表）；审计链
-                # (memory_revisions/state_card_revisions/task_events) 保留。
-                conn.execute(
-                    "DELETE FROM sources WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
-                    (session_id,),
-                )
-                conn.execute(
-                    "DELETE FROM protected_sources WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
-                    (session_id,),
-                )
-                conn.execute(
-                    "DELETE FROM document_links WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
-                    (session_id,),
-                )
-                conn.execute(
-                    "DELETE FROM memory_archives WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
-                    (session_id,),
-                )
-                conn.execute("DELETE FROM atoms WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)", (session_id,))
-                conn.execute(
-                    "DELETE FROM graph_edges WHERE memory_id IN (SELECT id FROM documents WHERE session_id=?)",
-                    (session_id,),
-                )
-                conn.execute("DELETE FROM documents WHERE session_id=?", (session_id,))
-                conn.execute("DELETE FROM state_cards WHERE session_id=?", (session_id,))
-                conn.execute("DELETE FROM tasks WHERE session_id=?", (session_id,))
+                # 本会话（本 workspace）记忆的关联；审计链保留。
+                for statement in (
+                    "DELETE FROM sources WHERE memory_id IN (%s)" % doc_sub,
+                    "DELETE FROM protected_sources WHERE memory_id IN (%s)" % doc_sub,
+                    "DELETE FROM document_links WHERE memory_id IN (%s)" % doc_sub,
+                    "DELETE FROM memory_archives WHERE memory_id IN (%s)" % doc_sub,
+                    "DELETE FROM atoms WHERE memory_id IN (%s)" % doc_sub,
+                    "DELETE FROM graph_edges WHERE memory_id IN (%s)" % doc_sub,
+                ):
+                    conn.execute(statement, doc_args)
+                conn.execute(f"DELETE FROM documents WHERE {doc_where}", doc_args)
+                conn.execute(f"DELETE FROM state_cards WHERE {doc_where}", doc_args)
+                conn.execute(f"DELETE FROM tasks WHERE {doc_where}", doc_args)
             else:
                 conn.execute(
-                    "UPDATE documents SET status='archived',updated_at=? WHERE session_id=? AND status='active'",
-                    (now, session_id),
+                    f"UPDATE documents SET status='archived',updated_at=? "
+                    f"WHERE {doc_where} AND status='active'",
+                    [now] + doc_args,
                 )
                 # 任务无 archived 状态（v5 状态机不含'archived'）；会话软归档时把进行中/
                 # 待办任务收尾为 completed（保留事件与溯源），避免看板残留未完成项。
-                # 收尾任务为 completed。blocked 任务（blocked=1）当前 status 必为
-                # 'in_progress'（CHECK: blocked = 0 OR status = 'in_progress'）；直接改为
-                # completed 会违反该 CHECK。因此先/同时置 blocked=0 再改 status（合法）。
+                # blocked=1 时 status 必为 in_progress，直接改 completed 会违反 CHECK，
+                # 因此同时置 blocked=0。
                 conn.execute(
-                    "UPDATE tasks SET status='completed',blocked=0,version=version+1,updated_at=? "
-                    "WHERE session_id=? AND status NOT IN ('completed')",
-                    (now, session_id),
+                    f"UPDATE tasks SET status='completed',blocked=0,version=version+1,updated_at=? "
+                    f"WHERE {doc_where} AND status NOT IN ('completed')",
+                    [now] + doc_args,
                 )
             # 统一撤除会话 key（归档/删除后不再有迁移凭证）
             conn.execute(
-                "UPDATE session_keys SET revoked_at=? WHERE session_id=? AND revoked_at IS NULL",
-                (now, session_id),
+                f"UPDATE session_keys SET revoked_at=? WHERE {doc_where} AND revoked_at IS NULL",
+                [now] + doc_args,
             )
-        return {"session_id": session_id, "hard": hard, "documents": docs, "cards": cards, "tasks": tasks}
+        self._notify_write({
+            "kind": "session", "action": "purge", "session_id": session_id,
+            "workspace_id": resolved_ws, "hard": bool(hard),
+        })
+        return {
+            "session_id": session_id,
+            "workspace_id": resolved_ws,
+            "hard": hard,
+            "documents": docs,
+            "cards": cards,
+            "tasks": tasks,
+        }
+
+    @staticmethod
+    def _find_state_card(conn, session_id, kind, workspace_id=""):
+        """Find the card for (workspace, session, kind), adopting legacy unbound rows."""
+        if workspace_id:
+            row = conn.execute(
+                "SELECT * FROM state_cards WHERE workspace_id=? AND session_id=? AND kind=?",
+                (workspace_id, session_id, kind),
+            ).fetchone()
+            if row is not None:
+                return row
+            # 旧库里无归属的卡片不再复制一份：直接沿用，写入时补 workspace 归属。
+            return conn.execute(
+                "SELECT * FROM state_cards WHERE workspace_id='' AND session_id=? AND kind=? "
+                "ORDER BY version DESC, id LIMIT 1",
+                (session_id, kind),
+            ).fetchone()
+        return conn.execute(
+            "SELECT * FROM state_cards WHERE session_id=? AND kind=? "
+            "ORDER BY (workspace_id='') DESC, updated_at DESC, id LIMIT 1",
+            (session_id, kind),
+        ).fetchone()
+
+    @staticmethod
+    def _card_row(row):
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"] or "{}")
+        return result
 
     def put_state_card(
         self,
@@ -1151,6 +1723,7 @@ class V2Store:
         source_message_id="",
         tool_trace_id="",
         subagent_trace_id="",
+        workspace_id=None,
     ):
         if kind not in CARD_KINDS:
             raise DomainError(f"unknown card kind: {kind}")
@@ -1159,12 +1732,16 @@ class V2Store:
         session_id = str(card_key or "").strip()
         if not session_id:
             raise DomainError("state cards require session_id")
+        if not isinstance(payload, dict):
+            raise DomainError("state card payload must be an object")
+        resolved_ws = self._resolve_workspace_id(workspace_id, session_id)
+        # 状态卡 payload 也必须在统一写入口脱敏（原实现直接落原始 payload）。
+        clean_payload = redact_payload(payload)
         now = time.time()
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
-            ).fetchone()
+            row = self._find_state_card(conn, session_id, kind, resolved_ws)
             before = json.loads(row["payload"]) if row else {}
+            before = redact_payload(before)  # 旧明文 payload 不得经 revision 再落一份
             if row:
                 if expected_version is None or row["version"] != expected_version:
                     raise ConflictError(
@@ -1181,17 +1758,33 @@ class V2Store:
                 card_id = str(uuid.uuid4())
                 version = 1
                 parent_revision_id = None
-                conn.execute(
-                    "INSERT INTO state_cards (id,card_key,session_id,kind,task_id,payload,version,"
-                    "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (card_id, session_id, session_id, kind, task_id, _json(payload), version, now, now),
-                )
+            target_ws = resolved_ws or (str(row["workspace_id"] or "") if row else "")
             patch = {
-                key: {"before": before.get(key), "after": payload.get(key)}
-                for key in sorted(set(before) | set(payload))
-                if before.get(key) != payload.get(key)
+                key: {"before": before.get(key), "after": clean_payload.get(key)}
+                for key in sorted(set(before) | set(clean_payload))
+                if before.get(key) != clean_payload.get(key)
             }
             revision_id = str(uuid.uuid4())
+            if not row:
+                # 先落卡片主体：state_card_revisions.card_id 有 FK，必须引用已存在行。
+                conn.execute(
+                    "INSERT INTO state_cards (id,card_key,workspace_id,session_id,kind,task_id,"
+                    "payload,version,current_revision_id,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        card_id,
+                        session_id,
+                        target_ws,
+                        session_id,
+                        kind,
+                        task_id,
+                        _json(clean_payload),
+                        version,
+                        revision_id,
+                        now,
+                        now,
+                    ),
+                )
             conn.execute(
                 "INSERT INTO state_card_revisions (id,card_id,parent_revision_id,version,"
                 "patch,before_payload,after_payload,actor,reason,source_message_id,"
@@ -1204,49 +1797,50 @@ class V2Store:
                     version,
                     _json(patch),
                     _json(before),
-                    _json(payload),
+                    _json(clean_payload),
                     actor,
                     reason,
                     source_message_id,
                     tool_trace_id,
                     subagent_trace_id,
                     _hash_payload(before),
-                    _hash_payload(payload),
+                    _hash_payload(clean_payload),
                     now,
                 ),
             )
-            conn.execute(
-                "UPDATE state_cards SET task_id=?,payload=?,version=?,current_revision_id=?,"
-                "updated_at=? WHERE id=?",
-                (task_id, _json(payload), version, revision_id, now, card_id),
-            )
-        return self.get_state_card(card_key, kind)
+            if row:
+                conn.execute(
+                    "UPDATE state_cards SET workspace_id=?,task_id=?,payload=?,version=?,"
+                    "current_revision_id=?,updated_at=? WHERE id=?",
+                    (target_ws, task_id, _json(clean_payload), version, revision_id, now, card_id),
+                )
+            card = conn.execute("SELECT * FROM state_cards WHERE id=?", (card_id,)).fetchone()
+        self._notify_write({
+            "kind": "state_card", "action": "put", "card_id": card_id,
+            "session_id": session_id, "workspace_id": target_ws,
+        })
+        return self._card_row(card)
 
-    def get_state_card(self, card_key, kind):
+    def get_state_card(self, card_key, kind, workspace_id=None):
         session_id = str(card_key or "").strip()
+        resolved_ws = self._resolve_workspace_id(workspace_id, session_id)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
-            ).fetchone()
+            row = self._find_state_card(conn, session_id, kind, resolved_ws)
         if row is None:
             raise NotFoundError(f"state card not found: {kind}/{card_key}")
-        result = dict(row)
-        result["payload"] = json.loads(result["payload"])
-        return result
+        return self._card_row(row)
 
-    def state_card_revisions(self, card_key, kind, limit=100):
+    def state_card_revisions(self, card_key, kind, limit=100, workspace_id=None):
         session_id = str(card_key or "").strip()
+        resolved_ws = self._resolve_workspace_id(workspace_id, session_id)
         with self._connect() as conn:
-            card = conn.execute(
-                "SELECT 1 FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
-            ).fetchone()
+            card = self._find_state_card(conn, session_id, kind, resolved_ws)
             if card is None:
                 raise NotFoundError(f"state card not found: {kind}/{card_key}")
             rows = conn.execute(
-                "SELECT r.* FROM state_card_revisions r "
-                "JOIN state_cards c ON c.id=r.card_id "
-                "WHERE c.session_id=? AND c.kind=? ORDER BY r.version DESC LIMIT ?",
-                (session_id, kind, max(1, min(int(limit), 500))),
+                "SELECT * FROM state_card_revisions WHERE card_id=? "
+                "ORDER BY version DESC LIMIT ?",
+                (card["id"], max(1, min(int(limit), 500))),
             ).fetchall()
         result = []
         for row in rows:
@@ -1256,19 +1850,19 @@ class V2Store:
             result.append(item)
         return result
 
-    def restore_state_card(self, card_key, kind, revision_id, expected_version, **audit):
+    def restore_state_card(self, card_key, kind, revision_id, expected_version,
+                           workspace_id=None, **audit):
         session_id = str(card_key or "").strip()
+        resolved_ws = self._resolve_workspace_id(workspace_id, session_id)
         with self._connect() as conn:
+            card = self._find_state_card(conn, session_id, kind, resolved_ws)
+            if card is None:
+                raise NotFoundError("state card revision not found")
             revision = conn.execute(
-                "SELECT r.after_payload FROM state_card_revisions r "
-                "JOIN state_cards c ON c.id=r.card_id "
-                "WHERE r.id=? AND c.session_id=? AND c.kind=?",
-                (revision_id, session_id, kind),
+                "SELECT after_payload FROM state_card_revisions WHERE id=? AND card_id=?",
+                (revision_id, card["id"]),
             ).fetchone()
-            card = conn.execute(
-                "SELECT task_id FROM state_cards WHERE session_id=? AND kind=?", (session_id, kind)
-            ).fetchone()
-        if revision is None or card is None:
+        if revision is None:
             raise NotFoundError("state card revision not found")
         audit.setdefault("reason", f"restore revision {revision_id}")
         return self.put_state_card(
@@ -1277,6 +1871,7 @@ class V2Store:
             json.loads(revision["after_payload"]),
             expected_version=expected_version,
             task_id=card["task_id"],
+            workspace_id=resolved_ws or None,
             **audit,
         )
 
@@ -1290,109 +1885,36 @@ class V2Store:
         source_message_id="",
         trace_id="",
         explicit_execution=False,
+        workspace_id=None,
+        session_id=None,
     ):
-        allowed = {
-            "content",
-            "key_facts",
-            "persona_summary",
-            "canonical_summary",
-            "type",
-            "domain",
-            "scope",
-            "workspace_id",
-            "session_id",
-            "persona_id",
-            "importance",
-            "memory_class",
-            "storage_tier",
-            "decision_status",
-            "disputed",
-            "supersedes_id",
-            "event_time_start",
-            "event_time_end",
-            "time_raw",
-            "time_precision",
-            "time_confidence",
-            "time_inferred",
-            "sensitivity_level",
-            "confirmation_status",
-            "source_quality",
-            "actionability",
-            "reject_penalty",
-            "lifecycle_expires_at",
-            "cold_at",
-            "compressed_at",
-            "task_id",
-            "source_ref",
-            "source_message_id",
-            "trace_id",
-        }
-        unknown = set(changes) - allowed
-        if unknown:
-            raise DomainError(f"unsupported memory fields: {sorted(unknown)}")
-        if not changes:
-            raise DomainError("memory lifecycle update requires at least one field")
-        if actor not in MEMORY_ACTORS:
-            raise PermissionDenied(f"unknown memory actor: {actor}")
-        decision = changes.get("decision_status")
-        if decision == "invalid" and actor != "user":
-            raise PermissionDenied("only an explicit user action may set invalid")
-        if decision == "adopted" and actor == "model" and not explicit_execution:
-            raise PermissionDenied("candidate discussion cannot be promoted to adopted")
-        if decision is not None and decision not in DECISION_STATUSES:
-            raise DomainError(f"unknown decision status: {decision}")
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM documents WHERE id=?", (memory_id,)).fetchone()
-            if row is None:
-                raise NotFoundError(f"memory not found: {memory_id}")
-            if row["revision_version"] != expected_version:
-                raise ConflictError(
-                    f"memory version conflict: expected {expected_version}, current {row['revision_version']}"
-                )
-            # Test fixtures and pre-v2 installations may have a minimal legacy
-            # documents table; only include columns that actually exist in the
-            # row while preserving the full revision payload on new schemas.
-            before = {key: row[key] for key in allowed if key in row.keys()}
-            after = dict(before)
-            after.update(changes)
-            version = row["revision_version"] + 1
-            parent = conn.execute(
-                "SELECT id FROM memory_revisions WHERE memory_id=? ORDER BY version DESC LIMIT 1",
-                (memory_id,),
-            ).fetchone()
-            fields = sorted(changes)
-            assignments = ",".join(f"{key}=?" for key in fields)
-            conn.execute(
-                f"UPDATE documents SET {assignments},revision_version=?,updated_at=? WHERE id=?",
-                [changes[key] for key in fields] + [version, time.time(), memory_id],
-            )
-            conn.execute(
-                "INSERT INTO memory_revisions (id,memory_id,parent_revision_id,version,patch,"
-                "before_payload,after_payload,actor,reason,source_message_id,trace_id,before_hash,"
-                "after_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    str(uuid.uuid4()),
-                    memory_id,
-                    parent["id"] if parent else None,
-                    version,
-                    _json(changes),
-                    _json(before),
-                    _json(after),
-                    actor,
-                    reason,
-                    source_message_id or changes.get("source_message_id", ""),
-                    trace_id or changes.get("trace_id", ""),
-                    _hash_payload(before),
-                    _hash_payload(after),
-                    time.time(),
-                ),
-            )
-        return version
+        """Compatibility wrapper around :meth:`write_memory`.
 
-    def get_memory(self, memory_id):
+        All policy/redaction/revision/hook work lives in the unified write gate;
+        callers keep the historical ``revision_version`` return value.
+        """
+        result = self.write_memory(
+            dict(changes or {}),
+            memory_id,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            expected_version=expected_version,
+            actor=actor,
+            reason=reason,
+            source_message_id=source_message_id,
+            trace_id=trace_id,
+            explicit_execution=explicit_execution,
+        )
+        return result["revision_version"]
+
+    def get_memory(self, memory_id, workspace_id=None):
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM documents WHERE id=?", (int(memory_id),)).fetchone()
             if row is None:
+                raise NotFoundError(f"memory not found: {memory_id}")
+            row_ws = str(row["workspace_id"] or "") if "workspace_id" in row.keys() else ""
+            resolved_ws = self._resolve_workspace_id(workspace_id, row["session_id"], conn=conn)
+            if resolved_ws and row_ws not in ("", resolved_ws) and str(row["scope"] or "") != "global":
                 raise NotFoundError(f"memory not found: {memory_id}")
             links = conn.execute(
                 "SELECT id, doc_path, doc_kind, doc_version, relation, workspace_id, created_at "
@@ -1473,9 +1995,10 @@ class V2Store:
             lib.setdefault("topics", {})[t["topic_id"]] = t["n"]
         return stats
 
-    def migrate_memory(self, memory_id, target_tier, expected_version, actor="main_agent", reason=""):
+    def migrate_memory(self, memory_id, target_tier, expected_version, actor="main_agent",
+                       reason="", workspace_id=None):
         """Perform one explicit lifecycle hop; callers cannot skip a tier."""
-        row = self.get_memory(memory_id)
+        row = self.get_memory(memory_id, workspace_id=workspace_id)
         current = row["storage_tier"]
         if target_tier not in STORAGE_TIERS:
             raise DomainError(f"unknown storage tier: {target_tier}")
@@ -1499,7 +2022,9 @@ class V2Store:
             changes["memory_class"] = "semantic"
             changes["compressed_at"] = None
         version = self.update_memory_lifecycle(
-            memory_id, changes, expected_version, actor=actor, reason=reason or f"migrate {current} to {target_tier}",
+            memory_id, changes, expected_version, actor=actor,
+            reason=reason or f"migrate {current} to {target_tier}",
+            workspace_id=workspace_id,
         )
         if target_tier == "archive":
             with self._connect() as conn:
@@ -1516,10 +2041,14 @@ class V2Store:
                      _json(refs),
                      row["event_time_start"], row["event_time_end"], now),
                 )
-        return self.get_memory(memory_id) | {"revision_version": version}
+        return self.get_memory(memory_id, workspace_id=workspace_id) | {"revision_version": version}
 
-    def restore_memory(self, memory_id, expected_version, actor="main_agent", reason=""):
-        return self.migrate_memory(memory_id, "active", expected_version, actor=actor, reason=reason or "restore cold memory")
+    def restore_memory(self, memory_id, expected_version, actor="main_agent", reason="",
+                       workspace_id=None):
+        return self.migrate_memory(
+            memory_id, "active", expected_version, actor=actor,
+            reason=reason or "restore cold memory", workspace_id=workspace_id,
+        )
 
     def archive_library(self, library, topic=None, actor="main_agent", reason=""):
         """库级归档：直接批量置 storage_tier='archive'（不走 migrate 单跳），
@@ -1554,7 +2083,8 @@ class V2Store:
         return {"library": library, "topic": topic or "", "archived": len(archived_ids),
                 "ids": archived_ids}
 
-    def resolve_dispute(self, memory_id, action, expected_version, actor="user", changes=None, replacement_id=None, reason=""):
+    def resolve_dispute(self, memory_id, action, expected_version, actor="user", changes=None,
+                        replacement_id=None, reason="", workspace_id=None):
         if actor != "user":
             raise PermissionDenied("only the user may resolve a disputed memory")
         if action not in ("update", "supersede", "restore"):
@@ -1572,17 +2102,42 @@ class V2Store:
         return self.update_memory_lifecycle(
             memory_id, changes, expected_version, actor=actor,
             reason=reason or f"user {action} disputed memory",
+            workspace_id=workspace_id,
         )
 
-    def mark_disputed(self, memory_id, expected_version, actor="main_agent", reason=""):
+    def mark_disputed(self, memory_id, expected_version, actor="main_agent", reason="",
+                      workspace_id=None):
         if actor not in MEMORY_ACTORS:
             raise PermissionDenied(f"unknown memory actor: {actor}")
         return self.update_memory_lifecycle(
             memory_id, {"disputed": 1, "decision_status": "pending"}, expected_version,
             actor=actor, reason=reason or "memory marked disputed",
+            workspace_id=workspace_id,
         )
 
-    def recall(self, query, expand_to="active", limit=10, include_disputed=True):
+    @staticmethod
+    def _recall_scope(workspace_id, session_id):
+        """Workspace/session visibility predicate for recall (scope_allows-like)."""
+        workspace_id = str(workspace_id or "").strip()
+        session_id = str(session_id or "").strip()
+        if workspace_id and session_id:
+            return (
+                "(scope='global' OR (workspace_id=? AND (scope='workspace' OR "
+                "(scope='session' AND session_id=?))) OR "
+                "(workspace_id='' AND scope='session' AND session_id=?))",
+                [workspace_id, session_id, session_id],
+            )
+        if workspace_id:
+            return (
+                "(scope='global' OR (workspace_id=? AND scope IN ('workspace','session')))",
+                [workspace_id],
+            )
+        if session_id:
+            return "(scope='global' OR (scope='session' AND session_id=?))", [session_id]
+        return "", []
+
+    def recall(self, query, expand_to="active", limit=10, include_disputed=True,
+               workspace_id=None, session_id=None):
         if not query or not query.strip():
             raise DomainError("query is required")
         if expand_to not in STORAGE_TIERS:
@@ -1590,14 +2145,20 @@ class V2Store:
         tiers = STORAGE_TIERS[:STORAGE_TIERS.index(expand_to) + 1]
         limit = max(1, min(int(limit), 100))
         pattern = f"%{query.strip()[:200]}%"
+        scope_clause, scope_args = self._recall_scope(workspace_id, session_id)
+        where = (
+            "storage_tier=? AND (content LIKE ? OR key_facts LIKE ? OR keywords LIKE ?)"
+        )
+        args = [pattern, pattern, pattern]
+        if scope_clause:
+            where += f" AND {scope_clause}"
         result = []
         with self._connect() as conn:
             for tier in tiers:
                 rows = conn.execute(
-                    "SELECT * FROM documents WHERE storage_tier=? AND "
-                    "(content LIKE ? OR key_facts LIKE ? OR keywords LIKE ?) "
+                    f"SELECT * FROM documents WHERE {where} "
                     "ORDER BY importance DESC, updated_at DESC, id DESC LIMIT ?",
-                    (tier, pattern, pattern, pattern, limit),
+                    [tier] + args + scope_args + [limit],
                 ).fetchall()
                 items = []
                 for row in rows:

@@ -1668,7 +1668,10 @@ function apply(ctx) {
     async function doSearch() {
       if (!query.trim()) { refresh(); return }
       setBusy(true)
-      const res = await api('POST', '/v1/memories/search', { query: query.trim(), k: 15, workspace_id: workspaceId || WORKSPACE_DEFAULT })
+      // P0：手动搜索必须带 session_id，否则 session 级记忆“列表可见、搜索不命中”
+      const payload = { query: query.trim(), k: 15, workspace_id: workspaceId || WORKSPACE_DEFAULT }
+      if (sid) payload.session_id = sid
+      const res = await api('POST', '/v1/memories/search', payload)
       if (res && Array.isArray(res.results)) setMemories(res.results)
       else if (res && res.error) setMsg(t('searchFail') + res.error)
       setBusy(false)

@@ -720,6 +720,21 @@ def _bump_semantic_gen():
     return _semantic_generation
 
 
+def _v2_index_write_hook(event):
+    """v2 统一写入后的索引同步钩子。
+
+    索引同步（FAISS/BM25 随 content 变更重建）属 P1，本任务只保留钩子位：
+    v2_domain 的 write_memory 会调用它，后续把索引更新逻辑接到这里即可。
+    """
+    return None
+
+
+def _v2_cache_write_hook(event):
+    """v2 统一写入后失效检索缓存 / 语义代际，避免写后仍命中旧结果。"""
+    _search_cache.clear()
+    _bump_semantic_gen()
+
+
 def _assertion_current_allowed_batch(ids):
     """mode=current 门禁（P0）：按断言 status 过滤。
 
@@ -3349,24 +3364,71 @@ def apply_consolidation(groups):
     return {"merged": done, "groups": len(groups or [])}
 
 
+def _overview_scope_clauses(workspace_id, session_id):
+    """Generate the overview visibility predicate for (workspace, session).
+
+    Aligned with the recall-side ``scope_allows`` semantics:
+      - ``global``: visible everywhere;
+      - ``workspace``: only inside its owning workspace;
+      - ``session``: only for its own session (and its workspace when known);
+      - legacy rows without a workspace (workspace_id='') are visible only when
+        the same session_id is requested — the session key itself is the scope,
+        so this cannot leak across workspaces.
+    """
+    workspace_id = str(workspace_id or "").strip()
+    session_id = str(session_id or "").strip()
+    if workspace_id and session_id:
+        return (
+            "(scope='global' OR (workspace_id=? AND (scope='workspace' OR "
+            "(scope='session' AND session_id=?))) OR "
+            "(workspace_id='' AND scope='session' AND session_id=?))",
+            [workspace_id, session_id, session_id],
+        )
+    if workspace_id:
+        return (
+            "(scope='global' OR (workspace_id=? AND scope IN ('workspace','session')))",
+            [workspace_id],
+        )
+    if session_id:
+        return (
+            "(scope='global' OR (scope='session' AND session_id=?))",
+            [session_id],
+        )
+    return "", []
+
+
 def get_overview(workspace_id=None, session_id=None):
+    scope_clause, scope_args = _overview_scope_clauses(workspace_id, session_id)
+    active_where = "status='active'"
+    archived_where = "status='archived'"
+    if scope_clause:
+        active_where = f"{active_where} AND {scope_clause}"
+        archived_where = f"{archived_where} AND {scope_clause}"
+    atom_where = f" WHERE {scope_clause}" if scope_clause else ""
     conn = get_conn()
-    mems = [
-        dict(r)
-        for r in conn.execute(
-        "SELECT id, content, type, domain, scope, importance, created_at, has_sensitive,"
-            " last_access_at, access_count, status, keywords FROM documents"
-            " WHERE status='active' ORDER BY id DESC LIMIT 300"
-        ).fetchall()
-    ]
-    active_n = conn.execute(
-        "SELECT COUNT(*) c FROM documents WHERE status='active'"
-    ).fetchone()["c"]
-    archived_n = conn.execute(
-        "SELECT COUNT(*) c FROM documents WHERE status='archived'"
-    ).fetchone()["c"]
-    atoms_n = conn.execute("SELECT COUNT(*) c FROM atoms").fetchone()["c"]
-    conn.close()
+    try:
+        mems = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, content, type, domain, scope, importance, created_at, has_sensitive,"
+                " last_access_at, access_count, status, keywords FROM documents"
+                f" WHERE {active_where} ORDER BY id DESC LIMIT 300",
+                scope_args,
+            ).fetchall()
+        ]
+        active_n = conn.execute(
+            f"SELECT COUNT(*) c FROM documents WHERE {active_where}", scope_args
+        ).fetchone()["c"]
+        archived_n = conn.execute(
+            f"SELECT COUNT(*) c FROM documents WHERE {archived_where}", scope_args
+        ).fetchone()["c"]
+        atoms_n = conn.execute(
+            "SELECT COUNT(*) c FROM atoms WHERE memory_id IN "
+            f"(SELECT id FROM documents{atom_where})",
+            scope_args,
+        ).fetchone()["c"]
+    finally:
+        conn.close()
     for item in mems:
         if item.get("has_sensitive"):
             item["content"] = redact_text(str(item.get("content") or ""))[0]
@@ -3382,6 +3444,8 @@ def get_overview(workspace_id=None, session_id=None):
         "atoms": atoms_n,
         "card": card,
         "session_enabled": enabled,
+        "workspace_id": str(workspace_id or ""),
+        "session_id": str(session_id or ""),
     }
 
 
@@ -3514,7 +3578,37 @@ class Handler(BaseHTTPRequestHandler):
     def _v2_store(self):
         store = V2Store(DB_PATH)
         store.migrate()
+        # v2 统一写入口（write_memory / put_state_card / import / purge）写后回调：
+        # 索引同步是 P1 桩，缓存失效是本任务必须保证的一致性。
+        store.set_write_hooks(
+            index_hook=_v2_index_write_hook,
+            cache_hook=_v2_cache_write_hook,
+        )
         return store
+
+    @staticmethod
+    def _v2_workspace(store, session_id=None, qs=None, body=None):
+        """Resolve the workspace scope of one v2 route.
+
+        Precedence: opaque session key (``?key=`` / body ``key``) → explicit
+        ``workspace_id`` → "" (legacy callers that never supplied a scope). A
+        supplied key must own ``session_id`` when one is known.
+        """
+        qs = qs or {}
+        body = body or {}
+        key = str(body.get("key") or qs.get("key", [""])[0] or "").strip()
+        workspace_id = str(
+            body.get("workspace_id") or qs.get("workspace_id", [""])[0] or ""
+        ).strip()
+        if not key:
+            return workspace_id
+        try:
+            resolved_ws, resolved_sid = store.resolve_session_key(key)
+        except Exception as exc:
+            raise PermissionDenied(str(exc))
+        if session_id and resolved_sid != session_id:
+            raise PermissionDenied("key does not own this session")
+        return resolved_ws
 
     @staticmethod
     def _v2_changes(changes):
@@ -3549,8 +3643,14 @@ class Handler(BaseHTTPRequestHandler):
             kind, card_key = parts[3], parts[4]
             store = self._v2_store()
             if len(parts) == 6 and parts[5] == "revisions":
-                return self._v2_call(lambda: {"revisions": store.state_card_revisions(card_key, kind)})
-            return self._v2_call(lambda: {"card": store.get_state_card(card_key, kind)})
+                return self._v2_call(lambda: {"revisions": store.state_card_revisions(
+                    card_key, kind,
+                    workspace_id=self._v2_workspace(store, session_id=card_key, qs=qs) or None,
+                )})
+            return self._v2_call(lambda: {"card": store.get_state_card(
+                card_key, kind,
+                workspace_id=self._v2_workspace(store, session_id=card_key, qs=qs) or None,
+            )})
         if len(parts) >= 4 and parts[2] == "session-keys":
             # GET /v1/v2/session-keys/<session_id>?workspace_id=
             # 返回描述符（prefix），全 key 通过 POST create/rotate 获得。
@@ -3567,22 +3667,15 @@ class Handler(BaseHTTPRequestHandler):
                 "has_full": False,
             }})
         if len(parts) >= 4 and parts[2] == "sessions" and len(parts) >= 6 and parts[4] == "memories" and parts[5] == "export":
-            # GET /v1/v2/sessions/<session_id>/memories/export?key=...&include_sensitive=
+            # GET /v1/v2/sessions/<session_id>/memories/export?key=...&include_sensitive=&workspace_id=
             session_id = unquote(parts[3])
-            key = qs.get("key", [""])[0] or ""
             include_sensitive = qs.get("include_sensitive", ["0"])[0] in ("1", "true")
             store = self._v2_store()
-            workspace_id = ""
-            if key:
-                try:
-                    workspace_id, resolved_sid = store.resolve_session_key(key)
-                except Exception as exc:
-                    return self._send(403, {"error": str(exc)})
-                if resolved_sid != session_id:
-                    return self._send(403, {"error": "key does not own this session"})
-            else:
-                workspace_id = qs.get("workspace_id", [""])[0] or ""
-            return self._v2_call(lambda: store.export_session(workspace_id, session_id, include_sensitive))
+            return self._v2_call(lambda: store.export_session(
+                self._v2_workspace(store, session_id=session_id, qs=qs),
+                session_id,
+                include_sensitive,
+            ))
         if path == "/v1/v2/recall":
             return self._send(405, {"error": "recall requires POST"})
         return None
@@ -3871,12 +3964,22 @@ class Handler(BaseHTTPRequestHandler):
                     mode = str(body.get("mode") or "merge").strip()
                     if mode not in ("merge", "replace"):
                         return self._send(400, {"error": "mode must be merge or replace"})
-                    result = store.import_session_memories(target, body.get("payload") or {}, mode=mode)
-                    return self._v2_call(lambda: result)
+                    return self._v2_call(lambda: store.import_session_memories(
+                        target,
+                        body.get("payload") or {},
+                        mode=mode,
+                        workspace_id=self._v2_workspace(store, session_id=session_id, body=body) or None,
+                    ))
                 if len(parts) >= 5 and parts[2] == "sessions" and parts[4] == "purge":
                     # POST /v1/v2/sessions/<session_id>/purge {hard?}
                     session_id = unquote(parts[3])
                     hard = bool(body.get("hard"))
+                    try:
+                        workspace_id = self._v2_workspace(
+                            store, session_id=session_id, body=body
+                        ) or None
+                    except PermissionDenied as exc:
+                        return self._send(403, {"error": str(exc)})
                     # G2：purge 前先取出该会话的 memory id —— purge_session 只改
                     # documents 等表，**不碰 FAISS/BM25**（v2_domain 拿不到索引句柄），
                     # 硬删或软归档后向量仍留在索引里（死向量长期占 k*3 候选位且不自愈）。
@@ -3884,13 +3987,19 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         _pc = get_conn()
                         try:
+                            _purge_sql = "SELECT id FROM documents WHERE session_id=?"
+                            _purge_args = (session_id,)
+                            if workspace_id:
+                                _purge_sql += " AND workspace_id=?"
+                                _purge_args = (session_id, workspace_id)
                             _purge_ids = [r["id"] for r in _pc.execute(
-                                "SELECT id FROM documents WHERE session_id=?", (session_id,)).fetchall()]
+                                _purge_sql, _purge_args).fetchall()]
                         finally:
                             _pc.close()
                     except Exception as _pe:
                         print(f"[deepmemory] G2 purge 前取 id 失败（索引可能残留死向量）: {_pe}")
-                    _purge_result = self._v2_call(lambda: store.purge_session(session_id, hard))
+                    _purge_result = self._v2_call(lambda: store.purge_session(
+                        session_id, hard, workspace_id=workspace_id))
                     if _purge_ids:
                         try:
                             _index_remove_ids(_purge_ids)
@@ -3945,6 +4054,8 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) >= 5 and parts[2] == "cards" and parts[5:] == ["restore"]:
                     return self._v2_call(lambda: {"card": store.restore_state_card(
                         parts[4], parts[3], body["revision_id"], int(body["expected_version"]),
+                        workspace_id=self._v2_workspace(
+                            store, session_id=parts[4], body=body) or None,
                         actor=body.get("actor", "main_agent"), reason=body.get("reason", ""),
                         source_message_id=body.get("source_message_id", ""),
                         tool_trace_id=body.get("tool_trace_id", ""), subagent_trace_id=body.get("subagent_trace_id", ""),
@@ -3953,6 +4064,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._v2_call(lambda: store.recall(
                         body.get("query", ""), expand_to=body.get("expand_to", "active"),
                         limit=body.get("limit", 10), include_disputed=body.get("include_disputed", True),
+                        workspace_id=self._v2_workspace(store, qs=None, body=body) or None,
+                        session_id=body.get("session_id") or None,
                     ))
                 if len(parts) >= 5 and parts[2] == "memories":
                     memory_id = int(parts[3])
@@ -3962,27 +4075,32 @@ class Handler(BaseHTTPRequestHandler):
                             actor=body.get("actor", "model"), reason=body.get("reason", ""),
                             source_message_id=body.get("source_message_id", ""), trace_id=body.get("trace_id", ""),
                             explicit_execution=bool(body.get("explicit_execution")),
+                            workspace_id=self._v2_workspace(store, body=body) or None,
                         )})
                     if parts[4] == "migrate":
                         return self._v2_call(lambda: {"memory": store.migrate_memory(
                             memory_id, body["target_tier"], int(body["expected_version"]),
                             actor=body.get("actor", "main_agent"), reason=body.get("reason", ""),
+                            workspace_id=self._v2_workspace(store, body=body) or None,
                         )})
                     if parts[4] == "restore":
                         return self._v2_call(lambda: {"memory": store.restore_memory(
                             memory_id, int(body["expected_version"]), actor=body.get("actor", "main_agent"),
                             reason=body.get("reason", ""),
+                            workspace_id=self._v2_workspace(store, body=body) or None,
                         )})
                     if parts[4] == "dispute":
                         if "action" not in body:
                             return self._v2_call(lambda: {"revision_version": store.mark_disputed(
                                 memory_id, int(body["expected_version"]), actor=body.get("actor", "main_agent"),
                                 reason=body.get("reason", ""),
+                                workspace_id=self._v2_workspace(store, body=body) or None,
                             )})
                         return self._v2_call(lambda: {"revision_version": store.resolve_dispute(
                             memory_id, body["action"], int(body["expected_version"]), actor=body.get("actor", "user"),
                             changes=body.get("changes"), replacement_id=body.get("replacement_id"),
                             reason=body.get("reason", ""),
+                            workspace_id=self._v2_workspace(store, body=body) or None,
                         )})
                 return self._send(404, {"error": "not found"})
             if path in ("/v1/sensitive/approvals", "/v1/sensitive/approve", "/v1/sensitive/authorize"):
@@ -4285,13 +4403,16 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._read_body()
                 parts = [unquote(part) for part in path.strip("/").split("/")]
                 if len(parts) == 5 and parts[2] == "cards":
-                    return self._v2_call(lambda: {"card": self._v2_store().put_state_card(
+                    put_store = self._v2_store()
+                    return self._v2_call(lambda: {"card": put_store.put_state_card(
                         parts[4], parts[3], body.get("payload", {}),
                         expected_version=(int(body["expected_version"]) if body.get("expected_version") is not None else None),
                         task_id=body.get("task_id"),
                         actor=body.get("actor", "main_agent"), reason=body.get("reason", ""),
                         source_message_id=body.get("source_message_id", ""), tool_trace_id=body.get("tool_trace_id", ""),
                         subagent_trace_id=body.get("subagent_trace_id", ""),
+                        workspace_id=self._v2_workspace(
+                            put_store, session_id=parts[4], body=body) or None,
                     )})
                 return self._send(404, {"error": "not found"})
             if path.startswith("/v1/memories/"):
