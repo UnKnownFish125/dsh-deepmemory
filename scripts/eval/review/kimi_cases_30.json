@@ -1,0 +1,654 @@
+[
+ {
+  "id": "m-009",
+  "kind": "memory",
+  "query": "关于「WebUI」，之前记录过什么？",
+  "seed_id": 221,
+  "results": [
+   {
+    "id": 221,
+    "content": "WebUI 渲染崩溃、Manifest Syntax error、跳转受限三个问题已全部修复并上线 v0.9.11，对应 Gitea 提交 f3d7ff91。"
+   },
+   {
+    "id": 31946,
+    "content": "用户要求升级验证必须证明 WebUI 实际可用且会话未损坏，不接受仅服务进程存活指标。"
+   },
+   {
+    "id": 56,
+    "content": "deepmemory 缺少记忆毒化防护，恶意内容可以通过摘要/固化过程在记忆库中传播。"
+   },
+   {
+    "id": 25,
+    "content": "dsh-longlongchat 最终交付（2026-08-28 v0.9.11，用户验收\"差不多了\"）：生产/测试机均为 rc2 核心 + 4 文件修复补丁（client-runtime/clien"
+   },
+   {
+    "id": 31972,
+    "content": "用户反映过往每次更新后都会发现一堆问题，包括 WebUI 无法使用和会话损坏。"
+   },
+   {
+    "id": 14308,
+    "content": "WebView2 是微软提供的可嵌入 Edge/Chromium 浏览器内核，Windows 系统自带，Tauri 在 Windows 上也使用它。"
+   }
+  ]
+ },
+ {
+  "id": "m-062",
+  "kind": "memory",
+  "query": "「记忆系统」的计划/下一步是什么？",
+  "seed_id": 145,
+  "results": [
+   {
+    "id": 39,
+    "content": "用户希望将记忆系统的任务看板单独拉出，放在左侧工作区下方、所有对话上方，显示所有工作区的规划/进行中/失败任务，并支持先写未传给对话的想法。"
+   },
+   {
+    "id": 238,
+    "content": "记忆系统采用四层架构（L0规则层、L1画像层、L2摘要链、L3检索层），核心原则是前缀字节稳定性优于单轮信息量。"
+   },
+   {
+    "id": 256,
+    "content": "用户要求后续所有路径一律使用绝对路径表示，以防止混淆。"
+   },
+   {
+    "id": 117,
+    "content": "方案已写入 docs/deepmemory-next-plan.md，包含 scripts/check_cache_health.py 与 migrate_embedding.py 两个工具设计。"
+   },
+   {
+    "id": 145,
+    "content": "用户希望记忆系统支持提高记忆数量和权重区分，并对记忆做分类持久化。"
+   }
+  ]
+ },
+ {
+  "id": "m-099",
+  "kind": "memory",
+  "query": "关于「身份」，之前记录过什么？",
+  "seed_id": 26530,
+  "results": [
+   {
+    "id": 26530,
+    "content": "用户身份为海洋放射生态学方向研究员，代号 researcher-c。"
+   },
+   {
+    "id": 16140,
+    "content": "用户是 GTO 服务器的服主。"
+   },
+   {
+    "id": 26808,
+    "content": "用户的游戏内身份是 LazyFish125"
+   }
+  ]
+ },
+ {
+  "id": "m-109",
+  "kind": "memory",
+  "query": "之前关于「crypto」的决定是什么？",
+  "seed_id": 85,
+  "results": [
+   {
+    "id": 11527,
+    "content": "用户决定：遇到需要外部评审或硬推理的方案决策时，先整理完整提问交给用户去问 glm/sol，不自己直接调 MCP 或急着改代码。"
+   },
+   {
+    "id": 26350,
+    "content": "用户偏好：在现有守则内不改机器代码，需要先获得放宽才可改。"
+   }
+  ]
+ },
+ {
+  "id": "m-008",
+  "kind": "memory",
+  "query": "有没有关于「指令」的硬规则？",
+  "seed_id": 22926,
+  "results": [
+   {
+    "id": 34354,
+    "content": "后续硬规则：助手不再自行重启任何服务。"
+   },
+   {
+    "id": 9633,
+    "content": "助手硬性规则：凭据（密码/口令/密钥）的字面值不得写进回复或会话记录，只能给出读取命令或引用路径。"
+   },
+   {
+    "id": 25486,
+    "content": "改完代码必须立刻读回校验（自证），已成为硬规则"
+   },
+   {
+    "id": 34355,
+    "content": "后续硬规则：在用户给窗口前，只做仓库修改、单元/模拟测试与只读核查，不触碰进程。"
+   },
+   {
+    "id": 30696,
+    "content": "定位阶段纪律：不确定的字节码改动只读定位并先报告用户裁定，不擅自修改；本轮只读未改。"
+   }
+  ]
+ },
+ {
+  "id": "m-002",
+  "kind": "memory",
+  "query": "有没有关于「Claude」的硬规则？",
+  "seed_id": 20459,
+  "results": [
+   {
+    "id": 19395,
+    "content": "用户明令 uuapi 只许在 Claude Code 内使用。"
+   },
+   {
+    "id": 15350,
+    "content": "Claude Code (本机 /root/.claude/settings.json) 走 uuapi.io：base url https://uuapi.io，key 存于 env.ANTHROP"
+   },
+   {
+    "id": 20459,
+    "content": "对 Claude Code 只提出要求、不打断它，让它自己发挥。"
+   },
+   {
+    "id": 15349,
+    "content": "Claude Code（本机）2026-09-24 升级到 2.1.280（原 2.1.258）。安装形态：native，versioned binary 在 /root/.local/share/c"
+   }
+  ]
+ },
+ {
+  "id": "m-079",
+  "kind": "memory",
+  "query": "关于「auth」，之前记录过什么？",
+  "seed_id": 203,
+  "results": [
+   {
+    "id": 166,
+    "content": "dsh-workbench 测试机部署按三阶段推进：① worktree-server 服务部署到 6271 并跑通验收；② 把 P1 preset 插件接入测试 preset；③ 将 P2 web-"
+   },
+   {
+    "id": 10955,
+    "content": "【deepmemory 全插件审核（astra 两轮）收官】（2026-09-15）\n\n报告：`/www/deepseek harness workspace/dsh-deepmemory/docs/"
+   },
+   {
+    "id": 14078,
+    "content": "frp 默认配置中含默认的 auth.token 值（值 REDACTED），构成安全风险。"
+   }
+  ]
+ },
+ {
+  "id": "m-071",
+  "kind": "memory",
+  "query": "之前关于「service」的决定是什么？",
+  "seed_id": 174,
+  "results": [
+   {
+    "id": 125,
+    "content": "为实现AstrBot不重启切直连，决定在7890端口运行本地直通代理(connect-proxy.service)，收到CONNECT请求后直接连接目标服务器，等效直连。"
+   },
+   {
+    "id": 195,
+    "content": "dsh-web.service 的 WorkingDirectory=/www/dsh，不依赖工作区路径；工作区路径由每个会话的 cwd 字段决定，改名后历史会话 cwd 必须同步更新。"
+   },
+   {
+    "id": 18,
+    "content": "dsh-workbench P0 后端实现只使用 Python 标准库（sqlite3、http.server、json、os、threading、time、urllib.parse），不引入 dee"
+   }
+  ]
+ },
+ {
+  "id": "m-027",
+  "kind": "memory",
+  "query": "有没有关于「克隆」的硬规则？",
+  "seed_id": 2968,
+  "results": [
+   {
+    "id": 7730,
+    "content": "用户 2026-09-12 纠正：此前'在用户明确点头前不得改源文档、不得派落码'这条规矩被过度放大，已按其真实适用范围收窄。"
+   },
+   {
+    "id": 2968,
+    "content": "在新克隆的仓库里执行 git commit 前必须先设置 user identity，否则 commit 失败而 push 会把原 HEAD 推上去、修改并未生效。"
+   }
+  ]
+ },
+ {
+  "id": "m-081",
+  "kind": "memory",
+  "query": "关于「LazyFish」，之前记录过什么？",
+  "seed_id": 151,
+  "results": [
+   {
+    "id": 94,
+    "content": "deepmemory 本体 codex 代码审核已完成，结果通过 docs/codex-review.md 交付（commit 98c0ddb 已推送）。"
+   },
+   {
+    "id": 2,
+    "content": "deepmemory 对接实施按 B→A 顺序进行：先 R2（plugin-v3.js 截断 2000→8000），再 R1+R5+R6 实现 export-archive，最后 R3 将 sourc"
+   },
+   {
+    "id": 18,
+    "content": "dsh-workbench P0 后端实现只使用 Python 标准库（sqlite3、http.server、json、os、threading、time、urllib.parse），不引入 dee"
+   },
+   {
+    "id": 173,
+    "content": "测试机库 documents 表缺失 library 列导致 add_memory 报错，已手动执行 ALTER TABLE documents ADD COLUMN library TEXT NOT"
+   },
+   {
+    "id": 33331,
+    "content": "用户游戏内 ID 为 Lazy_Fish125。"
+   },
+   {
+    "id": 26808,
+    "content": "用户的游戏内身份是 LazyFish125"
+   },
+   {
+    "id": 21143,
+    "content": "用户的 PrismLauncher 账户名为 Lazy_Fish125，共有 ATM10、ATM10_SKY、GregTech Leisure、GregTech.Odyssey、GT_NH 五个实例。"
+   }
+  ]
+ },
+ {
+  "id": "m-022",
+  "kind": "memory",
+  "query": "有没有关于「字段名」的硬规则？",
+  "seed_id": 29862,
+  "results": [
+   {
+    "id": 29862,
+    "content": "操作规则：任何方法名/字段名必须逐字核实后才可上线，未核名字不得进入发布版本。"
+   },
+   {
+    "id": 30696,
+    "content": "定位阶段纪律：不确定的字节码改动只读定位并先报告用户裁定，不擅自修改；本轮只读未改。"
+   },
+   {
+    "id": 22778,
+    "content": "用户要求讨论方块时直接说方块名称（中文名 + 括号内 id），不要用标签式说法。"
+   }
+  ]
+ },
+ {
+  "id": "m-053",
+  "kind": "memory",
+  "query": "关于「stream」，之前记录过什么？",
+  "seed_id": 156,
+  "results": [
+   {
+    "id": 17180,
+    "content": "【DSH 0.1.7-rc.2 兼容体检 + 仓库更新（2026-09-28）】\n\n**兼容体检（测试机 :3091 / `/opt/dsh-rc2-test-core`，用 `DSH_CORE=<测"
+   },
+   {
+    "id": 15177,
+    "content": "【literature 接任者核实：生产领先仓库两处漂移（2026-09-23）】\n\n接任 dmk.7c41e342e2（session-4cb6d508，509 条记忆全量已读）后逐文件实测，发现记"
+   },
+   {
+    "id": 7668,
+    "content": "用户要求测试必须提供可溯源日志（怎么跑、跑的路径），并希望能用 HTML 查看实际运行轨迹。"
+   }
+  ]
+ },
+ {
+  "id": "m-042",
+  "kind": "memory",
+  "query": "关于「生命周期」，之前记录过什么？",
+  "seed_id": 7,
+  "results": []
+ },
+ {
+  "id": "m-051",
+  "kind": "memory",
+  "query": "有没有关于「pkill」的硬规则？",
+  "seed_id": 33567,
+  "results": [
+   {
+    "id": 33567,
+    "content": "操作规则：清理测试进程不要用 pkill 匹配命令行模式（如含 \"port 3092\"），会误杀自身 shell，应先用 pgrep -f 取精确 PID 再 kill。"
+   },
+   {
+    "id": 12099,
+    "content": "【关键教训：DSH 工具 output.render 签名是 (args, value) —— 2026-09-16】\n\n**bug**：literature / kb / worktree 插件都写"
+   },
+   {
+    "id": 19403,
+    "content": "避免 pkill 自匹配可用括号技巧（如 pkill -f 'watch_ppt3[.]sh'）。"
+   },
+   {
+    "id": 19402,
+    "content": "使用 pkill -f 模式时，若模式匹配到自己的命令行会导致自杀。"
+   }
+  ]
+ },
+ {
+  "id": "m-067",
+  "kind": "memory",
+  "query": "关于「scope」，之前记录过什么？",
+  "seed_id": 11,
+  "results": [
+   {
+    "id": 11,
+    "content": "memory-server 的 scope_allows 未知 scope 拒绝功能已修复，失败闭合。"
+   },
+   {
+    "id": 19745,
+    "content": "【literature 现状模型审计 · 第一批硬事实核实（2026-10-02，astra a077ec1b 发现 + 我逐条复核）】\n\n**① `skills.visibility` 不是公开/私"
+   },
+   {
+    "id": 64,
+    "content": "知识库创建链路由 agent 侧 plugin-v3.js 在对话达到阈值后调用 LLM 抽取结构化记忆，再 POST /v1/memories/add_batch 入库。"
+   },
+   {
+    "id": 676,
+    "content": "literature「deepseek-harness 假工作区」根因与修复（commit 51696f8，已推 Gitea+GitHub）：\n\n根因链（服务侧）：①早期 kb_server 自造 D"
+   },
+   {
+    "id": 15177,
+    "content": "【literature 接任者核实：生产领先仓库两处漂移（2026-09-23）】\n\n接任 dmk.7c41e342e2（session-4cb6d508，509 条记忆全量已读）后逐文件实测，发现记"
+   },
+   {
+    "id": 702,
+    "content": "【skill 管理体系 PR1 交付完成】（2026-09-09，提交 d3a4662 + 650453a + 026fe5c）\n\n**交付**（/www/dsh-literature-repo/li"
+   },
+   {
+    "id": 668,
+    "content": "重要教训（workspace 归属）：往 literature/deepmemory 写数据时绝不能硬编码 workspace_id。正确解析：读环境变量 DSH_SESSION_ID → 在 /ww"
+   }
+  ]
+ },
+ {
+  "id": "m-040",
+  "kind": "memory",
+  "query": "关于「GitHub」，之前记录过什么？",
+  "seed_id": 98,
+  "results": [
+   {
+    "id": 199,
+    "content": "之前泄露的 GitHub token 仍建议删除并重新生成；新授权不依赖该 token，不影响当前登录。"
+   },
+   {
+    "id": 161,
+    "content": "GitHub token 应只存引用名或环境变量，执行时解析，不把字面值写入对话或长期记忆。"
+   },
+   {
+    "id": 9,
+    "content": "memory-server 将匹配到的敏感原文只存 protected_sources，召回默认返回 [REDACTED:*]，需 PIN 授权才展开。"
+   },
+   {
+    "id": 2,
+    "content": "deepmemory 对接实施按 B→A 顺序进行：先 R2（plugin-v3.js 截断 2000→8000），再 R1+R5+R6 实现 export-archive，最后 R3 将 sourc"
+   },
+   {
+    "id": 11041,
+    "content": "GitHub token 只以引用名或环境变量形式保存，执行时解析，绝不写入对话或长期记忆。"
+   },
+   {
+    "id": 10130,
+    "content": "用户偏好 GitHub 拉取太慢时挂代理（梯子），不要死等直连。"
+   },
+   {
+    "id": 14690,
+    "content": "GitHub 推送在本机默认 HTTP/2 下会失败（`GnuTLS recv error (-110): The TLS connection was non-properly terminated"
+   },
+   {
+    "id": 505,
+    "content": "dsh-workbench worktree P0 两阶段部署最终状态：测试机 6271 = dsh-worktree-test.service active+enabled，验收全过。**生产 62"
+   }
+  ]
+ },
+ {
+  "id": "m-068",
+  "kind": "memory",
+  "query": "之前关于「事实」的决定是什么？",
+  "seed_id": 258,
+  "results": [
+   {
+    "id": 258,
+    "content": "用户要求后续所有路径一律用绝对路径表示，并已决定以绝对路径基线为唯一事实源，废弃 memory-server 旧副本和 hardness 路径。"
+   },
+   {
+    "id": 15697,
+    "content": "用户要求助手先验证事实再下结论，不接受未经验证的断言。"
+   },
+   {
+    "id": 31587,
+    "content": "【literature 知识库：旧 evidence.stance 标签不可信（2026-10-10 实测）】\n\n**发现**：库里 `evidence.stance` 是夜间 LLM **无目标**"
+   },
+   {
+    "id": 31357,
+    "content": "用户要求回答前先查证文献、以证据说话，不要直接给结论。"
+   },
+   {
+    "id": 25612,
+    "content": "用户偏好先查清事实再动手修改，避免无效修改。"
+   }
+  ]
+ },
+ {
+  "id": "m-035",
+  "kind": "memory",
+  "query": "关于「文件名」，之前记录过什么？",
+  "seed_id": 12,
+  "results": []
+ },
+ {
+  "id": "m-061",
+  "kind": "memory",
+  "query": "关于「systemPrompt」，之前记录过什么？",
+  "seed_id": 33,
+  "results": [
+   {
+    "id": 11,
+    "content": "memory-server 的 scope_allows 未知 scope 拒绝功能已修复，失败闭合。"
+   },
+   {
+    "id": 33,
+    "content": "memsf-1 止血版将 DSH 记忆注入方式改为 systemPrompt.section（pre-step 异步缓存 + section 同步渲染），不再向消息序列写入任何内容"
+   }
+  ]
+ },
+ {
+  "id": "m-039",
+  "kind": "memory",
+  "query": "有没有关于「沙箱」的硬规则？",
+  "seed_id": 8742,
+  "results": []
+ },
+ {
+  "id": "m-060",
+  "kind": "memory",
+  "query": "关于「tree」，之前记录过什么？",
+  "seed_id": 165,
+  "results": [
+   {
+    "id": 166,
+    "content": "dsh-workbench 测试机部署按三阶段推进：① worktree-server 服务部署到 6271 并跑通验收；② 把 P1 preset 插件接入测试 preset；③ 将 P2 web-"
+   },
+   {
+    "id": 18,
+    "content": "dsh-workbench P0 后端实现只使用 Python 标准库（sqlite3、http.server、json、os、threading、time、urllib.parse），不引入 dee"
+   },
+   {
+    "id": 505,
+    "content": "dsh-workbench worktree P0 两阶段部署最终状态：测试机 6271 = dsh-worktree-test.service active+enabled，验收全过。**生产 62"
+   }
+  ]
+ },
+ {
+  "id": "m-056",
+  "kind": "memory",
+  "query": "「网页」的计划/下一步是什么？",
+  "seed_id": 96,
+  "results": [
+   {
+    "id": 256,
+    "content": "用户要求后续所有路径一律使用绝对路径表示，以防止混淆。"
+   },
+   {
+    "id": 14309,
+    "content": "DSH 的界面本身是网页（HTML/CSS/JS，dist 约 4.7MB），任何客户端要显示它都必须内嵌浏览器引擎。"
+   },
+   {
+    "id": 117,
+    "content": "方案已写入 docs/deepmemory-next-plan.md，包含 scripts/check_cache_health.py 与 migrate_embedding.py 两个工具设计。"
+   }
+  ]
+ },
+ {
+  "id": "m-077",
+  "kind": "memory",
+  "query": "关于「Nebula」，之前记录过什么？",
+  "seed_id": 14081,
+  "results": [
+   {
+    "id": 14081,
+    "content": "Nebula 自 v1.6.0 起支持中继（relay）功能。"
+   }
+  ]
+ },
+ {
+  "id": "m-023",
+  "kind": "memory",
+  "query": "用户对「WebUI」的偏好/要求是什么？",
+  "seed_id": 31946,
+  "results": [
+   {
+    "id": 26109,
+    "content": "用户要求不碰机器，即不修改机器代码或字节码。"
+   },
+   {
+    "id": 31946,
+    "content": "用户要求升级验证必须证明 WebUI 实际可用且会话未损坏，不接受仅服务进程存活指标。"
+   },
+   {
+    "id": 1,
+    "content": "用户喜欢用中文沟通，希望回答简洁直接"
+   },
+   {
+    "id": 8166,
+    "content": "用户要求全程使用中文注释与中文回复"
+   },
+   {
+    "id": 14002,
+    "content": "用户偏好使用原生/桌面/瘦客户端前端替代浏览器，以降低本地 CPU 与内存占用。"
+   },
+   {
+    "id": 14105,
+    "content": "用户偏好先统一方案再实施。"
+   },
+   {
+    "id": 12105,
+    "content": "用户偏好：修 bug 时先只做诊断，不擅自改动代码。"
+   },
+   {
+    "id": 31781,
+    "content": "用户偏好直接操作到弄好。"
+   }
+  ]
+ },
+ {
+  "id": "m-064",
+  "kind": "memory",
+  "query": "关于「本体」，之前记录过什么？",
+  "seed_id": 94,
+  "results": [
+   {
+    "id": 30929,
+    "content": "用户要求 gtocore.jar 本体不许动。"
+   },
+   {
+    "id": 15168,
+    "content": "主体管理（deepseek harness selfcontrol 工作区 bf4722bc-37d2-438f-b5dd-598d24a13cf5）于 2026-09-23 由新会话 session"
+   }
+  ]
+ },
+ {
+  "id": "m-066",
+  "kind": "memory",
+  "query": "关于「年份」，之前记录过什么？",
+  "seed_id": 14069,
+  "results": []
+ },
+ {
+  "id": "m-024",
+  "kind": "memory",
+  "query": "有没有关于「汇报」的硬规则？",
+  "seed_id": 26180,
+  "results": [
+   {
+    "id": 29502,
+    "content": "用户偏好：不需要中间版本汇报，有进展时一次性告知。"
+   },
+   {
+    "id": 32253,
+    "content": "汇报成果时必须区分「测试环境渲染」与「已部署可访问」，不能把测试截图当作已交付。"
+   },
+   {
+    "id": 26180,
+    "content": "用户要求助手每次交付/汇报时直接打开侧边栏并附上产出说明，不再让用户索要。"
+   },
+   {
+    "id": 9633,
+    "content": "助手硬性规则：凭据（密码/口令/密钥）的字面值不得写进回复或会话记录，只能给出读取命令或引用路径。"
+   },
+   {
+    "id": 21085,
+    "content": "用户要求助手执行电脑操控类任务时把「截屏→判断→点击」循环一口气跑完，只在需要用户本人（密码/验证码/扫脸）或任务完成、卡死时才停下汇报。"
+   },
+   {
+    "id": 19362,
+    "content": "盯守过程的汇报全程使用中文。"
+   },
+   {
+    "id": 22668,
+    "content": "Team Lead 名为 lead，汇报需用 send_message 且 target 指定为 lead。"
+   }
+  ]
+ },
+ {
+  "id": "m-041",
+  "kind": "memory",
+  "query": "关于「rathole」，之前记录过什么？",
+  "seed_id": 14071,
+  "results": [
+   {
+    "id": 14070,
+    "content": "rathole 仓库已从 rapiz1/rathole 重定向到 rathole-org/rathole。"
+   },
+   {
+    "id": 14071,
+    "content": "rathole 采用 Apache-2.0 许可证（经 LICENSE 原文确认）。"
+   }
+  ]
+ },
+ {
+  "id": "m-100",
+  "kind": "memory",
+  "query": "之前关于「AstrBot」的决定是什么？",
+  "seed_id": 125,
+  "results": [
+   {
+    "id": 123,
+    "content": "AstrBot LLM API调用失败的根因是其进程继承了/etc/environment中的全局代理127.0.0.1:7890，而该mihomo代理出站故障导致所有API请求SSL超时；直连LLM"
+   },
+   {
+    "id": 55,
+    "content": "决定将 AstrBot 配置体系适配到 deepmemory 实际架构而非照搬：裁剪无对应概念的项、改造语义（消息计数替代轮次、systemPrompt 固定注入替代多模式）、增补 deepmemor"
+   },
+   {
+    "id": 125,
+    "content": "为实现AstrBot不重启切直连，决定在7890端口运行本地直通代理(connect-proxy.service)，收到CONNECT请求后直接连接目标服务器，等效直连。"
+   },
+   {
+    "id": 56,
+    "content": "deepmemory 缺少记忆毒化防护，恶意内容可以通过摘要/固化过程在记忆库中传播。"
+   },
+   {
+    "id": 192,
+    "content": "完成 workspace 拼写修复：代码默认值与 data 307 条记录从 deepseek-hardness 迁移为 deepseek-harness，验证 harness 检索 3 条、hard"
+   }
+  ]
+ },
+ {
+  "id": "m-113",
+  "kind": "memory",
+  "query": "「全绿」这件事后来怎样了？",
+  "seed_id": 210,
+  "results": [
+   {
+    "id": 25487,
+    "content": "交付标准是全部指标达标（全绿）才发版，不给半成品"
+   }
+  ]
+ }
+]

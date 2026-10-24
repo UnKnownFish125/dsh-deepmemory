@@ -1,0 +1,145 @@
+{"id": "m-001", "kind": "memory", "query": "之前关于「行号」的决定是什么？", "seed_id": 3619, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-002", "kind": "memory", "query": "有没有关于「Claude」的硬规则？", "seed_id": 20459, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-003", "kind": "memory", "query": "有没有关于「规矩」的硬规则？", "seed_id": 4400, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-004", "kind": "memory", "query": "有没有关于「inner」的硬规则？", "seed_id": 26788, "workspace_id": "deepseek-harness"}
+{"id": "m-005", "kind": "memory", "query": "有没有关于「reasoning」的硬规则？", "seed_id": 3555, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-006", "kind": "memory", "query": "有没有关于「沙箱」的硬规则？", "seed_id": 9276, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-007", "kind": "memory", "query": "关于「Materials」，之前记录过什么？", "seed_id": 33290, "workspace_id": "331e4b00-39cf-4a32-b5a1-f15c1a396028"}
+{"id": "m-008", "kind": "memory", "query": "有没有关于「指令」的硬规则？", "seed_id": 22926, "workspace_id": "2d98a449-244b-460c-bee0-db2d1783bb10"}
+{"id": "m-009", "kind": "memory", "query": "关于「WebUI」，之前记录过什么？", "seed_id": 221, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-010", "kind": "memory", "query": "关于「浏览器」，之前记录过什么？", "seed_id": 21, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-011", "kind": "memory", "query": "关于「fastembed」，之前记录过什么？", "seed_id": 4, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-012", "kind": "memory", "query": "关于「cookie」，之前记录过什么？", "seed_id": 33913, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-013", "kind": "memory", "query": "关于「scripts」，之前记录过什么？", "seed_id": 67, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-014", "kind": "memory", "query": "关于「Intel」，之前记录过什么？", "seed_id": 33926, "workspace_id": "2d98a449-244b-460c-bee0-db2d1783bb10"}
+{"id": "m-015", "kind": "memory", "query": "关于「WebView2」，之前记录过什么？", "seed_id": 14308, "workspace_id": "63d527e6-7a3b-4d54-ac64-bef3452490a0"}
+{"id": "m-016", "kind": "memory", "query": "关于「defineTool」，之前记录过什么？", "seed_id": 13, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-017", "kind": "memory", "query": "关于「水泥」，之前记录过什么？", "seed_id": 33840, "workspace_id": "3f13ae8b-a035-427e-b3b4-6b74b380a397"}
+{"id": "m-018", "kind": "memory", "query": "用户对「安装包」的偏好/要求是什么？", "seed_id": 18722, "workspace_id": "63d527e6-7a3b-4d54-ac64-bef3452490a0"}
+{"id": "m-019", "kind": "memory", "query": "关于「slots」，之前记录过什么？", "seed_id": 187, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-020", "kind": "memory", "query": "用户对「半屏」的偏好/要求是什么？", "seed_id": 23744, "workspace_id": "deepseek-harness"}
+{"id": "m-021", "kind": "memory", "query": "之前关于「compaction」的决定是什么？", "seed_id": 149, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-022", "kind": "memory", "query": "有没有关于「字段名」的硬规则？", "seed_id": 29862, "workspace_id": "deepseek-harness"}
+{"id": "m-023", "kind": "memory", "query": "用户对「WebUI」的偏好/要求是什么？", "seed_id": 31946, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-024", "kind": "memory", "query": "有没有关于「汇报」的硬规则？", "seed_id": 26180, "workspace_id": "2d98a449-244b-460c-bee0-db2d1783bb10"}
+{"id": "m-025", "kind": "memory", "query": "有没有关于「常规」的硬规则？", "seed_id": 19618, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-026", "kind": "memory", "query": "关于「compaction」，之前记录过什么？", "seed_id": 155, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-027", "kind": "memory", "query": "有没有关于「克隆」的硬规则？", "seed_id": 2968, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-028", "kind": "memory", "query": "关于「文本」，之前记录过什么？", "seed_id": 19248, "workspace_id": "619c53ba-2369-4e98-b988-bdfac2e634f3"}
+{"id": "m-029", "kind": "memory", "query": "关于「workbench」，之前记录过什么？", "seed_id": 18, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-030", "kind": "memory", "query": "关于「电脑」，之前记录过什么？", "seed_id": 33916, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-031", "kind": "memory", "query": "用户对「路由」的偏好/要求是什么？", "seed_id": 2549, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-032", "kind": "memory", "query": "关于「CPOF」，之前记录过什么？", "seed_id": 13000, "workspace_id": "513c0dd5-c28c-4505-8881-0f680bfbc0af"}
+{"id": "m-033", "kind": "memory", "query": "有没有关于「reasoning」的硬规则？", "seed_id": 3554, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-034", "kind": "memory", "query": "「过程」的计划/下一步是什么？", "seed_id": 113, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-035", "kind": "memory", "query": "关于「文件名」，之前记录过什么？", "seed_id": 12, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-036", "kind": "memory", "query": "有没有关于「hosts」的硬规则？", "seed_id": 21145, "workspace_id": "63d527e6-7a3b-4d54-ac64-bef3452490a0"}
+{"id": "m-037", "kind": "memory", "query": "用户对「电脑」的偏好/要求是什么？", "seed_id": 21086, "workspace_id": "63d527e6-7a3b-4d54-ac64-bef3452490a0"}
+{"id": "m-038", "kind": "memory", "query": "之前关于「草稿」的决定是什么？", "seed_id": 190, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-039", "kind": "memory", "query": "有没有关于「沙箱」的硬规则？", "seed_id": 8742, "workspace_id": "deepseek-harness"}
+{"id": "m-040", "kind": "memory", "query": "关于「GitHub」，之前记录过什么？", "seed_id": 98, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-041", "kind": "memory", "query": "关于「rathole」，之前记录过什么？", "seed_id": 14071, "workspace_id": "deepseek-harness"}
+{"id": "m-042", "kind": "memory", "query": "关于「生命周期」，之前记录过什么？", "seed_id": 7, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-043", "kind": "memory", "query": "关于「AGENTS」，之前记录过什么？", "seed_id": 220, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-044", "kind": "memory", "query": "关于「memories」，之前记录过什么？", "seed_id": 215, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-045", "kind": "memory", "query": "关于「库存」，之前记录过什么？", "seed_id": 116, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-046", "kind": "memory", "query": "「systemd」的计划/下一步是什么？", "seed_id": 170, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-047", "kind": "memory", "query": "关于「插槽」，之前记录过什么？", "seed_id": 172, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-048", "kind": "memory", "query": "用户对「标准」的偏好/要求是什么？", "seed_id": 32229, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-049", "kind": "memory", "query": "关于「标题」，之前记录过什么？", "seed_id": 78, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-050", "kind": "memory", "query": "之前关于「结构化」的决定是什么？", "seed_id": 88, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-051", "kind": "memory", "query": "有没有关于「pkill」的硬规则？", "seed_id": 33567, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-052", "kind": "memory", "query": "「环境变量」的计划/下一步是什么？", "seed_id": 193, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-053", "kind": "memory", "query": "关于「stream」，之前记录过什么？", "seed_id": 156, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-054", "kind": "memory", "query": "之前关于「xiaoer」的决定是什么？", "seed_id": 33914, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-055", "kind": "memory", "query": "之前关于「过度」的决定是什么？", "seed_id": 7464, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-056", "kind": "memory", "query": "「网页」的计划/下一步是什么？", "seed_id": 96, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-057", "kind": "memory", "query": "关于「origin」，之前记录过什么？", "seed_id": 178, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-058", "kind": "memory", "query": "有没有关于「gptsol」的硬规则？", "seed_id": 4629, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-059", "kind": "memory", "query": "关于「github」，之前记录过什么？", "seed_id": 14065, "workspace_id": "deepseek-harness"}
+{"id": "m-060", "kind": "memory", "query": "关于「tree」，之前记录过什么？", "seed_id": 165, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-061", "kind": "memory", "query": "关于「systemPrompt」，之前记录过什么？", "seed_id": 33, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-062", "kind": "memory", "query": "「记忆系统」的计划/下一步是什么？", "seed_id": 145, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-063", "kind": "memory", "query": "有没有关于「基准」的硬规则？", "seed_id": 32435, "workspace_id": "deepseek-harness"}
+{"id": "m-064", "kind": "memory", "query": "关于「本体」，之前记录过什么？", "seed_id": 94, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-065", "kind": "memory", "query": "关于「matt」，之前记录过什么？", "seed_id": 146, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-066", "kind": "memory", "query": "关于「年份」，之前记录过什么？", "seed_id": 14069, "workspace_id": "deepseek-harness"}
+{"id": "m-067", "kind": "memory", "query": "关于「scope」，之前记录过什么？", "seed_id": 11, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-068", "kind": "memory", "query": "之前关于「事实」的决定是什么？", "seed_id": 258, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-069", "kind": "memory", "query": "关于「AstrBot」，之前记录过什么？", "seed_id": 124, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-070", "kind": "memory", "query": "「WebUI」这件事后来怎样了？", "seed_id": 16, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-071", "kind": "memory", "query": "之前关于「service」的决定是什么？", "seed_id": 174, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-072", "kind": "memory", "query": "关于「bash」，之前记录过什么？", "seed_id": 171, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-073", "kind": "memory", "query": "用户对「skill」的偏好/要求是什么？", "seed_id": 34333, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-074", "kind": "memory", "query": "有没有关于「规定」的硬规则？", "seed_id": 28325, "workspace_id": "331e4b00-39cf-4a32-b5a1-f15c1a396028"}
+{"id": "m-075", "kind": "memory", "query": "「repo」的计划/下一步是什么？", "seed_id": 97, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-076", "kind": "memory", "query": "之前关于「decay」的决定是什么？", "seed_id": 17, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-077", "kind": "memory", "query": "关于「Nebula」，之前记录过什么？", "seed_id": 14081, "workspace_id": "deepseek-harness"}
+{"id": "m-078", "kind": "memory", "query": "有没有关于「后续」的硬规则？", "seed_id": 34356, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-079", "kind": "memory", "query": "关于「auth」，之前记录过什么？", "seed_id": 203, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-080", "kind": "memory", "query": "有没有关于「pkill」的硬规则？", "seed_id": 19402, "workspace_id": "deepseek-harness"}
+{"id": "m-081", "kind": "memory", "query": "关于「LazyFish」，之前记录过什么？", "seed_id": 151, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-082", "kind": "memory", "query": "之前关于「append」的决定是什么？", "seed_id": 239, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-083", "kind": "memory", "query": "之前关于「cordis」的决定是什么？", "seed_id": 19, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-084", "kind": "memory", "query": "用户对「成本」的偏好/要求是什么？", "seed_id": 8199, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-085", "kind": "memory", "query": "用户对「加幂」的偏好/要求是什么？", "seed_id": 26223, "workspace_id": "deepseek-harness"}
+{"id": "m-086", "kind": "memory", "query": "关于「事件」，之前记录过什么？", "seed_id": 197, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-087", "kind": "memory", "query": "用户对「名称」的偏好/要求是什么？", "seed_id": 22778, "workspace_id": "2d98a449-244b-460c-bee0-db2d1783bb10"}
+{"id": "m-088", "kind": "memory", "query": "有没有关于「转述」的硬规则？", "seed_id": 11982, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-089", "kind": "memory", "query": "有没有关于「grep」的硬规则？", "seed_id": 3533, "workspace_id": "deepseek-harness"}
+{"id": "m-090", "kind": "memory", "query": "关于「workbench」，之前记录过什么？", "seed_id": 219, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-091", "kind": "memory", "query": "之前关于「雅思」的决定是什么？", "seed_id": 15081, "workspace_id": "fab11223-a414-4c36-8835-75b30e712ad9"}
+{"id": "m-092", "kind": "memory", "query": "关于「性能」，之前记录过什么？", "seed_id": 81, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-093", "kind": "memory", "query": "有没有关于「Decimal」的硬规则？", "seed_id": 6871, "workspace_id": "deepseek-harness"}
+{"id": "m-094", "kind": "memory", "query": "有没有关于「小鹅通」的硬规则？", "seed_id": 33915, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-095", "kind": "memory", "query": "关于「历史教训」，之前记录过什么？", "seed_id": 32230, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-096", "kind": "memory", "query": "用户对「结构化」的偏好/要求是什么？", "seed_id": 32321, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-097", "kind": "memory", "query": "用户对「笔记」的偏好/要求是什么？", "seed_id": 29521, "workspace_id": "deepseek-harness"}
+{"id": "m-098", "kind": "memory", "query": "关于「reject」，之前记录过什么？", "seed_id": 154, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-099", "kind": "memory", "query": "关于「身份」，之前记录过什么？", "seed_id": 26530, "workspace_id": "deepseek-harness"}
+{"id": "m-100", "kind": "memory", "query": "之前关于「AstrBot」的决定是什么？", "seed_id": 125, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-101", "kind": "memory", "query": "用户对「由子」的偏好/要求是什么？", "seed_id": 14972, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-102", "kind": "memory", "query": "关于「台子」，之前记录过什么？", "seed_id": 217, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-103", "kind": "memory", "query": "关于「草稿」，之前记录过什么？", "seed_id": 200, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-104", "kind": "memory", "query": "之前关于「importance」的决定是什么？", "seed_id": 112, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-105", "kind": "memory", "query": "之前关于「看板同」的决定是什么？", "seed_id": 188, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-106", "kind": "memory", "query": "之前关于「bundle」的决定是什么？", "seed_id": 20, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-107", "kind": "memory", "query": "用户对「终端」的偏好/要求是什么？", "seed_id": 14029, "workspace_id": "63d527e6-7a3b-4d54-ac64-bef3452490a0"}
+{"id": "m-108", "kind": "memory", "query": "关于「库存」，之前记录过什么？", "seed_id": 29361, "workspace_id": "2d98a449-244b-460c-bee0-db2d1783bb10"}
+{"id": "m-109", "kind": "memory", "query": "之前关于「crypto」的决定是什么？", "seed_id": 85, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-110", "kind": "memory", "query": "用户对「布局」的偏好/要求是什么？", "seed_id": 18262, "workspace_id": "63d527e6-7a3b-4d54-ac64-bef3452490a0"}
+{"id": "m-111", "kind": "memory", "query": "关于「React」，之前记录过什么？", "seed_id": 91, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-112", "kind": "memory", "query": "关于「GitHub」，之前记录过什么？", "seed_id": 14066, "workspace_id": "deepseek-harness"}
+{"id": "m-113", "kind": "memory", "query": "「全绿」这件事后来怎样了？", "seed_id": 210, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-114", "kind": "memory", "query": "用户对「色块」的偏好/要求是什么？", "seed_id": 10291, "workspace_id": "619c53ba-2369-4e98-b988-bdfac2e634f3"}
+{"id": "m-115", "kind": "memory", "query": "用户对「算法」的偏好/要求是什么？", "seed_id": 2550, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "m-116", "kind": "memory", "query": "有没有关于「YAML」的硬规则？", "seed_id": 31821, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-117", "kind": "memory", "query": "用户对「IdentityFile」的偏好/要求是什么？", "seed_id": 17960, "workspace_id": "63d527e6-7a3b-4d54-ac64-bef3452490a0"}
+{"id": "m-118", "kind": "memory", "query": "有没有关于「先报」的硬规则？", "seed_id": 27062, "workspace_id": "deepseek-harness"}
+{"id": "m-119", "kind": "memory", "query": "之前关于「本质」的决定是什么？", "seed_id": 66, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "m-120", "kind": "memory", "query": "用户对「技术」的偏好/要求是什么？", "seed_id": 6515, "workspace_id": "6e04a6dc-56c2-4e06-a58b-fd99674683ef"}
+{"id": "t-001", "kind": "task", "query": "帮我给 deepmemory 的抽取加一个持久化 pending 队列", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-002", "kind": "task", "query": "生产重启 dsh-web 之前要检查哪些条件？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-003", "kind": "task", "query": "memory_source 报 lossless JSON 错误怎么修？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-004", "kind": "task", "query": "给 session-query 的 5 个工具加 workspace 过滤要动哪些文件？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-005", "kind": "task", "query": "怎么把一条约束写进 literature bias 库？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-006", "kind": "task", "query": "dsh-web 升级到 0.2.1 后 toolFilter 报错怎么处理？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-007", "kind": "task", "query": "deepmemory 的 state_cards 表为什么要加 workspace_id？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-008", "kind": "task", "query": "我现在的记忆注入块是怎么拼出来的？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-009", "kind": "task", "query": "怎么在不重启的情况下让 preset 改动生效？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-010", "kind": "task", "query": "memory-server 的 v2 导入为什么旧版本会截断到 500 字？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-011", "kind": "task", "query": "dsh-bridge-tools 在 0.2.1 上重复注册工具怎么修？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-012", "kind": "task", "query": "怎么确认生产上没有 running 会话再重启？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-013", "kind": "task", "query": "抽取失败时怎么从 pending 恢复？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-014", "kind": "task", "query": "literature 的 bias 约束怎么注入到系统提示？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "t-015", "kind": "task", "query": "dsh-deepmemory 的测试集怎么跑？", "seed_id": null, "workspace_id": "bf4722bc-37d2-438f-b5dd-598d24a13cf5"}
+{"id": "n-001", "kind": "no_answer", "query": "火星基地的氧气配额是多少？", "seed_id": null, "workspace_id": ""}
+{"id": "n-002", "kind": "no_answer", "query": "蓝鲸项目的服务器密码轮换周期？", "seed_id": null, "workspace_id": ""}
+{"id": "n-003", "kind": "no_answer", "query": "上周三客户会议的纪要结论？", "seed_id": null, "workspace_id": ""}
+{"id": "n-004", "kind": "no_answer", "query": "南极科考站柴油发电机型号？", "seed_id": null, "workspace_id": ""}
+{"id": "n-005", "kind": "no_answer", "query": "月球背面中继卫星的发射窗口？", "seed_id": null, "workspace_id": ""}
+{"id": "n-006", "kind": "no_answer", "query": "海底光缆的检修船编号？", "seed_id": null, "workspace_id": ""}
+{"id": "n-007", "kind": "no_answer", "query": "紫金山天文台的望远镜口径？", "seed_id": null, "workspace_id": ""}
+{"id": "n-008", "kind": "no_answer", "query": "公司食堂下周菜单的成本核算？", "seed_id": null, "workspace_id": ""}
+{"id": "n-009", "kind": "no_answer", "query": "杭州亚运会场馆的座位数？", "seed_id": null, "workspace_id": ""}
+{"id": "n-010", "kind": "no_answer", "query": "深海探测器下潜深度的世界纪录保持者？", "seed_id": null, "workspace_id": ""}
