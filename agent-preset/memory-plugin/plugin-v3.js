@@ -1775,15 +1775,17 @@ function redactSensitive(text) {
     return {
       ok: true,
       memory_id: d.memory_id !== undefined ? d.memory_id : mid,
-      status: d.status,
-      storage_tier: d.storage_tier,
-      scope: d.scope,
-      source_count: d.source_count,
-      source_seq: d.source_seq,
+      // 0.2.1：工具输出必须是 lossless JSON——undefined 会被判为 not lossless，
+      // 这里把服务端可能缺失的可选字段显式落成 null/0/[]。
+      status: d.status !== undefined ? d.status : null,
+      storage_tier: d.storage_tier !== undefined ? d.storage_tier : null,
+      scope: d.scope !== undefined ? d.scope : null,
+      source_count: d.source_count !== undefined ? d.source_count : 0,
+      source_seq: d.source_seq !== undefined ? d.source_seq : null,
       related_memory_ids: Array.isArray(d.related_memory_ids) ? d.related_memory_ids : [],
       has_more: Boolean(d.has_more),
       next_cursor: d.next_cursor || null,
-      note: d.note,
+      note: d.note !== undefined ? d.note : null,
       text: pieces.join('\n'),
     }
   }
