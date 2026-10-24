@@ -51,3 +51,25 @@
 
 `scripts/eval/review/kimi_cases_30.json` + `kimi_instructions.md` 已备好，由用户转交 Kimi 复核 30 条；
 回收 labels 后与上表做三方一致性对比。
+
+## Kimi 第三复核（30 条重叠，2026-10-24 回收）
+
+- 输入：`scripts/eval/review/kimi_cases_30.json`；Kimi 输出：`scripts/eval/review/kimi_labels_30.jsonl`
+- 与独立复核员在同一 30 条上对比：
+
+| 指标 | Kimi | 复核员 | 一致性 |
+|---|---|---|---|
+| precision | 0.500 | 0.529 | Jaccard **0.843** |
+| seed_hit | 0.500 | 0.500 | **1.000** |
+| count_ok | 0.767 | 0.667 | **0.900** |
+
+- seed_hit 自洽检查：0 异常（`seed_id ∈ useful_ids` 与 seed_hit 完全一致）
+- 分歧最大：m-113 / m-064 / m-056（useful 集合完全相反，Jaccard 0）、m-023（0.5）、m-100（0.33）
+  - 这三条都是“有结果但未召回种子”的边界 case：Kimi 认为其中若干条对回答 query 有辅助价值，复核员按“必须直接可引用”判为无用。
+  - 说明：**边界判定（辅助 vs 直接可用）是剩余 15% 分歧的主要来源**，seed_hit 本身高度稳定（1.0）。
+
+## 三方结论
+
+- 评测口径可复现：seed_hit 三方一致率 1.0；useful 集合两两 Jaccard 0.84–0.90；
+- 145 例主指标以独立复核员为准（seed_hit 0.45、task precision 0.21、count_ok 0.56、no_answer 0.50）；
+- 下一阶段优先修：泛化偏好降权 > 空结果阈值 > 任务型重排。
