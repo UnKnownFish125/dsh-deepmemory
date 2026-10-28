@@ -1222,6 +1222,23 @@ function redactSensitive(text) {
         return base ? base + '\n\n' + guideTextFor(agent) : ''
       },
     }))
+  // ── 静态人格层（头部 section）：内容固定、只装配一次 → 不破坏前缀缓存 ──
+  if (systemPrompt && typeof systemPrompt.section === 'function') {
+    try {
+      const pluginDir = path.dirname(fileURLToPath(import.meta.url))
+      for (const spec of [
+        { name: 'memory:user-profile', file: 'USER.md', order: 110 },
+        { name: 'memory:persona', file: 'PERSONA.md', order: 120 },
+      ]) {
+        let text = ''
+        try { text = fs.readFileSync(path.join(pluginDir, spec.file), 'utf8').trim() } catch (e) { text = '' }
+        if (!text) continue
+        ctx.effect(() => systemPrompt.section({ name: spec.name, order: spec.order, text }))
+      }
+    } catch (e) {
+      console.error('[deepmemory] persona sections skipped: ' + (e && e.message ? e.message : String(e)))
+    }
+  }
   } else {
     console.error('[deepmemory] systemPrompt unavailable')
   }
